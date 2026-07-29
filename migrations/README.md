@@ -16,6 +16,8 @@ node --env-file=.env migrations/verify.mjs --database tidemark_dev
 
 Each numbered file contains exactly one idempotent schema-change statement. CockroachDB does not guarantee atomic rollback for multiple schema changes in one explicit transaction, so the runner applies one autocommit DDL statement and then records its LF-normalized SHA-256 in `schema_migrations`. A disconnect between DDL and ledger insert is repaired safely on rerun. An applied filename/checksum mismatch is fatal.
 
+Numbered migration files are immutable once released. Add a new numbered migration instead of editing an existing file. Before any manual recovery in the narrow DDL-applied/ledger-missing window, first confirm the `schema_migrations` ledger state.
+
 `schema_migrations` is global database control metadata and is the only table exempt from the domain rule that primary keys contain `tenant_id`.
 
 ## Tables
@@ -44,6 +46,7 @@ No Row-Level TTL is enabled.
 - `nightly_runs` materializes decision-log conclusions 13/16/17: schedule uniqueness, bounded single batch, lease/status/attempt state, revision-bearing source snapshot, and unique source fingerprint. Bedrock remains outside database transactions.
 - `memory_rebuild_queue` is deliberately content-free. It stores tenant/agent, the random deleted derived-memory ID, surviving source UUIDs, optional originating run, lease state, and no content/hash/embedding.
 - `memory_derivations_source_fk` is restrictive while the derived-memory FK cascades. A source cannot be deleted directly while provenance remains; the owner/admin forget path must traverse and delete derived descendants first.
+- `memory_derivations` treats an existing `(tenant_id, derived_memory_id, source_memory_id)` edge as an idempotent retry. Writers must not reuse a derived-memory ID for a different logical nightly/rebuild run.
 
 ## Verification
 
