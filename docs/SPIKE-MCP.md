@@ -54,7 +54,7 @@
 1. **Function URL 在本（新）账户实测 403（策略正确亦然）**——本项目定型 API Gateway HTTP API（$default→Lambda）
 2. **serverless-http 的 mock 请求缺 `rawHeaders`**，SDK 底层 Hono 转换依赖它导致 406——必须补 shim（见 handler.mjs）
 3. **当前 `serverless-http + API Gateway HTTP API buffered integration` 组合实测 SSE 不可用**（进程 Runtime.NodeJsExit），故 v1 固定 `enableJsonResponse: true` 无状态纯 JSON——与 SPEC stateless 设计一致。注：这是本栈组合的边界，非 AWS 平台能力上限——官方支持见 [Lambda response streaming](https://docs.aws.amazon.com/lambda/latest/dg/configuration-response-streaming.html) 与 [API Gateway response transfer mode](https://docs.aws.amazon.com/apigateway/latest/developerguide/response-transfer-mode.html)，本项目不采用
-4. **连接上界**：新账户 Lambda 总并发=10 且不可配 per-function reserved concurrency（实测被拒）；上界=账户并发(10)×pool.max(1)，限额提升后改用 reserved concurrency 收紧
-5. **PS5.1 脚本必须 ASCII-only 注释**（无 BOM 按 ANSI 解码，非 ASCII 字节破坏解析器）
+4. **并发活跃业务连接预算**：新账户 Lambda 总并发=10 且不可配 per-function reserved concurrency（实测被拒）；预算=账户并发(10)×pool.max(1)，idle/redeploy/admin socket 另计、留 headroom；限额提升后改用 reserved concurrency 收紧
+5. **本项目 PS5.1 兼容策略：.ps1 一律 ASCII-only 注释**（Windows PowerShell 5.1 将无 BOM 脚本按 ANSI 解码，非 ASCII 字节会破坏解析——带 BOM 或 PowerShell 7 无此问题，故为项目策略而非技术必然）
 
 - [ ] EventBridge Scheduler → Lambda 定时触发样例（P0-09 前完成）

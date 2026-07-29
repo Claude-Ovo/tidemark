@@ -8,11 +8,13 @@ for (let attempt = 1; ; attempt++) {
   c = new pg.Client({ connectionString: process.env.COCKROACH_DATABASE_URL, connectionTimeoutMillis: 8000 })
   try { await c.connect(); break }
   catch (e) {
+    await c.end().catch(() => {})   // 失败的 client 也要关，防句柄泄漏
     if (attempt >= 3) throw e
     console.error(`connect attempt ${attempt} failed (${e.code || e.message}), retrying...`)
     await new Promise(r => setTimeout(r, 1500 * attempt))
   }
 }
+try {
 if (process.argv.includes('--reset')) {
   await c.query('DROP TABLE IF EXISTS spike_probe')
   console.log('spike_probe dropped (--reset: previous spike evidence rows destroyed)')
@@ -37,4 +39,4 @@ if (!wantCols.every(x => cols.includes(x)) || JSON.stringify(pk) !== JSON.string
   await c.end(); process.exit(2)
 }
 console.log('spike_probe ready (agent-scoped PK, VECTOR column, schema shape verified)')
-await c.end()
+} finally { await c.end().catch(() => {}) }   // 查询异常也保证连接关闭
