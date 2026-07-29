@@ -28,16 +28,18 @@ export const inSerializableTx = async (fn, label) => {
       await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
       const result = await fn(client)
       await client.query('COMMIT')
+      client.release()                    // 健康归还
       return result
     } catch (e) {
-      if (client) await client.query('ROLLBACK').catch(() => {})
+      if (client) {
+        await client.query('ROLLBACK').catch(() => {})
+        client.release(e)                 // 带错误归还 = 销毁，防止死连接回池被反复领取
+      }
       const retryable = e.code === '40001' || isRetryableDatabaseError(e)
       if (!retryable || attempt >= 5) throw e
       const delay = Math.min(4000, 250 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 200)
       console.error(JSON.stringify({ evt: 'tx_retry', label, attempt, code: e.code }))
       await sleep(delay)
-    } finally {
-      client?.release()
     }
   }
 }

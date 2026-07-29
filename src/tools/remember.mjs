@@ -6,8 +6,13 @@ import { runAdmissionGate, QUARANTINE_TTL_HOURS } from '../lib/admission.mjs'
 import { embed } from '../lib/embed.mjs'
 import { canonicalDigest, toVectorLiteral } from '../lib/vector-canonical.mjs'
 
-const HMAC_KEY = process.env.TIDEMARK_HMAC_KEY || 'dev-only-hmac-key'
+// fail-closed：无显式 key 且未明确声明不安全 dev 模式则拒绝启动；key 永不落日志
+const HMAC_KEY = process.env.TIDEMARK_HMAC_KEY
+  ?? (process.env.TIDEMARK_DEV_INSECURE === '1' ? 'dev-only-hmac-key' : null)
+if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
 const BASE_HALF_LIFE_HOURS = { event: 72, experience: 2160 }
+// TODO(P0-06 显式收口，Codex 裁定)：next_transition_at 初始化公式属 P0-06——
+// 届时必须 (a) remember 落行时初始化 (b) 回填此前的 NULL 行；两者都进 P0-06 验收测试。
 
 const payloadHmac = (payload) =>
   createHmac('sha256', HMAC_KEY).update(JSON.stringify(payload)).digest()
@@ -17,8 +22,10 @@ export const rememberTool = async ({ principal, content, kind, episode_id, reque
   if (!request_id || typeof request_id !== 'string') return { ok: false, error: 'request_id_required' }
   if (!episode_id || typeof episode_id !== 'string') return { ok: false, error: 'episode_id_required' }
 
+  // 先过闸门拿 canonical——HMAC/敏感筛/embedding/落库全部使用同一 canonical content
+  const gate = runAdmissionGate({ content, kind, importance })
   const { tenant_id, agent_id } = principal
-  const hmac = payloadHmac({ content, kind: kind ?? null, episode_id, importance: importance ?? null })
+  const hmac = payloadHmac({ content: gate.canonical ?? content, kind: kind ?? null, episode_id, importance: importance ?? null })
 
   // 幂等 preflight（事务外，省 embedding 钱；事务内还有二次防线）
   const existing = await inSerializableTx(async (c) => {
@@ -32,8 +39,6 @@ export const rememberTool = async ({ principal, content, kind, episode_id, reque
     return existing.response_json
   }
 
-  // 写入卫生闸门（确定性，无 LLM）
-  const gate = runAdmissionGate({ content, kind, importance })
   const imp = importance ?? 0.5
   const layer = 'event'                       // agent tool 只能写事件层；experience 由 nightly reflection 产生
   const source = 'agent_inferred'             // server 按调用路径分配，不信 client 自报（结论 28）
@@ -41,7 +46,7 @@ export const rememberTool = async ({ principal, content, kind, episode_id, reque
   // accepted 才 embedding（事务外，Bedrock/stub 网络调用不进事务——结论 23）
   let f32 = null, embeddingMeta = null
   if (gate.admission === 'accepted') {
-    const e = await embed(content)
+    const e = await embed(gate.canonical)
     f32 = e.f32
     embeddingMeta = { model_id: e.model_id, provider: e.provider, embedding_sha256: canonicalDigest(e.f32) }
   }
@@ -72,7 +77,7 @@ export const rememberTool = async ({ principal, content, kind, episode_id, reque
            source, admission, quarantine_expires_at, importance, strength_anchor, strength_anchor_at,
            last_rewarded_at, half_life_hours)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, 1.0, now(), now(), $13)`,
-        [tenant_id, agent_id, memory_id, layer, kind ?? null, episode_id, content,
+        [tenant_id, agent_id, memory_id, layer, kind ?? null, episode_id, gate.canonical,
          f32 ? toVectorLiteral(f32) : null,
          source, gate.admission,
          gate.admission === 'quarantined' ? new Date(Date.now() + QUARANTINE_TTL_HOURS * 3600e3) : null,

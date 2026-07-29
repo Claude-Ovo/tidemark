@@ -8,3 +8,5 @@ __pycache__/
 *.zip
 out.json
 .lambda-env.json
+*.err
+src/server.log
