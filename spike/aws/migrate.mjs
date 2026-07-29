@@ -1,8 +1,13 @@
-// spike 表迁移（从 tool 调用里移出，deploy 时执行一次）
-import 'dotenv/config'
+// spike 表迁移。用法: node --env-file=../../.env migrate.mjs [--reset]
+// --reset 会 DROP 重建（显式销毁 spike 证据行，慎用）；无 --reset 时只做幂等 CREATE IF NOT EXISTS
 import pg from 'pg'
+if (!process.env.COCKROACH_DATABASE_URL) { console.error('missing COCKROACH_DATABASE_URL (use node --env-file=../../.env)'); process.exit(1) }
 const c = new pg.Client({ connectionString: process.env.COCKROACH_DATABASE_URL })
 await c.connect()
+if (process.argv.includes('--reset')) {
+  await c.query('DROP TABLE IF EXISTS spike_probe')
+  console.log('spike_probe dropped (--reset: previous spike evidence rows destroyed)')
+}
 await c.query(`CREATE TABLE IF NOT EXISTS spike_probe (
   tenant_id STRING NOT NULL,
   agent_id  STRING NOT NULL,

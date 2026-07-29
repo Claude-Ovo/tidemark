@@ -7,3 +7,4 @@ __pycache__/
 .venv/
 *.zip
 out.json
+.lambda-env.json

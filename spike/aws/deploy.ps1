@@ -1,27 +1,42 @@
 # Tidemark spike deploy (reproduces the stub-green state)
-# Prereqs: aws cli configured; ../../.env with COCKROACH_DATABASE_URL
+# Prereqs: aws cli configured; repo-root .env with COCKROACH_DATABASE_URL
 # Infra facts: nodejs22.x, 512MB, timeout 30s, API Gateway HTTP API payload v2 ($default -> Lambda)
-# NOTE: first-time infra creation (role/function/api) is documented in SPIKE-MCP.md, not automated here.
+# First-time infra creation (role/function/api) is documented in SPIKE-MCP.md, not automated here.
+# NOTE: ASCII-only comments. PS5.1 reads BOM-less scripts as ANSI; non-ASCII bytes corrupt the parser.
+param([switch]$ResetSpikeTable)
 $ErrorActionPreference = "Stop"
 $aws = "C:\Program Files\Amazon\AWSCLIv2\aws.exe"
 $fn = "tidemark-spike"
 
+Set-Location $PSScriptRoot
+$envFile = (Resolve-Path (Join-Path $PSScriptRoot '..\..\.env')).Path
+if (-not (Test-Path $envFile)) { throw ".env not found at $envFile" }
+
+# Extract credential BEFORE any npm.cmd call: after npm runs, PS5.1 native stdout capture misbehaves.
+# Read via node --env-file (same parser as runtime).
+$dburl = node --env-file=$envFile -e "process.stdout.write(process.env.COCKROACH_DATABASE_URL||'')"
+if ([string]::IsNullOrWhiteSpace($dburl)) { throw "COCKROACH_DATABASE_URL empty at script start" }
+
 npm ci --omit=dev | Out-Null
-node migrate.mjs
+if ($ResetSpikeTable) { node --env-file=$envFile migrate.mjs --reset } else { node --env-file=$envFile migrate.mjs }
+if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
 Compress-Archive -Path handler.mjs,package.json,node_modules -DestinationPath spike.zip -Force
 
-# 凭据不进命令行：env 配置经 --cli-input-json 临时文件下发，用后即删
-# TODO(P0-09): 切 Secrets Manager ARN + Lambda 内取值，函数配置不再持明文
-$dburl = (Get-Content ..\..\.env | Where-Object { $_ -match '^COCKROACH_DATABASE_URL=' }) -replace '^COCKROACH_DATABASE_URL=',''
+# Credential never enters argv: env config goes through a BOM-less JSON file, deleted afterwards.
+# TODO(P0-09): switch to Secrets Manager ARN so function config no longer holds plaintext.
 $cfg = @{ FunctionName = $fn; Environment = @{ Variables = @{ COCKROACH_DATABASE_URL = $dburl; EMBED_PROVIDER = "stub" } } } | ConvertTo-Json -Depth 5
-$tmp = New-TemporaryFile
+$cfgFile = Join-Path $PSScriptRoot '.lambda-env.json'
 try {
-  # PS5.1 的 -Encoding utf8 带 BOM 会呛 aws cli，用无 BOM 写入
-  [IO.File]::WriteAllText($tmp.FullName, $cfg, (New-Object Text.UTF8Encoding($false)))
-  & $aws lambda update-function-configuration --cli-input-json ("file://" + ($tmp.FullName -replace '\\','/')) --query LastUpdateStatus --output text
-} finally { Remove-Item $tmp -Force -Confirm:$false }
+  [IO.File]::WriteAllText($cfgFile, $cfg, (New-Object Text.UTF8Encoding($false)))
+  & $aws lambda update-function-configuration --cli-input-json ("file://" + ($cfgFile -replace '\\','/')) --query LastUpdateStatus --output text
+} finally { Remove-Item $cfgFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
 
 & $aws lambda wait function-updated-v2 --function-name $fn
 & $aws lambda update-function-code --function-name $fn --zip-file fileb://spike.zip --query LastUpdateStatus --output text
 & $aws lambda wait function-updated-v2 --function-name $fn
-Write-Host "deployed (EMBED_PROVIDER=stub). Switch to bedrock by editing Variables after allowlisting approval."
+# Downstream connection bound: this NEW account has total Lambda concurrency limit = 10 and
+# reserving any slice would drop unreserved below the minimum (10), so per-function reserved
+# concurrency is NOT configurable here. The effective bound is account-level:
+#   account_concurrency(10) x pool.max(1) = at most 10 business conns (+admin/migration).
+# Revisit reserved concurrency after an account limit increase (tracked in SPIKE-MCP.md).
+Write-Host "deployed (EMBED_PROVIDER=stub). Conn bound = account concurrency 10 x pool 1. Switch to bedrock after allowlisting."

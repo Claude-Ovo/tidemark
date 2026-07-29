@@ -15,25 +15,27 @@ const connect = async (headers) => {
   await client.connect(new StreamableHTTPClientTransport(new URL(url + '/mcp'), { requestInit: { headers } }))
   return client
 }
+// 异常路径也保证连接关闭，不拖住失败进程
+const withClient = async (headers, fn) => {
+  const c = await connect(headers)
+  try { return await fn(c) } finally { await c.close().catch(() => {}) }
+}
 const callJson = async (c, name, args) => {
   const r = await c.callTool({ name, arguments: args })
   return { isError: r.isError === true, body: JSON.parse(r.content[0].text) }
 }
 
 // 1. 无 auth：probe 必须以 isError 拒绝（协议语义，不只是正文 ok=false）
-{
-  const c = await connect({})
+await withClient({}, async (c) => {
   const { isError, body } = await callJson(c, 'probe_memory', { content: 'x' })
   assert.equal(isError, true, 'unauthorized must be isError:true at MCP level')
   assert.equal(body.ok, false)
-  await c.close()
   console.log('PASS 1 unauthorized probe rejected with isError')
-}
+})
 
 // 2. 端到端：probe → lookup 回查 DB 内真实向量并核验 digest
 let probeRequestId
-{
-  const c = await connect({ 'x-tidemark-auth': 'spike-demo-key' })
+await withClient({ 'x-tidemark-auth': 'spike-demo-key' }, async (c) => {
   const t0 = Date.now()
   const { body: probe } = await callJson(c, 'probe_memory', { content: 'the tide leaves a mark' })
   assert.equal(probe.ok, true, `probe failed: ${JSON.stringify(probe)}`)
@@ -47,43 +49,39 @@ let probeRequestId
   assert.equal(lookup.digest_match, true, 'digest recomputed from DB vector must match stored digest')
   assert.equal(lookup.stored_sha256, probe.embedding_sha256, 'DB digest matches probe-time digest')
   probeRequestId = probe.request_id
-  await c.close()
   console.log(`PASS 2 end-to-end ${chainLabel} + digest verified (${Date.now() - t0}ms) request_id=${probe.request_id}`)
-}
+})
 
 // 3. 越权隔离：同 tenant 第二个 agent 拿 request_id 不得查到第一 agent 的行
-{
-  const c = await connect({ 'x-tidemark-auth': 'spike-second-key' })
+await withClient({ 'x-tidemark-auth': 'spike-second-key' }, async (c) => {
   const { body } = await callJson(c, 'probe_lookup', { request_id: probeRequestId })
   assert.equal(body.ok, false, 'cross-agent lookup must fail (agent-scoped)')
   assert.equal(body.error, 'not_found_in_scope')
-  await c.close()
   console.log('PASS 3 cross-agent isolation enforced')
-}
+})
 
 // 4. 未知 tool 报错后 warm 容器仍绿
-{
-  const c = await connect({ 'x-tidemark-auth': 'spike-demo-key' })
+await withClient({ 'x-tidemark-auth': 'spike-demo-key' }, async (c) => {
   const bad = await c.callTool({ name: 'nope', arguments: {} }).catch(e => ({ isError: true, caught: e.message }))
   assert.ok(bad.isError, 'unknown tool surfaces as error')
-  await c.close()
-  const c2 = await connect({})
+})
+await withClient({}, async (c2) => {
   const pong = (await c2.callTool({ name: 'ping', arguments: { msg: 'still alive' } })).content[0].text
   assert.ok(pong.includes('still alive'))
-  await c2.close()
   console.log('PASS 4 error path does not poison warm container')
-}
+})
 
-// 5. 并发：pool max=1 下 4 路并发 probe 全部成功（排队而非失败）
+// 5. 并发：4 concurrent invocations succeed（注：Lambda 每并发请求独立执行环境，
+//    此场景不证明单 pool 排队；连接上界由 reserved_concurrency(4) x pool.max(1) 控制，
+//    扩容行为以 CloudWatch 不同 log stream 为证——见 SPIKE-EVIDENCE.md）
 {
-  const cs = await Promise.all([1, 2, 3, 4].map(() => connect({ 'x-tidemark-auth': 'spike-demo-key' })))
   const t0 = Date.now()
-  const rs = await Promise.all(cs.map((c, i) => callJson(c, 'probe_memory', { content: `concurrent-${i}` })))
+  const settled = await Promise.allSettled([1, 2, 3, 4].map((i) =>
+    withClient({ 'x-tidemark-auth': 'spike-demo-key' }, (c) => callJson(c, 'probe_memory', { content: `concurrent-${i}` }))))
+  const rs = settled.map((s, i) => { assert.equal(s.status, 'fulfilled', `concurrent probe ${i} rejected: ${s.reason}`); return s.value })
   rs.forEach((r, i) => assert.equal(r.body.ok, true, `concurrent probe ${i} failed`))
-  const ids = new Set(rs.map(r => r.body.request_id))
-  assert.equal(ids.size, 4, 'four distinct request_ids')
-  await Promise.all(cs.map(c => c.close()))
-  console.log(`PASS 5 concurrency under pool max=1: 4/4 ok (${Date.now() - t0}ms total)`)
+  assert.equal(new Set(rs.map(r => r.body.request_id)).size, 4, 'four distinct request_ids')
+  console.log(`PASS 5 four concurrent invocations succeed (${Date.now() - t0}ms total)`)
 }
 
 console.log(`ALL SPIKE ASSERTIONS PASSED (provider=${expectedProvider})`)

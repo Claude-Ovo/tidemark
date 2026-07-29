@@ -1,4 +1,14 @@
-# P0-01 端到端证据（stub run，2026-07-29）
+# P0-01 端到端证据（stub run，2026-07-29，第三轮返工后）
+
+## 最新一轮（digest float32 修复 + 全 ASCII 部署脚本后）
+
+- 断言输出：五场景 ALL PASS，`PASS 2 ... digest verified (1346ms) request_id=ffdf3b8f-4ab4-4515-9d11-f055851d8833`
+- digest 回归：`digest-test.mjs` 三组全过（含 Codex 反例值 0.678750162244703 的模拟 roundtrip）
+- **冷启动证据**：部署替换代码后环境全回收，CloudWatch 记录 3 条 `INIT_START`（nodejs:22.v91），随后测试全过 = 冷启动后 DB 重连成立
+- **并发/扩容证据**：并发场景窗口内出现 **6 个不同 log stream**（多执行环境各持一份 pool）——确认 Lambda 并发=多环境扩容而非单池排队；连接上界 = 账户并发上限(10) × pool.max(1)（新账户不可配置 per-function reserved concurrency：预留任意值会使 unreserved 低于最低值 10，实测被拒；限额提升后再启用，见 deploy.ps1 注释）
+- **工程附加发现**：PS5.1 将无 BOM 脚本按 ANSI/GBK 解码，非 ASCII 注释字节会随机破坏解析器（本轮"提取空值/JSON 无效/括号错误"三个灵异现象同一根因）——仓库 .ps1 一律 ASCII-only 注释
+
+## 首轮记录（历史，digest 算法当时尚有 float32 缺陷）
 
 同一 `request_id` 贯穿三处，无正文无密钥：
 

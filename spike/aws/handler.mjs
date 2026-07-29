@@ -47,10 +47,21 @@ const PROVIDER = process.env.EMBED_PROVIDER || 'bedrock'
 if (!embedProviders[PROVIDER]) throw new Error(`invalid EMBED_PROVIDER "${PROVIDER}" (expected bedrock|stub)`)
 const embed = embedProviders[PROVIDER]
 
-// canonical digest：4 位小数定点化后 sha256——两侧（写入前/读回后）同一算法，抗 float32 roundtrip
-const canonicalDigest = (vec) => createHash('sha256').update(vec.map(v => v.toFixed(4)).join(',')).digest('hex')
-const toVectorLiteral = (vec) => '[' + vec.map(v => v.toFixed(6)).join(',') + ']'
-const parseVector = (s) => s.replace(/^\[|\]$/g, '').split(',').map(Number)
+// canonical 表示：先统一量化为 float32（与 CRDB VECTOR 存储精度一致），
+// vector literal 与 digest 都从同一组 float32 值生成——写前与 DB 读回走同一路径，roundtrip 稳定
+const toF32 = (vec) => {
+  if (vec.length !== 512) throw new Error(`embedding length ${vec.length} != 512`)
+  const f = new Float32Array(512)
+  for (let i = 0; i < 512; i++) {
+    const v = Math.fround(vec[i])
+    if (!Number.isFinite(v)) throw new Error(`non-finite component at ${i}`)
+    f[i] = v
+  }
+  return f
+}
+const canonicalDigest = (f32) => createHash('sha256').update(Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength)).digest('hex')
+const toVectorLiteral = (f32) => '[' + Array.from(f32, v => String(v)).join(',') + ']'  // String(float32值) 精确 roundtrip
+const parseVector = (s) => toF32(s.replace(/^\[|\]$/g, '').split(',').map(Number))
 
 // spike 专用 auth 映射：两个受控 principal（第二个用于越权测试）
 const AUTH_MAP = {
@@ -77,10 +88,11 @@ app.post('/mcp', async (req, res) => {
     if (!principal) return unauthorized()
     const request_id = randomUUID()
     const { embedding, model_id, provider } = await embed(content)
-    const digest = canonicalDigest(embedding)
+    const f32 = toF32(embedding)
+    const digest = canonicalDigest(f32)
     await getPool().query(
       'INSERT INTO spike_probe (tenant_id, agent_id, request_id, model_id, embedding, embedding_sha256) VALUES ($1,$2,$3,$4,$5,$6)',
-      [principal.tenant_id, principal.agent_id, request_id, model_id, toVectorLiteral(embedding), digest])
+      [principal.tenant_id, principal.agent_id, request_id, model_id, toVectorLiteral(f32), digest])
     console.log(JSON.stringify({ evt: 'probe_memory', request_id, tenant_id: principal.tenant_id, agent_id: principal.agent_id, provider, dims: embedding.length }))
     return { content: [{ type: 'text', text: JSON.stringify({ ok: true, request_id, tenant_id: principal.tenant_id, agent_id: principal.agent_id, model_id, provider, embedding_sha256: digest }) }] }
   })
