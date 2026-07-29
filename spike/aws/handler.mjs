@@ -47,21 +47,8 @@ const PROVIDER = process.env.EMBED_PROVIDER || 'bedrock'
 if (!embedProviders[PROVIDER]) throw new Error(`invalid EMBED_PROVIDER "${PROVIDER}" (expected bedrock|stub)`)
 const embed = embedProviders[PROVIDER]
 
-// canonical 表示：先统一量化为 float32（与 CRDB VECTOR 存储精度一致），
-// vector literal 与 digest 都从同一组 float32 值生成——写前与 DB 读回走同一路径，roundtrip 稳定
-const toF32 = (vec) => {
-  if (vec.length !== 512) throw new Error(`embedding length ${vec.length} != 512`)
-  const f = new Float32Array(512)
-  for (let i = 0; i < 512; i++) {
-    const v = Math.fround(vec[i])
-    if (!Number.isFinite(v)) throw new Error(`non-finite component at ${i}`)
-    f[i] = v
-  }
-  return f
-}
-const canonicalDigest = (f32) => createHash('sha256').update(Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength)).digest('hex')
-const toVectorLiteral = (f32) => '[' + Array.from(f32, v => String(v)).join(',') + ']'  // String(float32值) 精确 roundtrip
-const parseVector = (s) => toF32(s.replace(/^\[|\]$/g, '').split(',').map(Number))
+// canonical 化唯一实现见 vector-canonical.mjs（handler 与测试共用）
+import { toF32, canonicalDigest, toVectorLiteral, parseVector } from './vector-canonical.mjs'
 
 // spike 专用 auth 映射：两个受控 principal（第二个用于越权测试）
 const AUTH_MAP = {

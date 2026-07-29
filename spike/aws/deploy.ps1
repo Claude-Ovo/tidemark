@@ -8,6 +8,11 @@ $ErrorActionPreference = "Stop"
 $aws = "C:\Program Files\Amazon\AWSCLIv2\aws.exe"
 $fn = "tidemark-spike"
 
+# PS5.1 does NOT turn native non-zero exits into terminating errors; assert after EVERY native step.
+function Assert-NativeSuccess([string]$step) {
+  if ($LASTEXITCODE -ne 0) { throw "step failed: $step (exit $LASTEXITCODE)" }
+}
+
 Set-Location $PSScriptRoot
 $envFile = (Resolve-Path (Join-Path $PSScriptRoot '..\..\.env')).Path
 if (-not (Test-Path $envFile)) { throw ".env not found at $envFile" }
@@ -15,12 +20,14 @@ if (-not (Test-Path $envFile)) { throw ".env not found at $envFile" }
 # Extract credential BEFORE any npm.cmd call: after npm runs, PS5.1 native stdout capture misbehaves.
 # Read via node --env-file (same parser as runtime).
 $dburl = node --env-file=$envFile -e "process.stdout.write(process.env.COCKROACH_DATABASE_URL||'')"
+Assert-NativeSuccess "env extraction"
 if ([string]::IsNullOrWhiteSpace($dburl)) { throw "COCKROACH_DATABASE_URL empty at script start" }
 
 npm ci --omit=dev | Out-Null
+Assert-NativeSuccess "npm ci"
 if ($ResetSpikeTable) { node --env-file=$envFile migrate.mjs --reset } else { node --env-file=$envFile migrate.mjs }
-if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
-Compress-Archive -Path handler.mjs,package.json,node_modules -DestinationPath spike.zip -Force
+Assert-NativeSuccess "migrate (schema mismatch? try -ResetSpikeTable)"
+Compress-Archive -Path handler.mjs,vector-canonical.mjs,package.json,node_modules -DestinationPath spike.zip -Force
 
 # Credential never enters argv: env config goes through a BOM-less JSON file, deleted afterwards.
 # TODO(P0-09): switch to Secrets Manager ARN so function config no longer holds plaintext.
@@ -29,11 +36,15 @@ $cfgFile = Join-Path $PSScriptRoot '.lambda-env.json'
 try {
   [IO.File]::WriteAllText($cfgFile, $cfg, (New-Object Text.UTF8Encoding($false)))
   & $aws lambda update-function-configuration --cli-input-json ("file://" + ($cfgFile -replace '\\','/')) --query LastUpdateStatus --output text
+  Assert-NativeSuccess "update-function-configuration"
 } finally { Remove-Item $cfgFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
 
 & $aws lambda wait function-updated-v2 --function-name $fn
+Assert-NativeSuccess "wait after configuration"
 & $aws lambda update-function-code --function-name $fn --zip-file fileb://spike.zip --query LastUpdateStatus --output text
+Assert-NativeSuccess "update-function-code"
 & $aws lambda wait function-updated-v2 --function-name $fn
+Assert-NativeSuccess "wait after code update"
 # Downstream connection bound: this NEW account has total Lambda concurrency limit = 10 and
 # reserving any slice would drop unreserved below the minimum (10), so per-function reserved
 # concurrency is NOT configurable here. The effective bound is account-level:

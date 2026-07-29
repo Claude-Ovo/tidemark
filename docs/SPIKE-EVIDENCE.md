@@ -34,4 +34,6 @@ ALL SPIKE ASSERTIONS PASSED (provider=stub)
 
 **待补（Bedrock allowlisting 批准后 24h 内）**：同套件以 `expected_provider=bedrock` 重跑，断言 model_id=amazon.titan-embed-text-v2:0，三处证据重新采集。
 
-复现：`spike/aws/deploy.ps1`（migrate + 打包 + 无 BOM cli-input-json 下发 env + wait），再跑 client-test。
+复现：`spike/aws/deploy.ps1`（migrate + 打包 + 无 BOM cli-input-json 下发 env + wait + 每步退出码断言），再跑 `node client-test.mjs <url> stub` 与 `node digest-test.mjs`（固定 seed 20260729）。
+**从旧 schema（commit a4bee54 一代表）升级**：必须 `.\deploy.ps1 -ResetSpikeTable`——会销毁此前 spike 证据行（本轮实际执行过 reset，旧行已弃）；migrate 会校验 schema 形态，旧表存在而未 reset 时显式失败并提示，不静默放过。
+连接措辞：账户并发(10)×pool.max(1) 是**并发活跃业务连接预算**，idle/redeploy/admin socket 另计，留 headroom。

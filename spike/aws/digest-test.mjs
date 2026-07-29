@@ -1,39 +1,43 @@
-// digest 正规化回归测试：含 Codex 给出的 float32 roundtrip 反例。node digest-test.mjs，退出码生效
+// digest canonical 化回归测试——import 生产实现本体（vector-canonical.mjs），不复制
+// node digest-test.mjs，退出码生效。随机批次用固定 seed，证据可复现。
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { DIMS, toF32, canonicalDigest, toVectorLiteral, parseVector } from './vector-canonical.mjs'
 
-const toF32 = (vec) => {
-  const f = new Float32Array(vec.length)
-  for (let i = 0; i < vec.length; i++) { const v = Math.fround(vec[i]); assert.ok(Number.isFinite(v)); f[i] = v }
-  return f
+// mulberry32：确定性 PRNG，seed 固定
+const mulberry32 = (seed) => () => {
+  seed |= 0; seed = (seed + 0x6D2B79F5) | 0
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
 }
-const digest = (f32) => createHash('sha256').update(Buffer.from(f32.buffer)).digest('hex')
-const literal = (f32) => '[' + Array.from(f32, v => String(v)).join(',') + ']'
-const parse = (s) => toF32(s.replace(/^\[|\]$/g, '').split(',').map(Number))
 
-// 1. Codex 反例：旧算法在此值上必炸，新算法必须稳定
+// 1. Codex 反例：float32 roundtrip 必须稳定
 {
-  const raw = [0.678750162244703, ...Array(511).fill(0)]
+  const raw = [0.678750162244703, ...Array(DIMS - 1).fill(0)]
   const f32 = toF32(raw)
-  const d1 = digest(f32)
-  const roundtrip = parse(literal(f32))   // 模拟 写literal→DB float32→读text→parse
-  assert.equal(digest(roundtrip), d1, 'counterexample value must survive roundtrip')
+  const d1 = canonicalDigest(f32)
+  const roundtrip = parseVector(toVectorLiteral(f32))
+  assert.equal(canonicalDigest(roundtrip), d1, 'counterexample must survive roundtrip')
   console.log('PASS counterexample 0.678750162244703 roundtrip-stable')
 }
 
-// 2. 1000 个随机 double 分量批量 roundtrip
+// 2. 固定 seed 随机批次 roundtrip（20 x 512）
 {
+  const rand = mulberry32(20260729)
   for (let t = 0; t < 20; t++) {
-    const raw = Array.from({ length: 512 }, () => Math.random() * 2 - 1)
+    const raw = Array.from({ length: DIMS }, () => rand() * 2 - 1)
     const f32 = toF32(raw)
-    assert.equal(digest(parse(literal(f32))), digest(f32), `random batch ${t} roundtrip`)
+    assert.equal(canonicalDigest(parseVector(toVectorLiteral(f32))), canonicalDigest(f32), `seeded batch ${t}`)
   }
-  console.log('PASS 20x512 random doubles roundtrip-stable')
+  console.log('PASS 20x512 seeded(20260729) roundtrip-stable')
 }
 
-// 3. 边界：非法长度与非有限值必须抛
+// 3. 负例四连：511 / 513 / NaN / Infinity 必须抛
 {
-  assert.throws(() => { const f = toF32([NaN]); digest(f) }, 'NaN must throw')
-  console.log('PASS non-finite rejected')
+  assert.throws(() => toF32(Array(DIMS - 1).fill(0)), /length 511/, '511 must throw')
+  assert.throws(() => toF32(Array(DIMS + 1).fill(0)), /length 513/, '513 must throw')
+  assert.throws(() => toF32([NaN, ...Array(DIMS - 1).fill(0)]), /non-finite/, 'NaN must throw')
+  assert.throws(() => toF32([Infinity, ...Array(DIMS - 1).fill(0)]), /non-finite/, 'Infinity must throw')
+  console.log('PASS negatives 511/513/NaN/Infinity all rejected')
 }
 console.log('ALL DIGEST TESTS PASSED')

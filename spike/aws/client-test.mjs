@@ -72,8 +72,8 @@ await withClient({}, async (c2) => {
 })
 
 // 5. 并发：4 concurrent invocations succeed（注：Lambda 每并发请求独立执行环境，
-//    此场景不证明单 pool 排队；连接上界由 reserved_concurrency(4) x pool.max(1) 控制，
-//    扩容行为以 CloudWatch 不同 log stream 为证——见 SPIKE-EVIDENCE.md）
+//    此场景不证明单 pool 排队；并发活跃业务连接预算 = 账户并发上限(10) x pool.max(1)，
+//    idle/redeploy/admin socket 另计；扩容行为以 CloudWatch 不同 log stream 为证）
 {
   const t0 = Date.now()
   const settled = await Promise.allSettled([1, 2, 3, 4].map((i) =>
