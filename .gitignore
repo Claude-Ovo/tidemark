@@ -10,3 +10,4 @@ out.json
 .lambda-env.json
 *.err
 src/server.log
+*.out

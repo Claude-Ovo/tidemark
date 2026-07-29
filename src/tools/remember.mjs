@@ -6,10 +6,10 @@ import { runAdmissionGate, QUARANTINE_TTL_HOURS } from '../lib/admission.mjs'
 import { embed } from '../lib/embed.mjs'
 import { canonicalDigest, toVectorLiteral } from '../lib/vector-canonical.mjs'
 
-// fail-closed：无显式 key 且未明确声明不安全 dev 模式则拒绝启动；key 永不落日志
-const HMAC_KEY = process.env.TIDEMARK_HMAC_KEY
-  ?? (process.env.TIDEMARK_DEV_INSECURE === '1' ? 'dev-only-hmac-key' : null)
-if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
+// fail-closed：非空 key 判断经 config.mjs（.env.example 复制出的空串不算已配置）；key 永不落日志
+import { resolveHmacKey } from '../lib/config.mjs'
+const HMAC_KEY = resolveHmacKey(process.env)
+if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
 const BASE_HALF_LIFE_HOURS = { event: 72, experience: 2160 }
 // TODO(P0-06 显式收口，Codex 裁定)：next_transition_at 初始化公式属 P0-06——
 // 届时必须 (a) remember 落行时初始化 (b) 回填此前的 NULL 行；两者都进 P0-06 验收测试。

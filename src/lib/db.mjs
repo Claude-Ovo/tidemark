@@ -2,13 +2,12 @@
 import pg from 'pg'
 import { withDatabase, isRetryableDatabaseError, sleep } from '../../migrations/db.mjs'
 
-const base = process.env.COCKROACH_DATABASE_URL
-if (!base) throw new Error('missing COCKROACH_DATABASE_URL')
-const dbName = process.env.TIDEMARK_DATABASE || 'tidemark_dev'
-
 let pool
 export const getPool = () => {
   if (!pool) {
+    const base = process.env.COCKROACH_DATABASE_URL   // 惰性检查：单测注入 fake pool 时不需要真实 env
+    if (!base) throw new Error('missing COCKROACH_DATABASE_URL')
+    const dbName = process.env.TIDEMARK_DATABASE || 'tidemark_dev'
     // Lambda 每执行环境 max=1（默认）；本地单进程开发用 TIDEMARK_POOL_MAX=10 等效账户并发预算(10x1)
     const max = Number(process.env.TIDEMARK_POOL_MAX || 1)
     if (!Number.isInteger(max) || max < 1 || max > 10) throw new Error(`invalid TIDEMARK_POOL_MAX "${process.env.TIDEMARK_POOL_MAX}"`)
@@ -18,13 +17,18 @@ export const getPool = () => {
   return pool
 }
 
+// 连接级损坏（销毁连接）与业务级错误（健康归还）的判别：
+// 40001 是序列化冲突、23505/CONCURRENT_WINNER 是业务冲突——连接本身健康；
+// ECONNRESET/08xxx/57P01 等是链路死亡——必须销毁驱逐
+const isConnectionBroken = (e) => isRetryableDatabaseError(e) && e.code !== '40001'
+
 // 短 SERIALIZABLE 事务 + 40001 整体重试（上限 5 + jitter），结论 23
-export const inSerializableTx = async (fn, label) => {
-  const p = getPool()
+// pool 可注入以便单测 destroy/reuse 语义
+export const runTxWithPool = async (pool, fn, label) => {
   for (let attempt = 1; ; attempt++) {
     let client
     try {
-      client = await p.connect()          // 连接获取也在重试圈内（serverless 冷唤醒 ECONNRESET）
+      client = await pool.connect()       // 连接获取也在重试圈内（serverless 冷唤醒 ECONNRESET）
       await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
       const result = await fn(client)
       await client.query('COMMIT')
@@ -32,8 +36,11 @@ export const inSerializableTx = async (fn, label) => {
       return result
     } catch (e) {
       if (client) {
-        await client.query('ROLLBACK').catch(() => {})
-        client.release(e)                 // 带错误归还 = 销毁，防止死连接回池被反复领取
+        let rollbackOk = false
+        try { await client.query('ROLLBACK'); rollbackOk = true } catch {}
+        // 只在链路损坏或 ROLLBACK 失败时销毁；业务错误（23505/40001/应用异常）健康归还
+        if (!rollbackOk || isConnectionBroken(e)) client.release(e)
+        else client.release()
       }
       const retryable = e.code === '40001' || isRetryableDatabaseError(e)
       if (!retryable || attempt >= 5) throw e
@@ -43,3 +50,5 @@ export const inSerializableTx = async (fn, label) => {
     }
   }
 }
+
+export const inSerializableTx = (fn, label) => runTxWithPool(getPool(), fn, label)

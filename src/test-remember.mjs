@@ -8,11 +8,18 @@ import { randomUUID } from 'node:crypto'
 import { getPool } from './lib/db.mjs'
 import { isRetryableDatabaseError, sleep } from '../migrations/db.mjs'
 
+// 取证查询走仓库已验证的 cold-wake 策略：专用 client + connectWithRetry(5)，断连即重建
+import { connectWithRetry, withDatabase } from '../migrations/db.mjs'
+let forensic = null
 const q = async (text, params) => {
+  const cs = withDatabase(process.env.COCKROACH_DATABASE_URL, process.env.TIDEMARK_DATABASE || 'tidemark_dev')
   for (let attempt = 1; ; attempt++) {
-    try { return await getPool().query(text, params) }
-    catch (e) {
-      if (!isRetryableDatabaseError(e) || attempt >= 4) throw e
+    try {
+      forensic ??= await connectWithRetry(cs, { label: 'forensic' })
+      return await forensic.query(text, params)
+    } catch (e) {
+      await forensic?.end().catch(() => {}); forensic = null
+      if (!isRetryableDatabaseError(e) || attempt >= 5) throw e
       await sleep(800 * attempt)
     }
   }
@@ -37,6 +44,7 @@ const createdRequestIds = new Set()
 const ep = () => { const e = 'p003-' + randomUUID().slice(0, 8); createdEpisodes.add(e); return e }
 const rid = () => { const r = randomUUID(); createdRequestIds.add(r); return r }
 
+let primaryError = null
 try {
   // 1. 无 auth -> isError
   await withClient({}, async (c) => {
@@ -128,12 +136,25 @@ try {
   })
 
   console.log('ALL P0-03 REMEMBER ASSERTIONS PASSED')
+} catch (e) {
+  primaryError = e
 } finally {
-  // 精确清理：本脚本创建的 episodes 与 request_ids
+  // 精确清理：DELETE 失败或任一表残留非零都必须令测试失败（保留原始失败为 primary）
+  const cleanupErrors = []
   const eps = [...createdEpisodes], rids = [...createdRequestIds]
-  if (eps.length) await q(`DELETE FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)`, [TENANT, eps]).catch(e => console.error('cleanup memories failed:', e.message))
-  if (rids.length) await q(`DELETE FROM tool_requests WHERE tenant_id=$1 AND request_id = ANY($2)`, [TENANT, rids]).catch(e => console.error('cleanup tool_requests failed:', e.message))
-  const left = (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)', [TENANT, eps.length ? eps : ['-']])).rows[0].n
-  console.log(`cleanup done (residual rows: ${left})`)
-  await getPool().end()
+  try {
+    if (eps.length) await q(`DELETE FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)`, [TENANT, eps])
+    if (rids.length) await q(`DELETE FROM tool_requests WHERE tenant_id=$1 AND tool_name='remember' AND request_id = ANY($2)`, [TENANT, rids])
+    const memLeft = eps.length ? (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)', [TENANT, eps])).rows[0].n : 0
+    const reqLeft = rids.length ? (await q('SELECT count(*)::INT4 AS n FROM tool_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, rids])).rows[0].n : 0
+    if (memLeft !== 0 || reqLeft !== 0) cleanupErrors.push(new Error(`residual rows: memories=${memLeft} tool_requests=${reqLeft}`))
+    else console.log('cleanup done (residual: memories=0, tool_requests=0)')
+  } catch (e) { cleanupErrors.push(e) }
+  await forensic?.end().catch(() => {})
+  await getPool().end().catch(() => {})
+  if (cleanupErrors.length) {
+    if (primaryError) throw new AggregateError([primaryError, ...cleanupErrors], 'test failed AND cleanup failed')
+    throw new AggregateError(cleanupErrors, 'cleanup failed')
+  }
+  if (primaryError) throw primaryError
 }
