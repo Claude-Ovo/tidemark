@@ -28,7 +28,21 @@
 - [ ] 对照比赛规则原文确认 MCP "使用" 门槛
 - [ ] end-to-end 审计：按 request_id 查 recall_requests → memory → nightly provenance
 
-## 第三步：AWS（待办，依赖账号/绑卡）
+## 第三步：AWS runtime spike（P0-01，2026-07-29 完成——判定：Lambda + API Gateway 成立）
 
-- [ ] Lambda + EventBridge Scheduler 定时触发最小样例
-- [ ] Bedrock 模型调用权限与可用区确认
+环境：us-east-1，nodejs22.x，512MB，express + serverless-http，官方 MCP SDK 客户端验收。
+
+| 验证项 | 结果 | 备注 |
+|---|---|---|
+| 公网真实 MCP 会话（initialize/tools/list/tools/call） | OK ×3 连跑 | 官方 StreamableHTTPClientTransport |
+| 冷启动 | OK ~3-5s 首连 | 热启动 ~1.6s/会话 |
+| Lambda 内连 CRDB Cloud（TLS，pool max=1） | OK | SELECT version() 一次通过 |
+| 认证头透传（auth→tenant 映射的前提） | OK | /debug 实测 API GW 完整透传 headers |
+
+**三个关键发现（实现必须遵守）：**
+1. **Function URL 在新账户上被账户级限制挡死（403 Forbidden，策略正确也无效）**——弃用，走 API Gateway HTTP API（$default 路由→Lambda），一次通过
+2. **serverless-http 的 mock 请求缺 `rawHeaders`**，SDK 底层 Hono 转换依赖它导致 406——handler 里必须补 `req.rawHeaders`（shim 已写在 spike/aws/handler.mjs）
+3. **必须 `enableJsonResponse: true`（无状态纯 JSON 模式）**——SSE 流式响应会让 Lambda 进程崩（Runtime.NodeJsExit）；buffered 模型只能一问一答，正好符合 SPEC 的 stateless 设计
+
+- [ ] Bedrock 模型调用权限与可用区确认（下一步）
+- [ ] EventBridge Scheduler → Lambda 定时触发样例（P0-09 前完成）
