@@ -7,7 +7,9 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "migrate": "node --env-file=.env migrations/apply.mjs",
+    "verify:migrations": "node --env-file=.env migrations/verify.mjs",
+    "test": "node --check migrations/apply.mjs && node --check migrations/verify.mjs"
   },
   "keywords": [],
   "author": "",
