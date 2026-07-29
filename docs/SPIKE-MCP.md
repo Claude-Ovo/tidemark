@@ -28,21 +28,30 @@
 - [ ] 对照比赛规则原文确认 MCP "使用" 门槛
 - [ ] end-to-end 审计：按 request_id 查 recall_requests → memory → nightly provenance
 
-## 第三步：AWS runtime spike（P0-01，2026-07-29 完成——判定：Lambda + API Gateway 成立）
+## 第三步：AWS runtime spike（P0-01，状态：**conditional / blocked_external(Bedrock allowlisting)**）
 
-环境：us-east-1，nodejs22.x，512MB，express + serverless-http，官方 MCP SDK 客户端验收。
+环境：us-east-1，nodejs22.x，512MB，express + serverless-http，官方 MCP SDK 客户端 + 断言套件验收（`spike/aws/client-test.mjs`，退出码生效）。证据链见 `SPIKE-EVIDENCE.md`。
 
-| 验证项 | 结果 | 备注 |
-|---|---|---|
-| 公网真实 MCP 会话（initialize/tools/list/tools/call） | OK ×3 连跑 | 官方 StreamableHTTPClientTransport |
-| 冷启动 | OK ~3-5s 首连 | 热启动 ~1.6s/会话 |
-| Lambda 内连 CRDB Cloud（TLS，pool max=1） | OK | SELECT version() 一次通过 |
-| 认证头透传（auth→tenant 映射的前提） | OK | /debug 实测 API GW 完整透传 headers |
+### 已验证（stub provider run，五场景断言全过）
 
-**三个关键发现（实现必须遵守）：**
-1. **Function URL 在新账户上被账户级限制挡死（403 Forbidden，策略正确也无效）**——弃用，走 API Gateway HTTP API（$default 路由→Lambda），一次通过
-2. **serverless-http 的 mock 请求缺 `rawHeaders`**，SDK 底层 Hono 转换依赖它导致 406——handler 里必须补 `req.rawHeaders`（shim 已写在 spike/aws/handler.mjs）
-3. **必须 `enableJsonResponse: true`（无状态纯 JSON 模式）**——SSE 流式响应会让 Lambda 进程崩（Runtime.NodeJsExit）；buffered 模型只能一问一答，正好符合 SPEC 的 stateless 设计
+| 验证项 | 结果 |
+|---|---|
+| 公网真实 MCP 会话（initialize/tools/list/tools/call） | OK（官方 client，warm ~1.6s，冷启动首连 3-5s） |
+| 端到端单请求链：auth header→tenant/agent 映射→embed→CRDB `VECTOR(512)` 落行→digest 回验 | OK（digest_match，DB 内实际向量核验，非元数据） |
+| 无 auth 调用以 MCP `isError` 拒绝 | OK |
+| agent-scoped 隔离（同 tenant 第二 principal 持 request_id 越权查询被拒） | OK |
+| 未知 tool 报错后 warm 容器不被毒化 | OK |
+| pool max=1 下 4 路并发全部成功（排队） | OK |
+| CloudWatch 结构化日志与 CRDB 行按 request_id 对应 | OK |
 
-- [ ] Bedrock 模型调用权限与可用区确认（下一步）
+### 未验证（tracked blocker）
+
+- **Bedrock 段**：新账户被 marketplace allowlisting 拦截（信用卡授权失败→AWS 要求提工单验证，2026-07-29 已提交，ETA 未知）。embedding 走 provider 层（`EMBED_PROVIDER=bedrock|stub`），stub 为 sha256 驱动确定性 512 维、同接口同落库路径。**批准后 24h 内（最迟 P0-04 验收前）以 expected_provider=bedrock 重跑套件并补三处证据；此前 P0-01 不得称 completed。**
+
+### 三个关键发现（实现必须遵守）
+
+1. **Function URL 在本（新）账户实测 403（策略正确亦然）**——本项目定型 API Gateway HTTP API（$default→Lambda）
+2. **serverless-http 的 mock 请求缺 `rawHeaders`**，SDK 底层 Hono 转换依赖它导致 406——必须补 shim（见 handler.mjs）
+3. **当前 `serverless-http + API Gateway HTTP API buffered integration` 组合实测 SSE 不可用**（进程 Runtime.NodeJsExit），故 v1 固定 `enableJsonResponse: true` 无状态纯 JSON——与 SPEC stateless 设计一致。注：这是本栈组合的边界，非 AWS 平台能力上限（Lambda response streaming / API GW streaming 官方支持存在，本项目不采用）
+
 - [ ] EventBridge Scheduler → Lambda 定时触发样例（P0-09 前完成）
