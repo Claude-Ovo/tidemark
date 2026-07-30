@@ -1,6 +1,6 @@
 # P0-02 CockroachDB migrations
 
-This directory is the executable schema for SPEC v1.2.2.1.
+This directory is the executable schema for SPEC v1.2.3.
 
 ## Run
 
@@ -12,7 +12,11 @@ node --env-file=.env migrations/apply.mjs --database tidemark_dev
 node --env-file=.env migrations/verify.mjs --database tidemark_dev
 ```
 
-`COCKROACH_DATABASE_URL` is read from the environment and is never printed. `--database` accepts only lowercase letters, digits, and underscores. `--create-database` is explicit and requires `--database`.
+`COCKROACH_DATABASE_URL` is read from the environment and is never printed. `--database` accepts only lowercase letters, digits, and underscores; when omitted, resolution is `--database` > `TIDEMARK_DATABASE` > `tidemark_dev` (matching the service layer). `--create-database` is explicit and requires `--database`.
+
+## Destructive migrations and preflights
+
+Migration `016` DELETES `outcomes` rows whose `payload_hmac`/`response_json` are NULL. Those are pre-013 legacy audit rows whose idempotency evidence was only ever stored in `tool_requests` (removed by 014) -- exact replay for them is impossible, and `017` requires both columns NOT NULL. **Upgrading a database that still holds such rows is a destructive operation and is refused by machine check**: `preflights.mjs` runs before 016's first application and aborts the whole migrate run with manual archive instructions (`outcomes_legacy_archive`) if any legacy row exists. After manual archiving, replay for those requests honestly fails as `legacy_outcome_unreplayable`. Environments already at 016+ are unaffected (preflights never re-run for applied versions).
 
 Each numbered file contains exactly one idempotent schema-change statement. CockroachDB does not guarantee atomic rollback for multiple schema changes in one explicit transaction, so the runner applies one autocommit DDL statement and then records its LF-normalized SHA-256 in `schema_migrations`. A disconnect between DDL and ledger insert is repaired safely on rerun. An applied filename/checksum mismatch is fatal.
 

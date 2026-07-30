@@ -61,11 +61,11 @@ app.post('/mcp', async (req, res) => {
       request_id: z.string(), tool_name: z.string().optional(), payload: z.record(z.string(), z.any()).optional() },
     async (args) => asResult(await runToolResilient('log_event', () => logEventTool({ principal, ...args }))))
   server.tool('report_outcome',
-    'settle an attempt: item-level attributions with evidence drive memory plasticity (outcome-gated). success=credited only, failure=blamed only, cancelled=none.',
+    'settle an attempt: item-level attributions with evidence drive memory plasticity (outcome-gated). success=credited only, failure=blamed only, cancelled=none. attributions: max 32 items.',
     { outcome_request_id: z.string(), episode_id: z.string(), task_instance_id: z.string(), attempt_id: z.string(),
       status: z.enum(['success', 'failure', 'cancelled']),
       attributions: z.array(z.object({ recall_request_id: z.string(), receipt_item_id: z.string(), memory_id: z.string(),
-        role: z.enum(['credited', 'blamed']), evidence_event_id: z.string() })).optional() },
+        role: z.enum(['credited', 'blamed']), evidence_event_id: z.string() })).max(32).optional() },
     async (args) => asResult(await runToolResilient('report_outcome', () => reportOutcomeTool({ principal, ...args }))))
   server.tool('pin',
     'idempotent pin/unpin (capability-gated). Pin freezes CURRENT effective strength (materialize-then-set, never a boost); unpin resumes decay from now.',

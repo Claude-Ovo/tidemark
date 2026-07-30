@@ -1,4 +1,6 @@
-# SPEC v1.2.2.1 — Tidemark（会遗忘的记忆）
+# SPEC v1.2.3 — Tidemark（会遗忘的记忆）
+
+> v1.2.3（2026-07-31，P0-05 实现修正同步，Codex 二审/三审驱动）：outcomes 终态唯一改 per `(tenant, agent, attempt)`（migrations 018/019）；幂等归属 outcomes 本表（payload_hmac/response_json 两列，013/016/017）；`max_attributions=32` 冻结；attempt ledger 锚降为一致性检测。仅同步已实现并经交叉审查的行为，无新增 feature。
 
 > **Tidemark — memory that ebbs, and proves what the tide left.**（2026-07-29 Ovo定名）
 
@@ -130,11 +132,13 @@ CREATE TABLE outcomes (
   task_instance_id  STRING NOT NULL,
   attempt_id        STRING NOT NULL,
   status            STRING NOT NULL CHECK (status IN ('success','failure','cancelled')),
-  attributions      JSONB NOT NULL,         -- [{recall_request_id, receipt_item_id, memory_id, role, evidence_event_id}]
+  attributions      JSONB NOT NULL,         -- [{recall_request_id, receipt_item_id, memory_id, role, evidence_event_id}]，最多 32 条
   plasticity_applied BOOL NOT NULL,
+  payload_hmac      BYTES NOT NULL,         -- keyed 幂等指纹（v1.2.3：幂等归属本表，见 §1.5）
+  response_json     JSONB NOT NULL,         -- 首次 response 精确重放体（INSERT 占位 '{}'，同事务回填）
   reported_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, outcome_request_id),
-  UNIQUE (tenant_id, attempt_id)            -- 每 attempt 恰一个 terminal outcome
+  UNIQUE (tenant_id, agent_id, attempt_id)  -- 终态槽 per-agent：attempt 是 agent 私有概念（v1.2.3）
 );
 ```
 
@@ -143,7 +147,9 @@ CREATE TABLE outcomes (
 - `success` 只允许 `role='credited'`，且 credited item 必须 `injected=true`、其 `evidence_event_id` 指向**同 attempt 内与本 item 三元组（recall_request_id+receipt_item_id+memory_id）完全匹配的 `memory_used` 事件**——generic `attempt_end` 不合法；`failure` 只允许 `role='blamed'` 且 `evidence_event_id` 存在于本 attempt 的 attempt_events；`cancelled` 不允许任何 attribution
 - 同一 outcome 内按 `memory_id` 去重（同记忆多 item 只按一次计）
 - 被归属的 receipt 置 `terminal_attempt_id = attempt_id`；已归属其他 terminal attempt 的 receipt 拒绝（`receipt_already_settled`）——utility 不重复记账
-- 同 outcome_request_id 同 payload 重报幂等返回；同 attempt_id 冲突 terminal status 报 `outcome_conflict`
+- `attributions` 数组上限 **32 条**（`max_attributions`，入口拒绝 `too_many_attributions`）——事务 B 必须保持短事务；MCP schema 以 `.max(32)` 显式公布
+- 同 outcome_request_id 同 payload 重报幂等返回；同 `(agent_id, attempt_id)` 冲突 terminal status 报 `outcome_conflict`——终态唯一按 `(tenant, agent, attempt)` 隔离，同 tenant 其他 agent 报同名 attempt 落其自己的槽，占不走别人的（v1.2.3，migrations 018/019）
+- attempt ledger 锚（本 agent 该 attempt 的确定性首行事件，`ORDER BY created_at, event_id`）只作 episode/task **一致性检测**（`attempt_scope_mismatch`），不承担授权——授权由上一条的 agent 隔离承担
 
 ### 1.5 tool_requests（remember/pin/log_event 的统一幂等台账，回应 P0-A）
 
@@ -277,7 +283,7 @@ log_event(episode_id, task_instance_id, attempt_id, event_type, tool_name?, payl
 
 **硬删除与在途归因（回应 correctness）**：recall 与 report_outcome 之间某 memory 被 forget 时，事务 B 不整单失败——该 item 记 `memory_deleted / no_plasticity`，其余 item 正常结算，outcome 照常落库。
 
-**事务 B（report_outcome，短 SERIALIZABLE）**：claim `(tenant_id, outcome_request_id)` → attempt 终态唯一性检查 → 逐条归因校验（§1.4 规则全跑）→ memory_id 去重 → 塑性更新（§2.3）+ `revision+1` → success_evidence 写入（若适用）→ receipt `outcome_state='reported', terminal_attempt_id` → COMMIT；40001 整体重试。
+**事务 B（report_outcome，短 SERIALIZABLE）**：幂等读自 outcomes 本表（PK 即 claim；legacy 无证据行诚实拒 `legacy_outcome_unreplayable`）→ `(tenant, agent, attempt)` 终态唯一性检查 → ledger 锚一致性检测 → 逐条归因校验（§1.4 规则全跑，数组上限 32）→ memory_id 去重 → 塑性更新（§2.3）+ `revision+1` → outcome INSERT（response_json 占位）→ success_evidence 写入（若适用）→ scope 合法 receipt 结算 `outcome_state='reported', terminal_attempt_id` → response_json 回填 → COMMIT；40001 整体重试。
 
 forget/export/unpin：owner/admin HTTP 面。`reflect` 无公共 tool。
 

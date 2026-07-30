@@ -10,6 +10,7 @@ import {
   validateDatabaseName,
   withDatabase,
 } from './db.mjs'
+import { PREFLIGHTS } from './preflights.mjs'
 
 const MIGRATION_PATTERN = /^(\d{3})_[a-z0-9_]+\.sql$/
 const migrationsDir = path.dirname(fileURLToPath(import.meta.url))
@@ -91,6 +92,11 @@ const applyOne = async (client, migration) => {
     assertAppliedMatches(migration, existing)
     return 'already'
   }
+
+  // fail-closed guard for destructive migrations: a throw aborts the run with
+  // manual instructions instead of silently destroying data (see preflights.mjs)
+  const preflight = PREFLIGHTS[migration.version]
+  if (preflight) await preflight(client)
 
   // CockroachDB does not guarantee atomic rollback for multiple schema changes in
   // one explicit transaction. Each file is one idempotent autocommit statement;

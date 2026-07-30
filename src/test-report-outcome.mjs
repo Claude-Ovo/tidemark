@@ -510,10 +510,15 @@ try {
     const mk = () => ({ recall_request_id: randomUUID(), receipt_item_id: randomUUID(), memory_id: randomUUID(), role: 'credited', evidence_event_id: randomUUID() })
     const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: ep(), task_instance_id: suite + '-t22', attempt_id: att(), status: 'success',
       attributions: Array.from({ length: 33 }, mk) })
-    assert.equal(r.body.error, 'too_many_attributions', JSON.stringify(r.body))
+    assert.equal(r.body.ok, false, `33 attributions rejected (MCP .max(32) or tool-level cap): ${JSON.stringify(r.body).slice(0, 200)}`)
+    // exact-32 接受边界：冻结值本身必须可用（全部无效归因也照单存档，存的全是 UUID）
+    const at32 = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: ep(), task_instance_id: suite + '-t22c', attempt_id: att(), status: 'success',
+      attributions: Array.from({ length: 32 }, mk) })
+    assert.equal(at32.body.ok, true, `exactly 32 accepted: ${JSON.stringify(at32.body).slice(0, 200)}`)
+    assert.equal(at32.body.items.length, 32)
     const ok = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: ep(), task_instance_id: suite + '-t22b', attempt_id: att(), status: 'cancelled' })
     assert.equal(ok.body.ok, true, 'cap does not break normal calls')
-    console.log('PASS 22 attributions capped at 32, transaction B stays short')
+    console.log('PASS 22 attributions cap: 33 rejected, exact-32 accepted')
   })
 
   console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED (22 scenarios)')
