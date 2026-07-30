@@ -37,7 +37,7 @@ const isEligible = (r) =>
 
 const CAND_COLS = `memory_id, layer, kind, content, exp_status, experience_body, pinned, importance,
   strength_anchor, strength_anchor_at, half_life_hours, credited_success_count, evidenced_blame_count,
-  admission, state`
+  admission, state, created_at`
 
 // 第一路：adaptive overfetch。vector index 只能吃 prefix 等值 + ORDER BY 距离 + LIMIT
 // （EXPLAIN 实证：把 admission/state 谓词放进内层会让 planner 弃用 vector index）。
@@ -68,18 +68,19 @@ const fetchVectorCandidates = async (c, tenant_id, agent_id, vecLiteral) => {
 const hydrate = async (c, tenant_id, agent_id, ids) => {
   if (ids.length === 0) return new Map()
   const rows = (await c.query(
-    `SELECT memory_id, layer, kind, content, exp_status, experience_body
+    `SELECT memory_id, layer, kind, content, exp_status, experience_body, created_at, state
      FROM memories WHERE tenant_id = $1 AND agent_id = $2 AND memory_id = ANY($3)`,
     [tenant_id, agent_id, ids])).rows
   return new Map(rows.map(r => [r.memory_id, r]))
 }
 
+// event 注入固定 schema（SPEC §3）：content + created_at + state；删除占位保持 content-free
 const buildInjection = (plan, live) => {
   const events = [], experiences = []
   for (const { memory_id } of plan.events) {
     const row = live.get(memory_id)
-    if (!row) { events.push({ memory_id, content: '[deleted]', injected: false }); continue }
-    events.push({ memory_id, kind: row.kind, content: row.content, injected: true })
+    if (!row) { events.push({ memory_id, content: '[deleted]', created_at: null, state: null, injected: false }); continue }
+    events.push({ memory_id, kind: row.kind, content: row.content, created_at: row.created_at, state: row.state, injected: true })
   }
   for (const { memory_id } of plan.experiences) {
     const row = live.get(memory_id)
@@ -149,7 +150,10 @@ export const recallTool = async ({ principal, query, purpose, episode_id, attemp
     }
 
     const pathA = await fetchVectorCandidates(c, tenant_id, agent_id, vecLiteral)
-    // 第二路：pinned / 高重要度，确定性上限 + 稳定排序（首审第 4 项末）
+    // 第二路：pinned / 高重要度。relevance floor 在 SQL 里、LIMIT 之前——
+    // 不相关的高优先级行不占席位（二审第 2 项：先截断后筛会饿死第 21 条真相关行）。
+    // 多取 1 行用于诚实标注截断。
+    const maxDist = 1 - CFG.second_path_floor
     const pathB = (await c.query(
       `SELECT ${CAND_COLS}, embedding <=> $3 AS dist
        FROM memories
@@ -157,25 +161,30 @@ export const recallTool = async ({ principal, query, purpose, episode_id, attemp
          AND admission = 'accepted' AND state <> 'faded'
          AND (layer = 'event' OR exp_status <> 'superseded')
          AND (pinned OR importance >= 0.8)
-       ORDER BY pinned DESC, importance DESC, memory_id LIMIT ${CFG.second_path_limit}`,
+         AND embedding <=> $3 <= ${maxDist}
+       ORDER BY pinned DESC, importance DESC, embedding <=> $3, memory_id
+       LIMIT ${CFG.second_path_limit + 1}`,
       [tenant_id, agent_id, vecLiteral])).rows
+    const pathBTruncated = pathB.length > CFG.second_path_limit
+    if (pathBTruncated) pathB.length = CFG.second_path_limit
 
-    // 并集（memory_id 去重，保留来源标记）
+    // 并集：记录每条命中了哪几路——gate 按"任一路满足自己的门槛即入选"判定（二审第 1 项：
+    // path A 身份不得覆盖 path B 的 0.35 救生圈）
     const seen = new Map()
-    for (const r of pathA.rows) seen.set(r.memory_id, { row: r, reasons: ['semantic_match'] })
+    for (const r of pathA.rows) seen.set(r.memory_id, { row: r, reasons: ['semantic_match'], inA: true, inB: false })
     for (const r of pathB) {
       const label = r.pinned ? 'pinned_path' : 'high_importance_path'
       const hit = seen.get(r.memory_id)
-      if (hit) hit.reasons.push(label)
-      else seen.set(r.memory_id, { row: r, reasons: [label] })
+      if (hit) { hit.reasons.push(label); hit.inB = true }
+      else seen.set(r.memory_id, { row: r, reasons: [label], inA: false, inB: true })
     }
 
-    // 打分 + gate（第一路 0.55，仅第二路命中的用 0.35 floor）
     const scored = []
-    for (const { row, reasons } of seen.values()) {
+    for (const { row, reasons, inA, inB } of seen.values()) {
       const similarity = Math.min(1, Math.max(0, 1 - Number(row.dist)))
-      const secondPathOnly = !reasons.includes('semantic_match')
-      if (similarity < (secondPathOnly ? CFG.second_path_floor : CFG.semantic_gate)) continue
+      const passA = inA && similarity >= CFG.semantic_gate
+      const passB = inB && similarity >= CFG.second_path_floor
+      if (!passA && !passB) continue
       const effective = decayEffective(row, now)
       const utility = utilityOf(row)
       const importance = Number(row.importance)
@@ -230,7 +239,7 @@ export const recallTool = async ({ principal, query, purpose, episode_id, attemp
       pipeline_version: PIPELINE_VERSION,
       token_estimator_version: TOKEN_ESTIMATOR_VERSION,
       context: { purpose, episode_id, attempt_id, token_budget: token_budget ?? null, total_token_ceiling: totalCeiling },
-      candidate_fetch: { path_a: pathA.trail, path_a_truncated: pathA.truncated, path_b_rows: pathB.length, path_b_limit: CFG.second_path_limit },
+      candidate_fetch: { path_a: pathA.trail, path_a_truncated: pathA.truncated, path_b_rows: pathB.length, path_b_limit: CFG.second_path_limit, path_b_truncated: pathBTruncated },
       budgets: {
         event: { used_items: evPack.chosen.length, max_items: CFG.event_budget.max_items, used_tokens: evPack.tokens, max_tokens: CFG.event_budget.max_tokens },
         experience: { used_items: exPack.chosen.length, max_items: CFG.experience_budget.max_items, used_tokens: exPack.tokens, max_tokens: CFG.experience_budget.max_tokens },

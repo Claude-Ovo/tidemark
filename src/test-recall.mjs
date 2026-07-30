@@ -42,17 +42,29 @@ const P = { purpose: 'unit-test' }
 const recallArgs = (over = {}) => ({ purpose: P.purpose, episode_id: ep(), attempt_id: 'att-' + randomUUID().slice(0, 6), request_id: rid(), ...over })
 
 // 直插一行（绕过 remember，用于构造 faded/experience/pinned 等 fixture）
-const insertRow = async ({ agent = AGENT, layer = 'event', content, embSourceId, admission = 'accepted', state = 'fresh',
+const insertRow = async ({ agent = AGENT, layer = 'event', content, embSourceId, embLiteral, admission = 'accepted', state = 'fresh',
                            pinned = false, importance = 0.5, exp_status = null, experience_body = null,
                            anchor = 1.0, anchorAt = 'now()', halfLife = 72, credited = 0, blamed = 0, episode }) => {
   const id = randomUUID(); directIds.push(id)
-  const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, embSourceId])).rows[0].e
+  const emb = embLiteral ?? (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, embSourceId])).rows[0].e
   await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status,
              source, admission, quarantine_expires_at, state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at,
              half_life_hours, credited_success_count, evidenced_blame_count)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'agent_inferred',$10,NULL,$11,$12,$13,$14,${anchorAt},now(),$15,$16,$17)`,
     [TENANT, agent, id, layer, episode, content, emb, experience_body, exp_status, admission, state, pinned, importance, anchor, halfLife, credited, blamed])
   return id
+}
+
+// ---- 余弦可控向量工坊：镜像服务端 stub 算法，构造与查询向量精确夹角的 fixture ----
+const stubVec = (text) => { const h = createHash('sha256').update(text).digest(); return Array.from({ length: 512 }, (_, i) => (h[i % 32] / 255) * 2 - 1) }
+const unit = (v) => { const n = Math.hypot(...v); return v.map(x => x / n) }
+const craftCosine = (queryText, targetCos, seed) => {
+  const u = unit(stubVec(queryText))
+  const r = stubVec('orthogonal-' + seed)
+  const dot = r.reduce((s, x, i) => s + x * u[i], 0)
+  const w = unit(r.map((x, i) => x - dot * u[i]))
+  const t = u.map((x, i) => targetCos * x + Math.sqrt(1 - targetCos * targetCos) * w[i])
+  return '[' + t.map(x => x.toFixed(6)).join(',') + ']'
 }
 
 let primaryError = null
@@ -102,7 +114,9 @@ try {
     assert.equal(items[0].memory_id, seeds.tide, 'top1 is semantically identical memory')
     assert.ok(items[0].similarity > 0.999 && items[0].injected)
     assert.equal(body.receipt.context.purpose, P.purpose, 'purpose recorded in receipt context')
-    assert.ok(body.injected.events.some(e => e.content === TIDE_QUERY), 'response hydrates real content')
+    const evt = body.injected.events.find(e => e.content === TIDE_QUERY)
+    assert.ok(evt, 'response hydrates real content')
+    assert.ok(evt.created_at && evt.state === 'fresh', 'event injection schema carries created_at + state (SPEC §3)')
 
     const row = (await q('SELECT receipt_json, serialization_checksum, agent_id, outcome_state FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, baseRid])).rows[0]
     assert.ok(row && row.agent_id === AGENT && row.outcome_state === 'unreported')
@@ -120,7 +134,8 @@ try {
   await withClient(AUTH1, async (c) => {
     const same = await call(c, 'recall', baseArgs)
     assert.equal(same.body.replay, true, 'identical request replays')
-    assert.ok(same.body.injected.events.some(e => e.content === TIDE_QUERY), 'replay re-hydrates content')
+    const revt = same.body.injected.events.find(e => e.content === TIDE_QUERY)
+    assert.ok(revt && revt.created_at && revt.state === 'fresh', 'replay injection schema also carries created_at + state')
     const diffAttempt = await call(c, 'recall', { ...baseArgs, attempt_id: 'att-DIFFERENT' })
     assert.equal(diffAttempt.isError, true); assert.equal(diffAttempt.body.error, 'idempotency_key_reused', 'attempt_id change must NOT replay')
     const diffPurpose = await call(c, 'recall', { ...baseArgs, purpose: 'other-purpose' })
@@ -191,25 +206,29 @@ try {
     })
   }
 
-  // 8. 第二路非 vacuous：pinned 记忆语义弱相关但 similarity>=0.35 时应入选，且 pinned 不衰减
+  // 8. 第二路救生圈真实生效（二审第 1 项）：0.35<=sim<0.55 的 pinned 记忆必须经 pinned_path 入选；
+  //    pinned 冻结强度；>20 条不相关高优先级行不得挤掉相关行（二审第 2 项）
   {
     const pinEp = ep()
-    // 用与查询同向量的内容，但 state 保持 fresh、pinned=true、anchor 很低、半衰期极短
-    // -> 若 pinned 参与衰减，effective 会≈0；断言 effective == anchor 证明冻结
-    let baseId
+    const PIN_QUERY = 'lifeline probe ' + suite
+    // (a) 精确构造 cos=0.40 的 pinned 行——落在救生圈区间 [0.35, 0.55)
+    const lifelineId = await insertRow({ content: 'weakly related pinned fact', embLiteral: craftCosine(PIN_QUERY, 0.40, 'lifeline'),
+      pinned: true, importance: 0.9, anchor: 0.42, anchorAt: `now() - INTERVAL '30 days'`, halfLife: 1, episode: pinEp })
+    // (b) 25 条不相关（cos=0.05 < floor）的更高 importance pinned 行——旧实现里它们会占满 LIMIT 20
+    for (let i = 0; i < 25; i++) {
+      await insertRow({ content: `irrelevant vip ${i}`, embLiteral: craftCosine(PIN_QUERY, 0.05, 'vip-' + i),
+        pinned: true, importance: 0.99, episode: pinEp })
+    }
     await withClient(AUTH1, async (c) => {
-      const r = await call(c, 'remember', { content: 'pinned probe ' + suite, episode_id: pinEp, request_id: rid() })
-      baseId = r.body.memory_id
-    })
-    const pinnedId = await insertRow({ content: 'pinned probe ' + suite, embSourceId: baseId, pinned: true,
-      importance: 0.95, anchor: 0.42, anchorAt: `now() - INTERVAL '30 days'`, halfLife: 1, episode: pinEp })
-    await withClient(AUTH1, async (c) => {
-      const { body } = await call(c, 'recall', recallArgs({ query: 'pinned probe ' + suite }))
-      const it = body.receipt.items.find(i => i.memory_id === pinnedId)
-      assert.ok(it, 'pinned memory present in receipt')
-      assert.ok(it.reason.includes('pinned_path') || it.reason.includes('semantic_match'), 'pinned reason recorded')
-      assert.ok(Math.abs(it.effective_strength - 0.42) < 1e-6, `pinned must not decay (got ${it.effective_strength} after 30 days at 1h half-life)`)
-      console.log('PASS 8 second path non-vacuous + pinned frozen strength')
+      const { body } = await call(c, 'recall', recallArgs({ query: PIN_QUERY }))
+      const it = body.receipt.items.find(i => i.memory_id === lifelineId)
+      assert.ok(it, `0.40-cosine pinned row must be rescued by second path (candidates=${body.receipt.items.length}, path_b_rows=${body.receipt.candidate_fetch.path_b_rows})`)
+      assert.ok(it.reason.includes('pinned_path'), 'reason must record pinned_path')
+      assert.ok(it.similarity >= 0.35 && it.similarity < 0.55, `similarity in lifeline band (got ${it.similarity})`)
+      assert.ok(Math.abs(it.effective_strength - 0.42) < 1e-6, `pinned must not decay (got ${it.effective_strength})`)
+      const vipCount = body.receipt.items.filter(i => i.reason.includes('pinned_path') && i.memory_id !== lifelineId).length
+      assert.equal(vipCount, 0, 'irrelevant VIPs (cos=0.05) excluded by SQL-level floor, do not consume seats')
+      console.log('PASS 8 second-path lifeline works at 0.40 + 25 irrelevant VIPs cannot starve it + pinned frozen')
     })
   }
 
