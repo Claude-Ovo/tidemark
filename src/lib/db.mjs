@@ -49,7 +49,11 @@ export const runTxWithPool = async (pool, fn, label) => {
       }
       const retryable = e.code === '40001' || isRetryableDatabaseError(e)
       if (!retryable || attempt >= 5) throw e
-      const delay = Math.min(4000, 250 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 200)
+      // 退避量级必须覆盖 CRDB serverless 冷唤醒窗口（实测连续 4 次 ECONNRESET 后第 5 次才成功，
+      // 累计需 ~11s）。序列化冲突用短退避即可，链路故障用长退避。
+      const broken = e.code !== '40001'
+      const base = broken ? 750 : 250
+      const delay = Math.min(broken ? 8000 : 4000, base * 2 ** (attempt - 1)) + Math.floor(Math.random() * 200)
       console.error(JSON.stringify({ evt: 'tx_retry', label, attempt, code: e.code }))
       await sleep(delay)
     }

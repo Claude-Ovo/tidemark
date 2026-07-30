@@ -1,5 +1,5 @@
 // P0-04 recall 验收：node --env-file=.env src/test-recall.mjs（先起 server，EMBED_PROVIDER=stub）
-// stub embedding 由内容哈希驱动：同文本=同向量（similarity=1），异文本=互不相关——检索语义可确定性断言
+// stub embedding 由内容哈希驱动：同文本=同向量（similarity≈1），异文本≈不相关——检索语义可确定性断言
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import assert from 'node:assert/strict'
@@ -7,6 +7,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { getPool } from './lib/db.mjs'
 import { connectWithRetry, withDatabase, isRetryableDatabaseError, sleep } from '../migrations/db.mjs'
 import { canonicalJson } from './lib/canonical-json.mjs'
+import { CFG } from './lib/recall-config.mjs'
 
 let forensic = null
 const q = async (text, params) => {
@@ -18,7 +19,7 @@ const q = async (text, params) => {
 }
 const url = process.env.TIDEMARK_URL || 'http://localhost:3901'
 const withClient = async (headers, fn) => {
-  const c = new Client({ name: 'p004-test', version: '0.1.0' })
+  const c = new Client({ name: 'p004-test', version: '0.2.0' })
   await c.connect(new StreamableHTTPClientTransport(new URL(url + '/mcp'), { requestInit: { headers } }))
   try { return await fn(c) } finally { await c.close().catch(() => {}) }
 }
@@ -27,123 +28,266 @@ const call = async (c, name, args) => {
     const r = await c.callTool({ name, arguments: args })
     const text = r.content[0].text
     try { return { isError: r.isError === true, body: JSON.parse(text) } }
-    catch { return { isError: true, body: { ok: false, error: 'non_json', raw: text.slice(0, 120) } } }
-  } catch (e) {
-    // zod/协议层校验拒绝（如缺 attempt_id）也是合法的错误路径
-    return { isError: true, body: { ok: false, error: 'protocol_validation', raw: e.message?.slice(0, 120) } }
-  }
+    catch { return { isError: true, body: { ok: false, error: 'non_json', raw: text.slice(0, 160) } } }
+  } catch (e) { return { isError: true, body: { ok: false, error: 'protocol_validation', raw: e.message?.slice(0, 160) } } }
 }
-const AUTH = { 'x-tidemark-auth': 'spike-demo-key' }
-const TENANT = 'demo-tenant', AGENT = 'demo-agent'
+const AUTH1 = { 'x-tidemark-auth': 'spike-demo-key' }      // demo-agent
+const AUTH2 = { 'x-tidemark-auth': 'spike-second-key' }    // second-agent（同 tenant）
+const TENANT = 'demo-tenant', AGENT = 'demo-agent', AGENT2 = 'second-agent'
 const suite = 'p004-' + randomUUID().slice(0, 8)
-const createdEpisodes = new Set(), createdRequestIds = new Set(), directMemoryIds = []
-const ep = () => { const e = `${suite}-ep-` + randomUUID().slice(0, 6); createdEpisodes.add(e); return e }
-const rid = () => { const r = randomUUID(); createdRequestIds.add(r); return r }
+const eps = new Set(), rids = new Set(), directIds = []
+const ep = () => { const e = `${suite}-ep-` + randomUUID().slice(0, 6); eps.add(e); return e }
+const rid = () => { const r = randomUUID(); rids.add(r); return r }
+const P = { purpose: 'unit-test' }
+const recallArgs = (over = {}) => ({ purpose: P.purpose, episode_id: ep(), attempt_id: 'att-' + randomUUID().slice(0, 6), request_id: rid(), ...over })
+
+// 直插一行（绕过 remember，用于构造 faded/experience/pinned 等 fixture）
+const insertRow = async ({ agent = AGENT, layer = 'event', content, embSourceId, admission = 'accepted', state = 'fresh',
+                           pinned = false, importance = 0.5, exp_status = null, experience_body = null,
+                           anchor = 1.0, anchorAt = 'now()', halfLife = 72, credited = 0, blamed = 0, episode }) => {
+  const id = randomUUID(); directIds.push(id)
+  const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, embSourceId])).rows[0].e
+  await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status,
+             source, admission, quarantine_expires_at, state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at,
+             half_life_hours, credited_success_count, evidenced_blame_count)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'agent_inferred',$10,NULL,$11,$12,$13,$14,${anchorAt},now(),$15,$16,$17)`,
+    [TENANT, agent, id, layer, episode, content, emb, experience_body, exp_status, admission, state, pinned, importance, anchor, halfLife, credited, blamed])
+  return id
+}
 
 let primaryError = null
 try {
-  // 种子：三条事件记忆（经真实 remember 落库，stub embedding 确定性）
+  // ---- 种子 ----
   const seedEp = ep()
   const seeds = {}
-  await withClient(AUTH, async (c) => {
+  const SENTINEL = 'SENTINEL-CONTENT-' + randomUUID().slice(0, 8)   // 用于证明 DB 中不存正文
+  await withClient(AUTH1, async (c) => {
     for (const [key, content, importance] of [
-      ['tide', 'the tide leaves a mark on the shore', 0.5],
+      ['tide', `the tide leaves a mark ${SENTINEL}`, 0.5],
       ['coffee', 'she prefers oat milk in her coffee', 0.5],
-      ['anchor', 'the anchor holds the ship in the storm', 0.9],   // 高重要度（第二路候选资格）
+      ['anchor', 'the anchor holds the ship in the storm', 0.9],
     ]) {
-      // 冷唤醒风暴偶发耗尽服务端重试——种子期容错一次（同 request_id 重放，幂等保证不双写）
-      let res = await call(c, 'remember', { content, episode_id: seedEp, request_id: (seeds[key + '_rid'] = rid()), importance })
-      if (!res.body.ok) { await sleep(3000); res = await call(c, 'remember', { content, episode_id: seedEp, request_id: seeds[key + '_rid'], importance }) }
+      const r = rid()
+      let res = await call(c, 'remember', { content, episode_id: seedEp, request_id: r, importance })
+      if (!res.body.ok) { await sleep(3000); res = await call(c, 'remember', { content, episode_id: seedEp, request_id: r, importance }) }
       assert.equal(res.body.ok, true, `seed ${key}: ${JSON.stringify(res.body)}`)
       seeds[key] = res.body.memory_id
     }
   })
+  const TIDE_QUERY = `the tide leaves a mark ${SENTINEL}`
 
-  // 1. 无 auth -> isError
+  // 1. 无 auth
   await withClient({}, async (c) => {
-    const { isError, body } = await call(c, 'recall', { query: 'x', episode_id: ep(), attempt_id: 'a1', request_id: rid() })
+    const { isError, body } = await call(c, 'recall', recallArgs({ query: 'x' }))
     assert.equal(isError, true); assert.equal(body.error, 'unauthorized')
     console.log('PASS 1 unauthorized isError')
   })
 
-  // 2. attempt_id 必填（冻结 P0-D）
-  await withClient(AUTH, async (c) => {
-    const { isError, body } = await call(c, 'recall', { query: 'x', episode_id: ep(), request_id: rid() })
-    assert.equal(isError, true, 'missing attempt_id must be error')
-    console.log('PASS 2 attempt_id required')
+  // 2. 必填参数：attempt_id / purpose（冻结 tool 形状）
+  await withClient(AUTH1, async (c) => {
+    const a = await call(c, 'recall', { query: 'x', purpose: P.purpose, episode_id: ep(), request_id: rid() })
+    assert.equal(a.isError, true, 'missing attempt_id must fail')
+    const b = await call(c, 'recall', { query: 'x', episode_id: ep(), attempt_id: 'a', request_id: rid() })
+    assert.equal(b.isError, true, 'missing purpose must fail (SPEC §4)')
+    console.log('PASS 2 attempt_id + purpose both required')
   })
 
-  // 3. 语义命中：同文本查询 -> top1 即目标记忆，similarity=1，receipt 字段完备且落库带 checksum
-  let receiptRequestId
-  await withClient(AUTH, async (c) => {
-    receiptRequestId = rid()
-    const { body } = await call(c, 'recall', { query: 'the tide leaves a mark on the shore', episode_id: ep(), attempt_id: 'a3', request_id: receiptRequestId })
-    assert.equal(body.ok, true)
+  // 3. 语义命中 + receipt 落库 + checksum 覆盖【完整持久化 JSON】+ 持久化不含正文
+  let baseRid, baseArgs
+  await withClient(AUTH1, async (c) => {
+    baseArgs = recallArgs({ query: TIDE_QUERY }); baseRid = baseArgs.request_id
+    const { body } = await call(c, 'recall', baseArgs)
+    assert.equal(body.ok, true, JSON.stringify(body).slice(0, 200))
     const items = body.receipt.items
-    assert.ok(items.length >= 1, 'has candidates')
-    assert.equal(items[0].memory_id, seeds.tide, 'top1 is the semantically identical memory')
-    assert.ok(items[0].similarity > 0.999, 'identical stub embedding -> similarity ~1')
-    assert.ok(items[0].injected, 'top1 injected')
-    for (const f of ['receipt_item_id', 'raw_cosine_distance', 'effective_strength', 'utility', 'importance', 'final_score', 'reason', 'rank']) {
-      assert.ok(items[0][f] !== undefined, `receipt item has ${f}`)
-    }
-    assert.ok(body.injected.events.some(e2 => e2.memory_id === seeds.tide), 'injected payload contains content')
-    const row = (await q('SELECT receipt_json, serialization_checksum, outcome_state FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, receiptRequestId])).rows[0]
-    assert.ok(row, 'receipt persisted')
-    assert.equal(row.outcome_state, 'unreported')
-    const recomputed = createHash('sha256').update(canonicalJson(row.receipt_json.receipt)).digest()
-    assert.ok(recomputed.equals(row.serialization_checksum), 'stored checksum matches recomputed over stored receipt')
-    console.log('PASS 3 semantic hit + full receipt persisted + checksum verified')
+    assert.equal(items[0].memory_id, seeds.tide, 'top1 is semantically identical memory')
+    assert.ok(items[0].similarity > 0.999 && items[0].injected)
+    assert.equal(body.receipt.context.purpose, P.purpose, 'purpose recorded in receipt context')
+    assert.ok(body.injected.events.some(e => e.content === TIDE_QUERY), 'response hydrates real content')
+
+    const row = (await q('SELECT receipt_json, serialization_checksum, agent_id, outcome_state FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, baseRid])).rows[0]
+    assert.ok(row && row.agent_id === AGENT && row.outcome_state === 'unreported')
+    // checksum 必须覆盖整个持久化对象（receipt + injection_plan）
+    const recomputed = createHash('sha256').update(canonicalJson(row.receipt_json)).digest()
+    assert.ok(recomputed.equals(row.serialization_checksum), 'checksum covers the entire persisted JSON')
+    // 持久化体绝不含正文（§12.5）
+    const raw = JSON.stringify(row.receipt_json)
+    assert.ok(!raw.includes(SENTINEL), 'persisted receipt_json must be content-free')
+    assert.deepEqual(Object.keys(row.receipt_json.injection_plan.events[0]), ['memory_id'], 'injection plan stores ids only')
+    console.log('PASS 3 receipt persisted content-free + checksum covers full JSON')
   })
 
-  // 4. 幂等重放：同 request_id 同 query -> replay 返回同一 receipt；异 query -> idempotency_key_reused
-  await withClient(AUTH, async (c) => {
-    const { body } = await call(c, 'recall', { query: 'the tide leaves a mark on the shore', episode_id: ep(), attempt_id: 'a4', request_id: receiptRequestId })
-    assert.equal(body.replay, true, 'replay flag')
-    const n = (await q('SELECT count(*)::INT4 AS n FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, receiptRequestId])).rows[0].n
-    assert.equal(n, 1, 'still one receipt row')
-    const { isError, body: b2 } = await call(c, 'recall', { query: 'DIFFERENT QUERY', episode_id: ep(), attempt_id: 'a4', request_id: receiptRequestId })
-    assert.equal(isError, true); assert.equal(b2.error, 'idempotency_key_reused')
-    console.log('PASS 4 idempotent replay + key reuse rejected')
+  // 4. 幂等：同 request_id 同全参数 -> replay；attempt_id 变化 -> 拒绝（首审第 3 项，原测试反转）
+  await withClient(AUTH1, async (c) => {
+    const same = await call(c, 'recall', baseArgs)
+    assert.equal(same.body.replay, true, 'identical request replays')
+    assert.ok(same.body.injected.events.some(e => e.content === TIDE_QUERY), 'replay re-hydrates content')
+    const diffAttempt = await call(c, 'recall', { ...baseArgs, attempt_id: 'att-DIFFERENT' })
+    assert.equal(diffAttempt.isError, true); assert.equal(diffAttempt.body.error, 'idempotency_key_reused', 'attempt_id change must NOT replay')
+    const diffPurpose = await call(c, 'recall', { ...baseArgs, purpose: 'other-purpose' })
+    assert.equal(diffPurpose.body.error, 'idempotency_key_reused', 'purpose change must not replay')
+    const diffBudget = await call(c, 'recall', { ...baseArgs, token_budget: 300 })
+    assert.equal(diffBudget.body.error, 'idempotency_key_reused', 'token_budget change must not replay')
+    const diffQuery = await call(c, 'recall', { ...baseArgs, query: 'DIFFERENT' })
+    assert.equal(diffQuery.body.error, 'idempotency_key_reused', 'query change must not replay')
+    const n = (await q('SELECT count(*)::INT4 AS n FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, baseRid])).rows[0].n
+    assert.equal(n, 1, 'still exactly one receipt row')
+    console.log('PASS 4 request fingerprint covers query+purpose+attempt+budget')
   })
 
-  // 5. 无关查询：低相似候选被 gate 拦截，但高重要度记忆可走第二路（floor 0.35）——只断言"tide/coffee 不得出现"
-  await withClient(AUTH, async (c) => {
-    const { body } = await call(c, 'recall', { query: 'completely unrelated topic zebra quantum', episode_id: ep(), attempt_id: 'a5', request_id: rid() })
-    assert.equal(body.ok, true)
-    const ids = body.receipt.items.map(i => i.memory_id)
-    assert.ok(!ids.includes(seeds.tide) && !ids.includes(seeds.coffee), 'ordinary memories blocked by semantic gate (0.55)')
-    for (const it of body.receipt.items) {
-      assert.ok(it.reason.includes('pinned_path') || it.reason.includes('high_importance_path'), 'survivors only via second path')
-      assert.ok(it.similarity >= 0.35, 'second path floor enforced')
-    }
-    console.log(`PASS 5 semantic gate blocks unrelated (second-path survivors: ${ids.length})`)
+  // 5. 跨 agent 重放必须被拒（首审第 1 项：安全）
+  await withClient(AUTH2, async (c) => {
+    const stolen = await call(c, 'recall', baseArgs)
+    assert.equal(stolen.isError, true, 'cross-agent replay must error')
+    assert.equal(stolen.body.error, 'request_id_owned_by_other_agent')
+    assert.ok(!JSON.stringify(stolen.body).includes(SENTINEL), 'no content leaked to other agent')
+    assert.ok(!JSON.stringify(stolen.body).includes(seeds.tide), 'no memory_id leaked to other agent')
+    const owner = (await q('SELECT agent_id FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, baseRid])).rows[0].agent_id
+    assert.equal(owner, AGENT, 'row still owned by first agent')
+    console.log('PASS 5 cross-agent replay rejected, zero leakage')
   })
 
-  // 6. faded/quarantined 排除：直插一条 faded 同文本记忆，recall 不得返回它
+  // 6. 删除后 replay：不返回正文，标 [deleted] 且 injected=false
   {
-    const fadedId = randomUUID()
-    directMemoryIds.push(fadedId)
-    const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seeds.tide])).rows[0].e
-    await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
-             VALUES ($1,$2,$3,'event',$4,'the tide leaves a mark on the shore',$5,'agent_inferred','accepted','faded',0.5,1.0,now(),now(),72)`,
-      [TENANT, AGENT, fadedId, seedEp, emb])
-    await withClient(AUTH, async (c) => {
-      const { body } = await call(c, 'recall', { query: 'the tide leaves a mark on the shore', episode_id: ep(), attempt_id: 'a6', request_id: rid() })
-      assert.ok(!body.receipt.items.some(i => i.memory_id === fadedId), 'faded memory excluded from candidates')
-      console.log('PASS 6 faded excluded')
+    const delEp = ep(), delRid = rid()
+    let delId, delArgs
+    await withClient(AUTH1, async (c) => {
+      const DEL_CONTENT = 'ephemeral memory ' + randomUUID().slice(0, 6)
+      const rem = await call(c, 'remember', { content: DEL_CONTENT, episode_id: delEp, request_id: rid() })
+      assert.equal(rem.body.ok, true); delId = rem.body.memory_id
+      delArgs = recallArgs({ query: DEL_CONTENT, request_id: delRid })
+      const first = await call(c, 'recall', delArgs)
+      assert.ok(first.body.injected.events.some(e => e.content === DEL_CONTENT), 'first response has content')
+      await q('DELETE FROM memories WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3', [TENANT, AGENT, delId])
+      const replay = await call(c, 'recall', delArgs)
+      assert.equal(replay.body.replay, true)
+      const ev = replay.body.injected.events.find(e => e.memory_id === delId)
+      assert.ok(ev && ev.content === '[deleted]' && ev.injected === false, 'deleted memory hydrates as [deleted], not injected')
+      assert.ok(!JSON.stringify(replay.body).includes(DEL_CONTENT), 'no content survives deletion')
+      console.log('PASS 6 hard-deleted memory yields [deleted] on replay (no content copy)')
     })
   }
 
-  // 7. recall 不改 memory 行（outcome-gated：无 reinforce）
+  // 7. 60 条 faded 不得挤掉合格 fresh（首审第 4 项：后过滤语义等价性）
   {
-    const before = (await q('SELECT strength_anchor, strength_anchor_at, last_rewarded_at, revision FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seeds.tide])).rows[0]
-    await withClient(AUTH, async (c) => {
-      await call(c, 'recall', { query: 'the tide leaves a mark on the shore', episode_id: ep(), attempt_id: 'a7', request_id: rid() })
+    const fadedEp = ep()
+    const FRESH_Q = 'overfetch probe content ' + randomUUID().slice(0, 6)
+    let freshId
+    await withClient(AUTH1, async (c) => {
+      const r = await call(c, 'remember', { content: FRESH_Q, episode_id: fadedEp, request_id: rid() })
+      assert.equal(r.body.ok, true); freshId = r.body.memory_id
     })
-    const after = (await q('SELECT strength_anchor, strength_anchor_at, last_rewarded_at, revision FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seeds.tide])).rows[0]
+    // 60 条与 fresh 同向量的 faded 行：距离相同（0），会占满内层 LIMIT 50
+    for (let i = 0; i < 60; i++) {
+      await insertRow({ content: `faded filler ${i}`, embSourceId: freshId, state: 'faded', episode: fadedEp })
+    }
+    await withClient(AUTH1, async (c) => {
+      const { body } = await call(c, 'recall', recallArgs({ query: FRESH_Q }))
+      assert.equal(body.ok, true)
+      const ids = body.receipt.items.map(i => i.memory_id)
+      assert.ok(ids.includes(freshId), `eligible fresh memory must survive 60 faded rows (rounds=${JSON.stringify(body.receipt.candidate_fetch.path_a)})`)
+      assert.ok(body.receipt.candidate_fetch.path_a.length >= 2, 'adaptive overfetch escalated')
+      assert.ok(!body.receipt.items.some(i => directIds.includes(i.memory_id)), 'no faded row in candidates')
+      console.log(`PASS 7 60 faded rows do not starve eligible fresh (overfetch rounds: ${body.receipt.candidate_fetch.path_a.length})`)
+    })
+  }
+
+  // 8. 第二路非 vacuous：pinned 记忆语义弱相关但 similarity>=0.35 时应入选，且 pinned 不衰减
+  {
+    const pinEp = ep()
+    // 用与查询同向量的内容，但 state 保持 fresh、pinned=true、anchor 很低、半衰期极短
+    // -> 若 pinned 参与衰减，effective 会≈0；断言 effective == anchor 证明冻结
+    let baseId
+    await withClient(AUTH1, async (c) => {
+      const r = await call(c, 'remember', { content: 'pinned probe ' + suite, episode_id: pinEp, request_id: rid() })
+      baseId = r.body.memory_id
+    })
+    const pinnedId = await insertRow({ content: 'pinned probe ' + suite, embSourceId: baseId, pinned: true,
+      importance: 0.95, anchor: 0.42, anchorAt: `now() - INTERVAL '30 days'`, halfLife: 1, episode: pinEp })
+    await withClient(AUTH1, async (c) => {
+      const { body } = await call(c, 'recall', recallArgs({ query: 'pinned probe ' + suite }))
+      const it = body.receipt.items.find(i => i.memory_id === pinnedId)
+      assert.ok(it, 'pinned memory present in receipt')
+      assert.ok(it.reason.includes('pinned_path') || it.reason.includes('semantic_match'), 'pinned reason recorded')
+      assert.ok(Math.abs(it.effective_strength - 0.42) < 1e-6, `pinned must not decay (got ${it.effective_strength} after 30 days at 1h half-life)`)
+      console.log('PASS 8 second path non-vacuous + pinned frozen strength')
+    })
+  }
+
+  // 9. experience 排序（verified 优先）+ 双预算 + 长项跳过（CJK）
+  {
+    const expEp = ep()
+    let embBase
+    await withClient(AUTH1, async (c) => {
+      const r = await call(c, 'remember', { content: 'experience probe ' + suite, episode_id: expEp, request_id: rid() })
+      embBase = r.body.memory_id
+    })
+    const mkExp = (status, trigger, correct, extra = {}) => insertRow({
+      layer: 'experience', content: `exp ${status} ${trigger}`, embSourceId: embBase, episode: expEp,
+      exp_status: status, experience_body: { trigger, correct_action: correct, caution: 'be careful' }, ...extra,
+    })
+    const cand1 = await mkExp('candidate', 'trigger-c1', 'do X')
+    const verif1 = await mkExp('verified', 'trigger-v1', 'do Y')
+    const superseded = await mkExp('superseded', 'trigger-s1', 'obsolete')
+    // 一条超长 CJK 经验：单项 token 估算就超 experience 预算 -> 必须被跳过而非撑爆
+    const huge = await mkExp('verified', '汉'.repeat(700), '汉'.repeat(200))
+    await withClient(AUTH1, async (c) => {
+      const { body } = await call(c, 'recall', recallArgs({ query: 'experience probe ' + suite }))
+      const injectedExp = body.injected.experiences.map(e => e.memory_id)
+      assert.ok(!body.receipt.items.some(i => i.memory_id === superseded), 'superseded experience excluded from candidates')
+      assert.ok(!injectedExp.includes(huge), 'oversized experience skipped, not truncated')
+      assert.ok(injectedExp.includes(verif1), 'verified experience injected')
+      if (injectedExp.includes(cand1)) {
+        assert.ok(injectedExp.indexOf(verif1) < injectedExp.indexOf(cand1), 'verified ranks before candidate')
+        const c1 = body.injected.experiences.find(e => e.memory_id === cand1)
+        assert.equal(c1.provisional, '待验证建议', 'candidate marked provisional')
+      }
+      const b = body.receipt.budgets
+      assert.ok(b.experience.used_items <= CFG.experience_budget.max_items && b.experience.used_tokens <= CFG.experience_budget.max_tokens)
+      assert.ok(b.event.used_items <= CFG.event_budget.max_items && b.event.used_tokens <= CFG.event_budget.max_tokens)
+      assert.ok(b.total.used_tokens <= b.total.ceiling)
+      console.log('PASS 9 experience ordering + superseded excluded + oversized skipped + dual budgets held')
+    })
+  }
+
+  // 10. token_budget 收紧生效（且不能放宽硬上限）
+  await withClient(AUTH1, async (c) => {
+    const tight = await call(c, 'recall', recallArgs({ query: TIDE_QUERY, token_budget: 30 }))
+    assert.equal(tight.body.ok, true)
+    assert.ok(tight.body.receipt.budgets.total.used_tokens <= 30, 'tight budget respected')
+    assert.equal(tight.body.receipt.budgets.total.ceiling, 30)
+    const wide = await call(c, 'recall', recallArgs({ query: TIDE_QUERY, token_budget: 999999 }))
+    assert.equal(wide.body.receipt.budgets.total.ceiling, CFG.total_token_ceiling, 'cannot widen beyond hard ceiling')
+    console.log('PASS 10 token_budget tightens only')
+  })
+
+  // 11. 并发同 request_id（SPEC §3）：全部成功、同一 receipt、恰一行
+  {
+    const args = recallArgs({ query: TIDE_QUERY })
+    const results = await Promise.all(Array.from({ length: 20 }, () => withClient(AUTH1, (c) => call(c, 'recall', args))))
+    results.forEach((r, i) => assert.equal(r.body.ok, true, `concurrent ${i}: ${JSON.stringify(r.body).slice(0, 160)}`))
+    const sigs = new Set(results.map(r => canonicalJson(r.body.receipt.items.map(x => x.memory_id))))
+    assert.equal(sigs.size, 1, `all concurrent recalls share one receipt (got ${sigs.size})`)
+    const n = (await q('SELECT count(*)::INT4 AS n FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, args.request_id])).rows[0].n
+    assert.equal(n, 1, 'exactly one receipt row after concurrency')
+    console.log('PASS 11 20 concurrent same request_id -> one receipt, one row')
+  }
+
+  // 12. recall 不改 memory 行（outcome-gated）
+  {
+    const before = (await q('SELECT strength_anchor, strength_anchor_at, last_rewarded_at, revision, credited_success_count FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seeds.tide])).rows[0]
+    await withClient(AUTH1, async (c) => { await call(c, 'recall', recallArgs({ query: TIDE_QUERY })) })
+    const after = (await q('SELECT strength_anchor, strength_anchor_at, last_rewarded_at, revision, credited_success_count FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seeds.tide])).rows[0]
     assert.deepEqual(after, before, 'recall must not mutate memory rows')
-    console.log('PASS 7 recall leaves memory rows untouched (outcome-gated)')
+    console.log('PASS 12 recall leaves memory rows untouched (outcome-gated)')
+  }
+
+  // 13. EXPLAIN 断言（仓库内可复现）：第一路必须命中 vector search 节点
+  {
+    const vec = '[' + Array(512).fill('0.01').join(',') + ']'
+    const plan = (await q(`EXPLAIN SELECT memory_id FROM memories@mem_vec_idx WHERE tenant_id=$1 AND agent_id=$2 ORDER BY embedding <=> $3 LIMIT 50`,
+      [TENANT, AGENT, vec])).rows.map(r => Object.values(r)[0]).join('\n')
+    assert.ok(/vector search/i.test(plan), `path A must use vector index:\n${plan}`)
+    console.log('PASS 13 EXPLAIN: path A hits vector search node')
   }
 
   console.log('ALL P0-04 RECALL ASSERTIONS PASSED')
@@ -152,17 +296,18 @@ try {
 } finally {
   const cleanupErrors = []
   try {
-    const eps = [...createdEpisodes], rids = [...createdRequestIds]
-    if (eps.length) await q('DELETE FROM memories WHERE tenant_id=$1 AND agent_id=$2 AND episode_id = ANY($3)', [TENANT, AGENT, eps])
-    if (directMemoryIds.length) await q('DELETE FROM memories WHERE tenant_id=$1 AND agent_id=$2 AND memory_id = ANY($3)', [TENANT, AGENT, directMemoryIds])
-    if (rids.length) {
-      await q(`DELETE FROM tool_requests WHERE tenant_id=$1 AND agent_id=$2 AND request_id = ANY($3)`, [TENANT, AGENT, rids])
-      await q(`DELETE FROM recall_requests WHERE tenant_id=$1 AND agent_id=$2 AND request_id = ANY($3)`, [TENANT, AGENT, rids])
+    const E = [...eps], R = [...rids]
+    if (E.length) await q('DELETE FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)', [TENANT, E])
+    if (directIds.length) await q('DELETE FROM memories WHERE tenant_id=$1 AND memory_id = ANY($2)', [TENANT, directIds])
+    if (R.length) {
+      await q('DELETE FROM tool_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, R])
+      await q('DELETE FROM recall_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, R])
     }
-    const mem = eps.length ? (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)', [TENANT, eps])).rows[0].n : 0
-    const tr = rids.length ? (await q('SELECT count(*)::INT4 AS n FROM tool_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, rids])).rows[0].n : 0
-    const rr = rids.length ? (await q('SELECT count(*)::INT4 AS n FROM recall_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, rids])).rows[0].n : 0
-    if (mem !== 0 || tr !== 0 || rr !== 0) cleanupErrors.push(new Error(`residual: memories=${mem} tool_requests=${tr} recall_requests=${rr}`))
+    const mem = E.length ? (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)', [TENANT, E])).rows[0].n : 0
+    const dir = directIds.length ? (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND memory_id = ANY($2)', [TENANT, directIds])).rows[0].n : 0
+    const tr = R.length ? (await q('SELECT count(*)::INT4 AS n FROM tool_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, R])).rows[0].n : 0
+    const rr = R.length ? (await q('SELECT count(*)::INT4 AS n FROM recall_requests WHERE tenant_id=$1 AND request_id = ANY($2)', [TENANT, R])).rows[0].n : 0
+    if (mem || dir || tr || rr) cleanupErrors.push(new Error(`residual: memories=${mem} direct=${dir} tool_requests=${tr} recall_requests=${rr}`))
     else console.log('cleanup done (residual: memories=0, tool_requests=0, recall_requests=0)')
   } catch (e) { cleanupErrors.push(e) }
   await forensic?.end().catch(() => {})

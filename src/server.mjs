@@ -6,11 +6,26 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod'
 import { rememberTool } from './tools/remember.mjs'
 import { recallTool } from './tools/recall.mjs'
+import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
 // spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
 const AUTH_MAP = {
   'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent' },
   'spike-second-key': { tenant_id: 'demo-tenant', agent_id: 'second-agent' },
+}
+
+// 工具级瞬断韧性：底层事务各自重试 5 次后仍失败（serverless 集群连续掐连接）时，
+// 整个工具调用重试一次——幂等台账保证无重复副作用。每次重试都打日志，绝不静默掩盖。
+const runToolResilient = async (label, fn) => {
+  for (let attempt = 1; ; attempt++) {
+    try { return await fn() }
+    catch (e) {
+      const retryable = isRetryableDatabaseError(e) || e.code === '40001'
+      console.error(JSON.stringify({ evt: `${label}_error`, attempt, code: e.code, retryable, msg: e.message?.slice(0, 160) }))
+      if (!retryable || attempt >= 2) return { ok: false, error: 'internal_error' }
+      await new Promise(r => setTimeout(r, 1200))
+    }
+  }
 }
 
 const app = express()
@@ -29,17 +44,11 @@ app.post('/mcp', async (req, res) => {
   server.tool('remember',
     'store one memory (admission-gated, idempotent). episode_id + request_id required.',
     { content: z.string(), episode_id: z.string(), request_id: z.string(), kind: z.string().optional(), importance: z.number().optional() },
-    async (args) => asResult(await rememberTool({ principal, ...args }).catch(e => {
-      console.error(JSON.stringify({ evt: 'remember_error', code: e.code, msg: e.message?.slice(0, 160) }))
-      return { ok: false, error: 'internal_error' }        // 工具异常也返回结构化 JSON，不裸抛文本
-    })))
+    async (args) => asResult(await runToolResilient('remember', () => rememberTool({ principal, ...args }))))
   server.tool('recall',
-    'semantic recall with lifecycle rerank and persisted receipt. query + episode_id + attempt_id + request_id required.',
-    { query: z.string(), episode_id: z.string(), attempt_id: z.string(), request_id: z.string(), purpose: z.string().optional() },
-    async (args) => asResult(await recallTool({ principal, ...args }).catch(e => {
-      console.error(JSON.stringify({ evt: 'recall_error', code: e.code, msg: e.message?.slice(0, 160) }))
-      return { ok: false, error: 'internal_error' }
-    })))
+    'semantic recall with lifecycle rerank and persisted content-free receipt. query/purpose/episode_id/attempt_id/request_id required; token_budget optionally tightens total injection (never widens per-layer hard caps).',
+    { query: z.string(), purpose: z.string(), episode_id: z.string(), attempt_id: z.string(), request_id: z.string(), token_budget: z.number().int().positive().optional() },
+    async (args) => asResult(await runToolResilient('recall', () => recallTool({ principal, ...args }))))
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
   try {
