@@ -20,6 +20,7 @@ export const OUTCOME_CFG = {
   outcome_window_hours: 24,
   base_half_life: { event: 72, experience: 2160 },
   promotion_distinct_instances: 2,
+  max_attributions: 32,   // 事务 B 必须保持短事务：v1 注入上限 8 条，32 已是 4 倍富余
 }
 
 // attribution 是写入 outcomes 的唯一自由结构：exact keys + 全 UUID + enum，正文无门可入
@@ -45,6 +46,7 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
   if (!['success', 'failure', 'cancelled'].includes(status)) return { ok: false, error: 'status_invalid' }
   const attrs = attributions ?? []
   if (!Array.isArray(attrs)) return { ok: false, error: 'attributions_must_be_array' }
+  if (attrs.length > OUTCOME_CFG.max_attributions) return { ok: false, error: 'too_many_attributions', max: OUTCOME_CFG.max_attributions }
   // 状态-角色耦合（SPEC §1.4）
   if (status === 'cancelled' && attrs.length > 0) return { ok: false, error: 'cancelled_allows_no_attributions' }
   for (const a of attrs) {
@@ -70,18 +72,23 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
     // 幂等 claim 读自 outcomes 本表（SPEC §1.5：report_outcome 不进 tool_requests）
     const prior = await readPrior(c, tenant_id, outcome_request_id)
     if (prior) {
+      // 013 之前的 legacy 行无幂等证据（016/017 后不应存在）——诚实拒绝，不冒充 exact replay
+      if (!prior.payload_hmac || !prior.response_json) return { ok: false, error: 'legacy_outcome_unreplayable' }
       if (!prior.payload_hmac.equals(fingerprint)) return { ok: false, error: 'idempotency_key_reused' }
       return prior.response_json
     }
-    // attempt 终态唯一（UNIQUE (tenant, attempt_id)）：同 attempt 另一个 key 的终态 = 冲突
-    const existing = (await c.query('SELECT status FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [tenant_id, attempt_id])).rows[0]
+    // attempt 终态唯一按 (tenant, agent, attempt)（migration 018/019）：attempt 是 agent 私有概念，
+    // 终态槽 agent 间隔离——别的 agent 报同名 attempt 落它自己的槽，占不走你的
+    const existing = (await c.query('SELECT status FROM outcomes WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id=$3', [tenant_id, agent_id, attempt_id])).rows[0]
     if (existing) return { ok: false, error: 'outcome_conflict', existing_status: existing.status }
-    // attempt 归属：ledger 里已有事件的 attempt 必须与本 outcome 声明的 agent/episode/task 一致，
-    // 否则整体拒绝——不许 second-agent 用他人 attempt_id 占终态槽（零事件的空 attempt 放行，cancelled 合法）
+    // attempt 声明一致性（非授权手段——授权由上面的 agent 隔离承担）：本 agent 的 ledger 里该 attempt
+    // 已有事件时，outcome 声明的 episode/task 必须与确定性首行一致（防同 agent 误报错 scope）
     const anchorEv = (await c.query(
-      'SELECT agent_id, episode_id, task_instance_id FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2 LIMIT 1',
-      [tenant_id, attempt_id])).rows[0]
-    if (anchorEv && (anchorEv.agent_id !== agent_id || anchorEv.episode_id !== episode_id || anchorEv.task_instance_id !== task_instance_id)) {
+      `SELECT episode_id, task_instance_id FROM attempt_events
+       WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id=$3
+       ORDER BY created_at, event_id LIMIT 1`,
+      [tenant_id, agent_id, attempt_id])).rows[0]
+    if (anchorEv && (anchorEv.episode_id !== episode_id || anchorEv.task_instance_id !== task_instance_id)) {
       return { ok: false, error: 'attempt_scope_mismatch' }
     }
 
@@ -212,10 +219,11 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
       }
     }
 
-    // 落 outcome：幂等指纹同行写入；response_json 在晋级算完后同事务回填
+    // 落 outcome：幂等指纹同行写入；response_json 先占位 '{}'（017 NOT NULL），
+    // 晋级算完后同事务回填——SERIALIZABLE 提交原子性保证外界读不到占位态
     await c.query(
-      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'{}')`,
       [tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, JSON.stringify(attrs), anyPlasticity, fingerprint])
 
     // outcome 落库后：写 success_evidence + 判经验晋级（外键此刻满足）
@@ -259,10 +267,11 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
     const winner = await inSerializableTx(async (c) => readPrior(c, tenant_id, outcome_request_id), 'report-outcome-winner')
     if (!winner) {
       const existing = await inSerializableTx(async (c) => (await c.query(
-        'SELECT status FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [tenant_id, attempt_id])).rows[0] ?? null, 'report-outcome-conflict-read')
+        'SELECT status FROM outcomes WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id=$3', [tenant_id, agent_id, attempt_id])).rows[0] ?? null, 'report-outcome-conflict-read')
       if (existing) return { ok: false, error: 'outcome_conflict', existing_status: existing.status }
       throw e
     }
+    if (!winner.payload_hmac || !winner.response_json) return { ok: false, error: 'legacy_outcome_unreplayable' }
     if (!winner.payload_hmac.equals(fingerprint)) return { ok: false, error: 'idempotency_key_reused' }
     return winner.response_json
   })

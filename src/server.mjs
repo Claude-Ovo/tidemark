@@ -16,6 +16,8 @@ import { isRetryableDatabaseError } from '../migrations/db.mjs'
 const AUTH_MAP = {
   'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent', capabilities: ['memory:pin'] },
   'spike-second-key': { tenant_id: 'demo-tenant', agent_id: 'second-agent', capabilities: [] },
+  // third-agent 有 pin 能力位：专测"capability 过了、agent scope 也必须过"（两道门独立）
+  'spike-third-key':  { tenant_id: 'demo-tenant', agent_id: 'third-agent', capabilities: ['memory:pin'] },
 }
 
 // 工具级瞬断韧性：底层事务各自重试 5 次后仍失败（serverless 集群连续掐连接）时，

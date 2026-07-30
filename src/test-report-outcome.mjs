@@ -414,7 +414,9 @@ try {
     console.log('PASS 18 concurrent double-terminal: single winner')
   }
 
-  // 19. cross-agent：second-agent 不能动 demo-agent 的 attempt/receipt/memory
+  // 19. cross-agent（二审#2 所有权模型）：终态槽按 (tenant, agent, attempt) 隔离——
+  // second-agent 用 demo 的 attempt_id 报 outcome 落的是它自己的槽，占不走 demo 的；
+  // demo 的 receipt/memory 对它全程不可见不可动；demo 随后报自己的终态照常成功
   {
     const episode = ep(), attemptId = att(), taskId = suite + '-t19'
     let cit
@@ -422,15 +424,23 @@ try {
     const before = await memRow(cit.memory_id)
     await withClient({ 'x-tidemark-auth': 'spike-second-key' }, async (c) => {
       const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
-      assert.equal(r.body.error, 'attempt_scope_mismatch', JSON.stringify(r.body))
+      assert.equal(r.body.ok, true, JSON.stringify(r.body))                       // 落它自己的槽
+      assert.equal(r.body.items[0].reason, 'receipt_not_found_in_scope', JSON.stringify(r.body.items))
+      assert.equal(r.body.plasticity_applied, false, 'foreign receipt invisible -> zero plasticity')
     })
     const after = await memRow(cit.memory_id)
     assert.equal(Number(after.credited_success_count), Number(before.credited_success_count), 'cross-agent: memory untouched')
     const rr = (await q('SELECT terminal_attempt_id FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, cit.recall_request_id])).rows[0]
     assert.equal(rr.terminal_attempt_id, null, 'cross-agent: receipt not settled')
-    const n = (await q('SELECT count(*)::INT4 AS n FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, attemptId])).rows[0].n
-    assert.equal(n, 0, 'cross-agent: no outcome row claimed')
-    console.log('PASS 19 cross-agent replay fully rejected')
+    // 关键断言：demo 自己的终态槽没有被占走（squatting 攻击的修复验证）
+    await withClient(AUTH, async (c) => {
+      const own = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
+      assert.equal(own.body.ok, true, `demo's own terminal slot must survive: ${JSON.stringify(own.body)}`)
+      assert.equal(own.body.items[0].applied, true, 'demo credits its own memory normally')
+    })
+    const rows = (await q('SELECT agent_id FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2 ORDER BY agent_id', [TENANT, attemptId])).rows
+    assert.deepEqual(rows.map(r => r.agent_id), ['demo-agent', 'second-agent'], 'two isolated terminal slots, one per agent')
+    console.log('PASS 19 per-agent terminal slots: squatting impossible, demo unharmed')
   }
 
   // 20/21. 晋级判定数【召回时点 candidate】而非全部 experience（Codex 初审#4 回归）
@@ -495,7 +505,18 @@ try {
     }
   }
 
-  console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED (21 scenarios)')
+  // 22. attributions 数量上限（二审#7）：事务 B 保持短事务
+  await withClient(AUTH, async (c) => {
+    const mk = () => ({ recall_request_id: randomUUID(), receipt_item_id: randomUUID(), memory_id: randomUUID(), role: 'credited', evidence_event_id: randomUUID() })
+    const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: ep(), task_instance_id: suite + '-t22', attempt_id: att(), status: 'success',
+      attributions: Array.from({ length: 33 }, mk) })
+    assert.equal(r.body.error, 'too_many_attributions', JSON.stringify(r.body))
+    const ok = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: ep(), task_instance_id: suite + '-t22b', attempt_id: att(), status: 'cancelled' })
+    assert.equal(ok.body.ok, true, 'cap does not break normal calls')
+    console.log('PASS 22 attributions capped at 32, transaction B stays short')
+  })
+
+  console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED (22 scenarios)')
 } catch (e) {
   primaryError = e
 } finally {

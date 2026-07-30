@@ -127,8 +127,8 @@ try {
     // 三处版本一致：DB 列 == receipt 字段 == 导出常量（防漂移，Codex 三审）
     assert.equal(row.pipeline_version, PIPELINE_VERSION, 'DB column matches exported PIPELINE_VERSION')
     assert.equal(row.receipt_json.receipt.pipeline_version, PIPELINE_VERSION, 'receipt field matches exported PIPELINE_VERSION')
-    // v4: receipt item 增加 experience_status_at_recall 冻结快照（P0-05 晋级判定真相源）
-    assert.ok(PIPELINE_VERSION.startsWith('recall-v4|'), 'algorithm change bumped the version')
+    // v4: receipt item 增加 experience_status_at_recall 快照；v5: faded+pinned 可召回（结论 3）
+    assert.ok(PIPELINE_VERSION.startsWith('recall-v5|'), 'algorithm change bumped the version')
     for (const marker of ['gateA=0.55', 'floorB=0.35', 'limitB=20', 'overfetchMax=1600', 'inject-schema=v2']) {
       assert.ok(PIPELINE_VERSION.includes(marker), `version string carries candidate-semantics param: ${marker}`)
     }

@@ -19,8 +19,9 @@ const RX_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const fp = (tenant_id, agent_id, params) =>
   createHmac('sha256', `${HMAC_KEY}|${tenant_id}|${agent_id}`).update(canonicalJson(params)).digest()
 
+// clamp 已删：未来锚点在调用前显式拒绝（结论 10——不准用 max(age,0) 掩盖）
 const decay = (anchor, anchorAt, halfLife, now) =>
-  Number(anchor) * Math.exp(-Math.LN2 * Math.max(0, (now - new Date(anchorAt).getTime()) / 3600e3) / Number(halfLife))
+  Number(anchor) * Math.exp(-Math.LN2 * ((now - new Date(anchorAt).getTime()) / 3600e3) / Number(halfLife))
 
 export const pinTool = async ({ principal, memory_id, pinned, reason, request_id }) => {
   if (!principal) return { ok: false, error: 'unauthorized' }
@@ -51,6 +52,9 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
     if (m.layer === 'experience' && m.exp_status === 'superseded') return { ok: false, error: 'superseded_not_pinnable' }
 
     const now = Date.now()
+    // 时间不变量（结论 10）：未来锚点拒绝一切状态转换——pin 会把它 materialize 到 now、
+    // unpin 会把它 reset 到 now，两者都是回拨清洗。no-op 路径一并拒，行为统一
+    if (new Date(m.strength_anchor_at).getTime() > now) return { ok: false, error: 'future_timestamp_rejected' }
     let response
     if (m.pinned === pinned) {
       // 幂等 set：状态已一致，零副作用
@@ -74,7 +78,9 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
     await c.query(
       'INSERT INTO tool_requests (tenant_id, agent_id, tool_name, request_id, payload_hmac, response_json) VALUES ($1,$2,$3,$4,$5,$6)',
       [tenant_id, agent_id, 'pin', request_id, fingerprint, response])
-    console.log(JSON.stringify({ evt: 'pin', memory_id, pinned, transition: response.transition, reason, tenant_id, agent_id }))
+    // reason 不进日志：任意 slug 是低门槛正文通道，CloudWatch 残留会破坏硬删除承诺；
+    // 它只参与 payload_hmac（密文）——审计需要时以 request_id 对账调用方自己的记录
+    console.log(JSON.stringify({ evt: 'pin', memory_id, pinned, transition: response.transition, tenant_id, agent_id }))
     return response
   }, 'pin-commit').catch(async (e) => {
     if (e.code !== '23505') throw e

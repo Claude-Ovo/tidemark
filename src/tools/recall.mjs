@@ -33,8 +33,10 @@ const decayEffective = (row, now) => {
 const utilityOf = (row) =>
   (Number(row.credited_success_count) + 1) / (Number(row.credited_success_count) + Number(row.evidenced_blame_count) + 2)
 
+// pinned 例外（结论 3"pinned 绕过衰减"的召回面）：faded 但被 pin 的行仍可召回——
+// pin 的语义就是"这条不许沉底"，state 保留 faded 以便 unpin 后立即恢复沉底
 const isEligible = (r) =>
-  r.admission === 'accepted' && r.state !== 'faded' && (r.layer === 'event' || r.exp_status !== 'superseded')
+  r.admission === 'accepted' && (r.state !== 'faded' || r.pinned) && (r.layer === 'event' || r.exp_status !== 'superseded')
 
 const CAND_COLS = `memory_id, layer, kind, content, exp_status, experience_body, pinned, importance,
   strength_anchor, strength_anchor_at, half_life_hours, credited_success_count, evidenced_blame_count,
@@ -159,7 +161,7 @@ export const recallTool = async ({ principal, query, purpose, episode_id, attemp
       `SELECT ${CAND_COLS}, embedding <=> $3 AS dist
        FROM memories
        WHERE tenant_id = $1 AND agent_id = $2 AND embedding IS NOT NULL
-         AND admission = 'accepted' AND state <> 'faded'
+         AND admission = 'accepted' AND (state <> 'faded' OR pinned)
          AND (layer = 'event' OR exp_status <> 'superseded')
          AND (pinned OR importance >= 0.8)
          AND embedding <=> $3 <= ${maxDist}

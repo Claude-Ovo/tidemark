@@ -6,7 +6,7 @@ import { TOKEN_ESTIMATOR_VERSION } from './tokens.mjs'
 import { CFG } from './recall-config.mjs'
 
 export const PIPELINE_VERSION = [
-  'recall-v4',   // v4: receipt item 增加 experience_status_at_recall 冻结快照（晋级判定的真相源）
+  'recall-v5',   // v4: receipt item 增加 experience_status_at_recall 快照；v5: faded+pinned 可召回（结论 3）
   `embed=${embedProviderName}`, 'dims=512',
   `rerank=${CFG.weights.sim}sim+${CFG.weights.vit}vit+${CFG.weights.util}util+${CFG.weights.imp}imp`,
   `gateA=${CFG.semantic_gate}`, `topN=${CFG.vector_top_n}`, `overfetchMax=${CFG.overfetch_max}`,

@@ -151,10 +151,11 @@ const outcomeInsert = (overrides = {}) => {
     ...overrides,
   }
   return {
+    // payload_hmac/response_json are NOT NULL since 017 -- fixtures carry stubs
     text: `INSERT INTO public.outcomes (
       tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id,
-      attempt_id, status, attributions, plasticity_applied
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::JSONB, $9)`,
+      attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::JSONB, $9, $10, '{}')`,
     values: [
       row.tenant_id,
       row.outcome_request_id,
@@ -165,6 +166,7 @@ const outcomeInsert = (overrides = {}) => {
       row.status,
       JSON.stringify(row.attributions),
       row.plasticity_applied,
+      Buffer.from('verify-hmac-stub'),
     ],
     row,
   }
@@ -399,17 +401,20 @@ const runCheckTests = async (client) => {
 }
 
 const runUniqueTests = async (client) => {
+  // 018/019: terminal uniqueness is per (tenant, agent, attempt) -- an attempt
+  // is agent-private, so a same-tenant different-agent row must NOT conflict
   const firstOutcome = outcomeInsert()
   const duplicateAttempt = outcomeInsert({
     tenant_id: firstOutcome.row.tenant_id,
+    agent_id: firstOutcome.row.agent_id,
     attempt_id: firstOutcome.row.attempt_id,
   })
   await expectViolation(client, {
-    name: 'UNIQUE outcomes (tenant_id, attempt_id)',
+    name: 'UNIQUE outcomes (tenant_id, agent_id, attempt_id)',
     setup: [firstOutcome],
     operation: duplicateAttempt,
     expectedCode: '23505',
-    expectedConstraint: 'outcomes_attempt_uq',
+    expectedConstraint: 'outcomes_agent_attempt_uq',
   })
 
   const firstRun = nightlyRunInsert()
