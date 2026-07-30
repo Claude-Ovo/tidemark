@@ -14,27 +14,34 @@ if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (
 export const EVENT_TYPES = ['tool_call', 'tool_error', 'user_correction', 'attempt_start', 'attempt_end', 'memory_used', 'note']
 const MAX_PAYLOAD_BYTES = 4096   // 防御性兜底（UTF-8 字节，canonical JSON）；白名单下正常不可达
 
-// ---- payload 白名单 schema（Codex P0：台账只准装操作性 ID/枚举/有界结构，杜绝正文复制）----
-// 每种 event_type 定义允许的键与验证器；未知键一律拒绝；散文进不了台账（散文属于 remember）。
+// ---- payload 白名单 schema（Codex P0 二连：台账只准装操作性 ID/有限枚举/有界数值）----
+// 语义字符串字段一律【有限枚举】而非通用 slug——任意短正文换个格式也进不来；
+// 没有冻结枚举的字段（如原 note.code）直接没收。散文属于 remember，台账是纯骨架。
 const RX = {
   uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-  slug: /^[a-z0-9_.-]{1,64}$/i,
-  hex64: /^[0-9a-f]{1,64}$/i,
+  hex64: /^[0-9a-f]{64}$/i,   // 恰 64 位 hex（sha256），不多不少
 }
 const vUuid = (v) => typeof v === 'string' && RX.uuid.test(v)
-const vSlug = (v) => typeof v === 'string' && RX.slug.test(v)
-const vHex = (v) => typeof v === 'string' && RX.hex64.test(v)
+const vHex64 = (v) => typeof v === 'string' && RX.hex64.test(v)
 const vInt = (v) => Number.isInteger(v) && v >= 0 && v <= 10_000_000
+const vEnum = (set) => (v) => set.includes(v)
 
+export const ERROR_TYPES = ['timeout', 'crash', 'nonzero_exit', 'invalid_input', 'permission_denied', 'not_found', 'network', 'oom', 'assertion_failed', 'other']
+export const CORRECTION_TYPES = ['factual_error', 'wrong_approach', 'wrong_scope', 'style', 'safety', 'other']
+export const ATTEMPT_STATUSES = ['success', 'failure', 'cancelled']
+
+// 冻结结论 4：失败证据必须可表达 task/attempt/tool/error_type/outcome/trace_id/timestamp——
+// tool_error 强制 top-level tool_name + payload error_type/trace_id；attempt_end 强制 status
 const PAYLOAD_SCHEMAS = {
-  attempt_start: { required: [], optional: {} },                                  // 无参：payload 只能为空
-  attempt_end: { required: [], optional: { status: (v) => ['success', 'failure', 'cancelled'].includes(v) } },
-  tool_call: { required: [], optional: { args_digest: vHex, duration_ms: vInt, exit_code: vInt } },
-  tool_error: { required: [], optional: { error_type: vSlug, args_digest: vHex, duration_ms: vInt, exit_code: vInt } },
-  user_correction: { required: [], optional: { correction_type: vSlug } },
-  note: { required: [], optional: { code: vSlug, ref: vUuid } },                  // 无自由文本：代号+引用而已
+  attempt_start: { required: {}, optional: {} },                                  // payload 只能为空
+  attempt_end: { required: { status: vEnum(ATTEMPT_STATUSES) }, optional: { trace_id: vUuid } },
+  tool_call: { required: {}, optional: { args_digest: vHex64, duration_ms: vInt, exit_code: vInt, trace_id: vUuid } },
+  tool_error: { required: { error_type: vEnum(ERROR_TYPES), trace_id: vUuid }, optional: { args_digest: vHex64, duration_ms: vInt, exit_code: vInt } },
+  user_correction: { required: {}, optional: { correction_type: vEnum(CORRECTION_TYPES), trace_id: vUuid } },
+  note: { required: {}, optional: { ref: vUuid } },                               // code 已没收：无冻结枚举的语义字段不许存在
   memory_used: { required: { recall_request_id: vUuid, receipt_item_id: vUuid, memory_id: vUuid }, optional: {} },
 }
+const TOOL_NAME_REQUIRED = new Set(['tool_error'])   // 冻结结论 4：失败事件必须带 tool
 
 const validatePayload = (event_type, payload) => {
   const schema = PAYLOAD_SCHEMAS[event_type]
@@ -48,7 +55,7 @@ const validatePayload = (event_type, payload) => {
     if (!allowed[k](p[k])) return `payload_value_invalid:${k}`
   }
   for (const k of requiredKeys) {
-    if (!(k in p)) return `memory_used_payload_missing_${k}`
+    if (!(k in p)) return event_type === 'memory_used' ? `memory_used_payload_missing_${k}` : `${event_type}_payload_missing_${k}`
   }
   return null
 }
@@ -63,7 +70,8 @@ export const logEventTool = async ({ principal, episode_id, task_instance_id, at
     if (!v || typeof v !== 'string') return { ok: false, error: `${k}_required` }
   }
   if (!EVENT_TYPES.includes(event_type)) return { ok: false, error: 'event_type_invalid' }
-  if (tool_name != null && (typeof tool_name !== 'string' || !RX.slug.test(tool_name))) return { ok: false, error: 'tool_name_invalid' }
+  if (tool_name != null && (typeof tool_name !== 'string' || !/^[a-z0-9_.-]{1,64}$/i.test(tool_name))) return { ok: false, error: 'tool_name_invalid' }
+  if (TOOL_NAME_REQUIRED.has(event_type) && !tool_name) return { ok: false, error: `${event_type}_tool_name_required` }
   const schemaError = validatePayload(event_type, payload)
   if (schemaError) return { ok: false, error: schemaError }
   if (payload != null && Buffer.byteLength(canonicalJson(payload), 'utf8') > MAX_PAYLOAD_BYTES) {

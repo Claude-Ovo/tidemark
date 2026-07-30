@@ -55,42 +55,71 @@ try {
     console.log('PASS 2 event_type enum enforced')
   })
 
-  // 3. happy path：tool_error 带操作性字段落台账；白名单外的自由文本一律拒（哨兵不落库）
-  const SENTINEL = 'SENTINEL-' + randomUUID().slice(0, 8)
+  // 3. 枚举化白名单：slug 马甲哨兵在每个语义字符串字段都必须被拒；合法失败轨迹完整可表达
+  const SENTINEL = 'sentinel-pw-' + randomUUID().slice(0, 8)   // slug 合法形态的短正文（Codex 二审复现形态）
   let evArgs
   await withClient(AUTH1, async (c) => {
-    // 3a 自由文本被白名单拦截（Codex P0 复现路径，现在必须死）
-    const prose = await call(c, 'log_event', { ...base(), event_type: 'note', payload: { detail: SENTINEL } })
-    assert.equal(prose.isError, true)
-    assert.ok(prose.body.error.startsWith('payload_key_not_allowed'), `free text must be rejected (got ${prose.body.error})`)
-    // 3b 合法操作性 payload 通过
-    evArgs = { ...base(), event_type: 'tool_error', tool_name: 'unit-tool', payload: { error_type: 'timeout', duration_ms: 1200, exit_code: 1 } }
-    const { body } = await call(c, 'log_event', evArgs)
-    assert.equal(body.ok, true); assert.ok(body.event_id)
-    const row = (await q('SELECT event_type, tool_name, payload, agent_id FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2 AND event_id=$3',
-      [TENANT, evArgs.attempt_id, body.event_id])).rows[0]
-    assert.ok(row && row.event_type === 'tool_error' && row.payload.error_type === 'timeout' && row.agent_id === 'demo-agent')
-    // 3c note 只许 code/ref
-    const okNote = await call(c, 'log_event', { ...base(), event_type: 'note', payload: { code: 'ctx_reset' } })
-    assert.equal(okNote.body.ok, true)
-    console.log('PASS 3 allowlist schemas: prose rejected, operational payload lands')
+    // 3a 未知键仍拒
+    const unknown = await call(c, 'log_event', { ...base(), event_type: 'note', payload: { detail: SENTINEL } })
+    assert.ok(unknown.body.error.startsWith('payload_key_not_allowed'))
+    // 3b slug 马甲哨兵逐字段轰炸：每个语义字符串字段都必须拒收
+    const smuggle = [
+      ['note', { ref: SENTINEL }, 'payload_value_invalid:ref'],                          // ref 必须 uuid
+      ['tool_error', { error_type: SENTINEL, trace_id: randomUUID() }, 'payload_value_invalid:error_type'],
+      ['user_correction', { correction_type: SENTINEL }, 'payload_value_invalid:correction_type'],
+      ['attempt_end', { status: SENTINEL }, 'payload_value_invalid:status'],
+      ['tool_call', { args_digest: SENTINEL }, 'payload_value_invalid:args_digest'],
+    ]
+    for (const [type, payload, want] of smuggle) {
+      const r = await call(c, 'log_event', { ...base(), event_type: type, tool_name: type === 'tool_error' ? 'unit-tool' : undefined, payload })
+      assert.equal(r.body.error, want, `${type} semantic field must reject slug-shaped sentinel (got ${r.body.error})`)
+    }
+    // 3c 冻结结论 4 的完整失败轨迹：start(空) -> tool_error(全字段) -> attempt_end(status)
+    const traj = base()
+    const s1 = await call(c, 'log_event', { ...traj, request_id: rid(), event_type: 'attempt_start' })
+    assert.equal(s1.body.ok, true)
+    evArgs = { ...traj, request_id: rid(), event_type: 'tool_error', tool_name: 'unit-tool',
+      payload: { error_type: 'timeout', trace_id: randomUUID(), duration_ms: 1200, exit_code: 1 } }
+    const s2 = await call(c, 'log_event', evArgs)
+    assert.equal(s2.body.ok, true)
+    const s3 = await call(c, 'log_event', { ...traj, request_id: rid(), event_type: 'attempt_end', payload: { status: 'failure' } })
+    assert.equal(s3.body.ok, true)
+    const row = (await q('SELECT event_type, tool_name, payload FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2 AND event_id=$3',
+      [TENANT, evArgs.attempt_id, s2.body.event_id])).rows[0]
+    assert.ok(row.payload.error_type === 'timeout' && row.payload.trace_id && row.tool_name === 'unit-tool')
+    // 3d 冻结字段逐项缺失负例
+    const missing = [
+      [{ ...traj, request_id: rid(), event_type: 'tool_error', payload: { error_type: 'timeout', trace_id: randomUUID() } }, 'tool_error_tool_name_required'],
+      [{ ...traj, request_id: rid(), event_type: 'tool_error', tool_name: 'unit-tool', payload: { trace_id: randomUUID() } }, 'tool_error_payload_missing_error_type'],
+      [{ ...traj, request_id: rid(), event_type: 'tool_error', tool_name: 'unit-tool', payload: { error_type: 'timeout' } }, 'tool_error_payload_missing_trace_id'],
+      [{ ...traj, request_id: rid(), event_type: 'attempt_end' }, 'attempt_end_payload_required'],
+      [{ ...traj, request_id: rid(), event_type: 'attempt_end', payload: {} }, 'attempt_end_payload_missing_status'],
+    ]
+    for (const [args, want] of missing) {
+      const r = await call(c, 'log_event', args)
+      assert.equal(r.body.error, want, `expected ${want}, got ${r.body.error}`)
+    }
+    console.log('PASS 3 enum allowlist: slug sentinel dead in every semantic field + frozen failure fields enforced')
   })
 
   // 4. 幂等重放 + 同 key 异 payload 拒
   await withClient(AUTH1, async (c) => {
+    const before = (await q('SELECT count(*)::INT4 AS n FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, evArgs.attempt_id])).rows[0].n
     const first = await call(c, 'log_event', evArgs)
     const again = await call(c, 'log_event', evArgs)
     assert.equal(again.body.event_id, first.body.event_id, 'replay returns same event_id')
-    const n = (await q('SELECT count(*)::INT4 AS n FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, evArgs.attempt_id])).rows[0].n
-    assert.equal(n, 1, 'exactly one ledger row')
-    const diff = await call(c, 'log_event', { ...evArgs, payload: { error_type: 'mutated' } })
-    assert.equal(diff.body.error, 'idempotency_key_reused')
+    const after = (await q('SELECT count(*)::INT4 AS n FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, evArgs.attempt_id])).rows[0].n
+    assert.equal(after, before, 'replay adds zero rows')
+    const own = (await q('SELECT count(*)::INT4 AS n FROM attempt_events WHERE tenant_id=$1 AND attempt_id=$2 AND event_id=$3', [TENANT, evArgs.attempt_id, first.body.event_id])).rows[0].n
+    assert.equal(own, 1, 'the event itself is exactly one row')
+    const diff = await call(c, 'log_event', { ...evArgs, payload: { ...evArgs.payload, error_type: 'crash' } })
+    assert.equal(diff.body.error, 'idempotency_key_reused', `schema-valid but different payload must hit idempotency guard (got ${diff.body.error})`)
     console.log('PASS 4 idempotent replay + key reuse rejected')
   })
 
   // 5. 20 并发同 request_id：同一 event_id、两表各恰一行（SPEC §9）
   {
-    const args = { ...base(), event_type: 'note', payload: { code: 'concurrent_probe' } }
+    const args = { ...base(), event_type: 'note', payload: { ref: randomUUID() } }
     const results = await Promise.all(Array.from({ length: 20 }, () => withClient(AUTH1, (c) => call(c, 'log_event', args))))
     results.forEach((r, i) => assert.equal(r.body.ok, true, `concurrent ${i}: ${JSON.stringify(r.body).slice(0, 120)}`))
     assert.equal(new Set(results.map(r => r.body.event_id)).size, 1, 'all share one event_id')
