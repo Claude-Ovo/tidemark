@@ -67,6 +67,10 @@ const craftCosine = (queryText, targetCos, seed) => {
   return '[' + t.map(x => x.toFixed(6)).join(',') + ']'
 }
 
+// 本套件前提：server 以 EMBED_PROVIDER=stub 运行——版本串含 provider，测试进程须对齐后再取常量
+process.env.EMBED_PROVIDER ??= 'stub'
+const { PIPELINE_VERSION } = await import('./lib/pipeline-version.mjs')
+
 let primaryError = null
 try {
   // ---- 种子 ----
@@ -118,8 +122,15 @@ try {
     assert.ok(evt, 'response hydrates real content')
     assert.ok(evt.created_at && evt.state === 'fresh', 'event injection schema carries created_at + state (SPEC §3)')
 
-    const row = (await q('SELECT receipt_json, serialization_checksum, agent_id, outcome_state FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, baseRid])).rows[0]
+    const row = (await q('SELECT receipt_json, serialization_checksum, agent_id, outcome_state, pipeline_version FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, baseRid])).rows[0]
     assert.ok(row && row.agent_id === AGENT && row.outcome_state === 'unreported')
+    // 三处版本一致：DB 列 == receipt 字段 == 导出常量（防漂移，Codex 三审）
+    assert.equal(row.pipeline_version, PIPELINE_VERSION, 'DB column matches exported PIPELINE_VERSION')
+    assert.equal(row.receipt_json.receipt.pipeline_version, PIPELINE_VERSION, 'receipt field matches exported PIPELINE_VERSION')
+    assert.ok(PIPELINE_VERSION.startsWith('recall-v3|'), 'algorithm change bumped the version')
+    for (const marker of ['gateA=0.55', 'floorB=0.35', 'limitB=20', 'overfetchMax=1600', 'inject-schema=v2']) {
+      assert.ok(PIPELINE_VERSION.includes(marker), `version string carries candidate-semantics param: ${marker}`)
+    }
     // checksum 必须覆盖整个持久化对象（receipt + injection_plan）
     const recomputed = createHash('sha256').update(canonicalJson(row.receipt_json)).digest()
     assert.ok(recomputed.equals(row.serialization_checksum), 'checksum covers the entire persisted JSON')

@@ -14,7 +14,8 @@ import { canonicalJson } from '../lib/canonical-json.mjs'
 const HMAC_KEY = resolveHmacKey(process.env)
 if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
 
-export const PIPELINE_VERSION = `recall-v2|embed=${embedProviderName}|dims=512|rerank=0.5sim+0.2vit+0.2util+0.1imp|tokens=${TOKEN_ESTIMATOR_VERSION}`
+export { PIPELINE_VERSION } from '../lib/pipeline-version.mjs'
+import { PIPELINE_VERSION } from '../lib/pipeline-version.mjs'
 
 import { CFG } from '../lib/recall-config.mjs'
 export { CFG }
