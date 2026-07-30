@@ -12,7 +12,8 @@
     "test": "node --check migrations/apply.mjs && node --check migrations/verify.mjs && node --check src/server.mjs && node --check src/tools/remember.mjs && node src/test-admission.mjs && node src/test-db-release.mjs && node src/test-config.mjs",
     "test:remember": "node --env-file=.env src/test-remember.mjs",
     "test:recall": "node --env-file=.env src/test-recall.mjs",
-    "test:log-event": "node --env-file=.env src/test-log-event.mjs"
+    "test:log-event": "node --env-file=.env src/test-log-event.mjs",
+    "test:report-outcome": "node --env-file=.env src/test-report-outcome.mjs"
   },
   "keywords": [],
   "author": "",

@@ -196,12 +196,30 @@ try {
     })
   }
 
-  // 8. 哨兵全库回归（P0）：删除记忆后，attempt_events 任何 payload 不得含哨兵
+  // 8. 哨兵全链回归（P0，Codex 二审诚实性修正）：SENTINEL 先真实作为记忆正文写入 →
+  //    确认记忆存在 → 各入口尝试走私它全部被拒 → 删除记忆 → memories 与 ledger 双零命中。
+  //    这样"删除后零命中"才是真证明，不是空证明。
   {
-    await q('DELETE FROM memories WHERE tenant_id=$1 AND episode_id = ANY($2)', [TENANT, [...eps]])
-    const hit = (await q(`SELECT count(*)::INT4 AS n FROM attempt_events WHERE tenant_id=$1 AND payload::STRING LIKE '%' || $2 || '%'`, [TENANT, SENTINEL])).rows[0].n
-    assert.equal(hit, 0, 'no sentinel content survives anywhere in the ledger after memory deletion')
-    console.log('PASS 8 sentinel regression: ledger holds zero memory content post-delete')
+    const sentEp = ep()
+    let sentMemId
+    await withClient(AUTH1, async (c) => {
+      const rem = await call(c, 'remember', { content: `my key is ${SENTINEL} keep it`, episode_id: sentEp, request_id: rid() })
+      assert.equal(rem.body.ok, true); sentMemId = rem.body.memory_id
+      const before = (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, sentMemId])).rows[0].n
+      assert.equal(before, 1, 'sentinel really lives as memory content first')
+      // 走私尝试（合法 slug 形态的哨兵进各语义入口）全部写入侧被拒
+      for (const [type, payload] of [['note', { ref: SENTINEL }], ['tool_error', { error_type: SENTINEL, trace_id: randomUUID() }]]) {
+        const r = await call(c, 'log_event', { ...base(), event_type: type, tool_name: type === 'tool_error' ? 'unit' : undefined, payload })
+        assert.equal(r.isError, true, `smuggle via ${type} rejected`)
+      }
+    })
+    // 删除记忆本体
+    await q('DELETE FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, sentMemId])
+    const memLeft = (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, sentMemId])).rows[0].n
+    const ledgerHit = (await q(`SELECT count(*)::INT4 AS n FROM attempt_events WHERE tenant_id=$1 AND payload::STRING LIKE '%' || $2 || '%'`, [TENANT, SENTINEL])).rows[0].n
+    assert.equal(memLeft, 0, 'memory content gone after delete')
+    assert.equal(ledgerHit, 0, 'sentinel never entered the ledger, so nothing survives to leak')
+    console.log('PASS 8 sentinel full-chain: written as memory, smuggle rejected, deleted, zero ledger residue')
   }
 
   console.log('ALL P0-05A LOG_EVENT ASSERTIONS PASSED')

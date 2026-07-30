@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { rememberTool } from './tools/remember.mjs'
 import { recallTool } from './tools/recall.mjs'
 import { logEventTool, EVENT_TYPES } from './tools/log-event.mjs'
+import { reportOutcomeTool } from './tools/report-outcome.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
 // spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
@@ -31,7 +32,7 @@ const runToolResilient = async (label, fn) => {
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event'] }))
+app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event', 'report_outcome'] }))
 
 app.post('/mcp', async (req, res) => {
   if (!req.rawHeaders || req.rawHeaders.length === 0) {   // serverless-http shim（本地无害）
@@ -55,6 +56,13 @@ app.post('/mcp', async (req, res) => {
     { episode_id: z.string(), task_instance_id: z.string(), attempt_id: z.string(), event_type: z.enum(EVENT_TYPES),
       request_id: z.string(), tool_name: z.string().optional(), payload: z.record(z.string(), z.any()).optional() },
     async (args) => asResult(await runToolResilient('log_event', () => logEventTool({ principal, ...args }))))
+  server.tool('report_outcome',
+    'settle an attempt: item-level attributions with evidence drive memory plasticity (outcome-gated). success=credited only, failure=blamed only, cancelled=none.',
+    { outcome_request_id: z.string(), episode_id: z.string(), task_instance_id: z.string(), attempt_id: z.string(),
+      status: z.enum(['success', 'failure', 'cancelled']),
+      attributions: z.array(z.object({ recall_request_id: z.string(), receipt_item_id: z.string(), memory_id: z.string(),
+        role: z.enum(['credited', 'blamed']), evidence_event_id: z.string() })).optional() },
+    async (args) => asResult(await runToolResilient('report_outcome', () => reportOutcomeTool({ principal, ...args }))))
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
   try {
