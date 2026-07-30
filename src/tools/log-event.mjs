@@ -12,7 +12,46 @@ const HMAC_KEY = resolveHmacKey(process.env)
 if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
 
 export const EVENT_TYPES = ['tool_call', 'tool_error', 'user_correction', 'attempt_start', 'attempt_end', 'memory_used', 'note']
-const MAX_PAYLOAD_CHARS = 4000
+const MAX_PAYLOAD_BYTES = 4096   // 防御性兜底（UTF-8 字节，canonical JSON）；白名单下正常不可达
+
+// ---- payload 白名单 schema（Codex P0：台账只准装操作性 ID/枚举/有界结构，杜绝正文复制）----
+// 每种 event_type 定义允许的键与验证器；未知键一律拒绝；散文进不了台账（散文属于 remember）。
+const RX = {
+  uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  slug: /^[a-z0-9_.-]{1,64}$/i,
+  hex64: /^[0-9a-f]{1,64}$/i,
+}
+const vUuid = (v) => typeof v === 'string' && RX.uuid.test(v)
+const vSlug = (v) => typeof v === 'string' && RX.slug.test(v)
+const vHex = (v) => typeof v === 'string' && RX.hex64.test(v)
+const vInt = (v) => Number.isInteger(v) && v >= 0 && v <= 10_000_000
+
+const PAYLOAD_SCHEMAS = {
+  attempt_start: { required: [], optional: {} },                                  // 无参：payload 只能为空
+  attempt_end: { required: [], optional: { status: (v) => ['success', 'failure', 'cancelled'].includes(v) } },
+  tool_call: { required: [], optional: { args_digest: vHex, duration_ms: vInt, exit_code: vInt } },
+  tool_error: { required: [], optional: { error_type: vSlug, args_digest: vHex, duration_ms: vInt, exit_code: vInt } },
+  user_correction: { required: [], optional: { correction_type: vSlug } },
+  note: { required: [], optional: { code: vSlug, ref: vUuid } },                  // 无自由文本：代号+引用而已
+  memory_used: { required: { recall_request_id: vUuid, receipt_item_id: vUuid, memory_id: vUuid }, optional: {} },
+}
+
+const validatePayload = (event_type, payload) => {
+  const schema = PAYLOAD_SCHEMAS[event_type]
+  const p = payload ?? {}
+  if (typeof p !== 'object' || Array.isArray(p)) return 'payload_must_be_object'
+  const requiredKeys = Object.keys(schema.required ?? {})
+  if (requiredKeys.length > 0 && (payload === undefined || payload === null)) return `${event_type}_payload_required`
+  const allowed = { ...(schema.required ?? {}), ...(schema.optional ?? {}) }
+  for (const k of Object.keys(p)) {
+    if (!(k in allowed)) return `payload_key_not_allowed:${k}`
+    if (!allowed[k](p[k])) return `payload_value_invalid:${k}`
+  }
+  for (const k of requiredKeys) {
+    if (!(k in p)) return `memory_used_payload_missing_${k}`
+  }
+  return null
+}
 
 const payloadHmac = (tenant_id, agent_id, params) =>
   createHmac('sha256', `${HMAC_KEY}|${tenant_id}|${agent_id}`).update(canonicalJson(params)).digest()
@@ -24,10 +63,11 @@ export const logEventTool = async ({ principal, episode_id, task_instance_id, at
     if (!v || typeof v !== 'string') return { ok: false, error: `${k}_required` }
   }
   if (!EVENT_TYPES.includes(event_type)) return { ok: false, error: 'event_type_invalid' }
-  if (tool_name != null && (typeof tool_name !== 'string' || tool_name.length > 128)) return { ok: false, error: 'tool_name_invalid' }
-  if (payload !== undefined && payload !== null) {
-    if (typeof payload !== 'object' || Array.isArray(payload)) return { ok: false, error: 'payload_must_be_object' }
-    if (JSON.stringify(payload).length > MAX_PAYLOAD_CHARS) return { ok: false, error: 'payload_too_large' }
+  if (tool_name != null && (typeof tool_name !== 'string' || !RX.slug.test(tool_name))) return { ok: false, error: 'tool_name_invalid' }
+  const schemaError = validatePayload(event_type, payload)
+  if (schemaError) return { ok: false, error: schemaError }
+  if (payload != null && Buffer.byteLength(canonicalJson(payload), 'utf8') > MAX_PAYLOAD_BYTES) {
+    return { ok: false, error: 'payload_too_large' }   // UTF-8 字节精确计量；白名单下正常不可达，纯兜底
   }
 
   const { tenant_id, agent_id } = principal
@@ -43,17 +83,15 @@ export const logEventTool = async ({ principal, episode_id, task_instance_id, at
       return prior.response_json
     }
 
-    // memory_used 的 server-side 校验（冻结 §12.2）：三元组齐全 + receipt 属本 agent + attempt 一致 + item 存在且 injected
+    // memory_used 的 server-side 校验（冻结 §12.2）：receipt 属本 agent + attempt 一致 + episode 一致 + item 存在且 injected
     if (event_type === 'memory_used') {
-      const p = payload ?? {}
-      for (const k of ['recall_request_id', 'receipt_item_id', 'memory_id']) {
-        if (!p[k] || typeof p[k] !== 'string') return { ok: false, error: `memory_used_payload_missing_${k}` }
-      }
+      const p = payload
       const rr = (await c.query(
-        'SELECT agent_id, attempt_id, receipt_json FROM recall_requests WHERE tenant_id=$1 AND request_id=$2',
+        'SELECT agent_id, attempt_id, episode_id, receipt_json FROM recall_requests WHERE tenant_id=$1 AND request_id=$2',
         [tenant_id, p.recall_request_id])).rows[0]
       if (!rr || rr.agent_id !== agent_id) return { ok: false, error: 'memory_used_receipt_not_found_in_scope' }
       if (rr.attempt_id !== attempt_id) return { ok: false, error: 'memory_used_attempt_mismatch' }
+      if (rr.episode_id !== episode_id) return { ok: false, error: 'memory_used_episode_mismatch' }
       const item = (rr.receipt_json?.receipt?.items ?? []).find(i => i.receipt_item_id === p.receipt_item_id)
       if (!item || item.memory_id !== p.memory_id) return { ok: false, error: 'memory_used_item_mismatch' }
       if (!item.injected) return { ok: false, error: 'memory_used_item_not_injected' }
