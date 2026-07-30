@@ -579,9 +579,11 @@ const assertNoVerifyRows = async (client) => {
 const main = async () => {
   const baseConnectionString = process.env.COCKROACH_DATABASE_URL
   if (!baseConnectionString) throw new Error('missing COCKROACH_DATABASE_URL')
-  const { database } = parseArgs(process.argv.slice(2))
-  const targetConnectionString = database ? withDatabase(baseConnectionString, database) : baseConnectionString
-  const client = await connectWithRetry(targetConnectionString, { label: database ?? 'configured database' })
+  // resolution order matches the service layer: --database > TIDEMARK_DATABASE > tidemark_dev
+  const database = parseArgs(process.argv.slice(2)).database
+    ?? validateDatabaseName(process.env.TIDEMARK_DATABASE || 'tidemark_dev')
+  const targetConnectionString = withDatabase(baseConnectionString, database)
+  const client = await connectWithRetry(targetConnectionString, { label: database })
   try {
     await auditSchema(client)
     await runCheckTests(client)

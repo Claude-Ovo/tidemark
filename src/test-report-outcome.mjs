@@ -237,7 +237,265 @@ try {
     console.log('PASS 10 experience promotion on two distinct task instances')
   }
 
-  console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED')
+  // 11. attribution 走私全链（Codex 初审#1 回归）：正文永远进不了 outcomes
+  {
+    const SENTINEL = `p005-smuggle-${suite}-${randomUUID().slice(0, 8)}`
+    const episode = ep(), attemptId = att(), taskId = suite + '-t11'
+    let smugMemId
+    await withClient(AUTH, async (c) => {
+      // 真实 remember 一条含 sentinel 的记忆（存在性前提，防挡板测试）
+      const rem = await call(c, 'remember', { content: `note ${SENTINEL} plaintext`, episode_id: episode, request_id: rid() })
+      assert.equal(rem.body.ok, true, JSON.stringify(rem.body)); smugMemId = rem.body.memory_id
+      // a) 非 UUID 字段直塞正文 -> 整体拒绝，零落库
+      const evil = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'failure',
+        attributions: [{ recall_request_id: SENTINEL, receipt_item_id: randomUUID(), memory_id: randomUUID(), role: 'blamed', evidence_event_id: randomUUID() }] })
+      assert.equal(evil.body.error, 'attribution_recall_request_id_not_uuid', JSON.stringify(evil.body))
+      // b) 未知键走私（直调工具函数，绕过 zod strip 的纵深校验）
+      process.env.TIDEMARK_DEV_INSECURE ??= '1'
+      const { reportOutcomeTool } = await import('./tools/report-outcome.mjs')
+      const evil2 = await reportOutcomeTool({ principal: { tenant_id: TENANT, agent_id: AGENT }, outcome_request_id: randomUUID(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'failure',
+        attributions: [{ recall_request_id: randomUUID(), receipt_item_id: randomUUID(), memory_id: randomUUID(), role: 'blamed', evidence_event_id: randomUUID(), smuggled_note: SENTINEL }] })
+      assert.equal(evil2.error, 'attribution_unknown_key', JSON.stringify(evil2))
+      // c) 格式合法但归因无效 -> 照单存档（存的全是 UUID，无正文通道）
+      const stored = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'failure',
+        attributions: [{ recall_request_id: randomUUID(), receipt_item_id: randomUUID(), memory_id: randomUUID(), role: 'blamed', evidence_event_id: randomUUID() }] })
+      assert.equal(stored.body.ok, true, JSON.stringify(stored.body))
+      assert.equal(stored.body.items[0].reason, 'receipt_not_found_in_scope')
+    })
+    // d) 硬删 sentinel memory 后全表零正文命中（outcomes/attempt_events/memories/tool_requests）
+    await q('DELETE FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, smugMemId])
+    for (const [table, col] of [['outcomes', 'attributions::STRING'], ['outcomes', 'COALESCE(response_json::STRING, \'\')'],
+                                ['attempt_events', 'payload::STRING'], ['memories', 'content'], ['tool_requests', 'COALESCE(response_json::STRING, \'\')']]) {
+      const n = (await q(`SELECT count(*)::INT4 AS n FROM ${table} WHERE tenant_id=$1 AND ${col} LIKE '%' || $2 || '%'`, [TENANT, SENTINEL])).rows[0].n
+      assert.equal(n, 0, `sentinel residue in ${table}.${col}`)
+    }
+    console.log('PASS 11 attribution smuggling rejected end to end, zero residue after delete')
+  }
+
+  // 12. 未来锚点拒绝不 clamp（Codex 初审#2 回归，结论 10）
+  {
+    const epA = ep(), attA = att(), taskA = suite + '-t12a'
+    let citA
+    await withClient(AUTH, async (c) => { citA = await buildCitable(c, { content: 'future credit ' + suite, episode: epA, attemptId: attA, taskId: taskA }) })
+    await q(`UPDATE memories SET strength_anchor_at=now() + INTERVAL '48 hours', last_rewarded_at=now() + INTERVAL '48 hours' WHERE tenant_id=$1 AND memory_id=$2`, [TENANT, citA.memory_id])
+    const beforeA = await memRow(citA.memory_id)
+    await withClient(AUTH, async (c) => {
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: epA, task_instance_id: taskA, attempt_id: attA, status: 'success', attributions: [{ ...citA, role: 'credited' }] })
+      assert.equal(r.body.ok, true, JSON.stringify(r.body))
+      assert.equal(r.body.items[0].applied, false)
+      assert.equal(r.body.items[0].reason, 'future_timestamp_rejected', JSON.stringify(r.body.items))
+      assert.equal(r.body.plasticity_applied, false)
+    })
+    const afterA = await memRow(citA.memory_id)
+    assert.equal(Number(afterA.credited_success_count), Number(beforeA.credited_success_count), 'future credited: count untouched')
+    assert.equal(afterA.strength_anchor_at.getTime(), beforeA.strength_anchor_at.getTime(), 'future anchor NOT rewritten to now')
+    assert.equal(Number(afterA.revision), Number(beforeA.revision), 'future credited: row untouched')
+    // blamed 同守 anchor
+    const epB = ep(), attB = att(), taskB = suite + '-t12b'
+    let citB
+    await withClient(AUTH, async (c) => { citB = await buildCitable(c, { content: 'future blame ' + suite, episode: epB, attemptId: attB, taskId: taskB }) })
+    await q(`UPDATE memories SET strength_anchor_at=now() + INTERVAL '48 hours' WHERE tenant_id=$1 AND memory_id=$2`, [TENANT, citB.memory_id])
+    const beforeB = await memRow(citB.memory_id)
+    await withClient(AUTH, async (c) => {
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: epB, task_instance_id: taskB, attempt_id: attB, status: 'failure', attributions: [{ ...citB, role: 'blamed' }] })
+      assert.equal(r.body.items[0].reason, 'future_timestamp_rejected', JSON.stringify(r.body.items))
+    })
+    const afterB = await memRow(citB.memory_id)
+    assert.equal(Number(afterB.strength_anchor), Number(beforeB.strength_anchor), 'future blamed: anchor untouched')
+    console.log('PASS 12 future timestamps rejected, rows untouched (no clamp)')
+  }
+
+  // 13. scope 不合法的 receipt 绝不结算（Codex 初审#3 回归）+ attempt 归属整体拒
+  {
+    // a) 空 attempt + 错 episode：receipt 校验拒 item，receipt 不得被结算
+    const epReal = ep(), epWrong = ep(), attemptId = att(), taskId = suite + '-t13'
+    let rrId
+    await withClient(AUTH, async (c) => {
+      const rem = await call(c, 'remember', { content: 'settle guard ' + suite, episode_id: epReal, request_id: rid() })
+      rrId = rid()
+      const rec = await call(c, 'recall', { query: 'settle guard ' + suite, purpose: 'unit', episode_id: epReal, attempt_id: attemptId, request_id: rrId })
+      const item = rec.body.receipt.items.find(i => i.injected)
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: epWrong, task_instance_id: taskId, attempt_id: attemptId, status: 'failure',
+        attributions: [{ recall_request_id: rrId, receipt_item_id: item.receipt_item_id, memory_id: item.memory_id, role: 'blamed', evidence_event_id: randomUUID() }] })
+      assert.equal(r.body.ok, true, JSON.stringify(r.body))
+      assert.equal(r.body.items[0].reason, 'receipt_episode_mismatch', JSON.stringify(r.body.items))
+    })
+    const rr = (await q('SELECT outcome_state, terminal_attempt_id FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, rrId])).rows[0]
+    assert.notEqual(rr.outcome_state, 'reported', 'out-of-scope receipt must NOT be settled')
+    assert.equal(rr.terminal_attempt_id, null, 'terminal_attempt_id stays NULL')
+    // b) attempt 已有事件时，错 episode 的 outcome 整体拒（attempt 归属防线）
+    const ep2 = ep(), att2 = att(), task2 = suite + '-t13b'
+    await withClient(AUTH, async (c) => {
+      await buildCitable(c, { content: 'attempt anchor ' + suite, episode: ep2, attemptId: att2, taskId: task2 })
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: ep(), task_instance_id: task2, attempt_id: att2, status: 'cancelled' })
+      assert.equal(r.body.error, 'attempt_scope_mismatch', JSON.stringify(r.body))
+    })
+    console.log('PASS 13 out-of-scope receipt never settled + attempt scope enforced')
+  }
+
+  // 14. 迟到窗口（>24h）：照单存档零塑性，合法 receipt 正常关闭
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t14'
+    let cit
+    await withClient(AUTH, async (c) => { cit = await buildCitable(c, { content: 'late probe ' + suite, episode, attemptId, taskId }) })
+    await q(`UPDATE recall_requests SET created_at=now() - INTERVAL '25 hours' WHERE tenant_id=$1 AND request_id=$2`, [TENANT, cit.recall_request_id])
+    const before = await memRow(cit.memory_id)
+    await withClient(AUTH, async (c) => {
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
+      assert.equal(r.body.ok, true, JSON.stringify(r.body))
+      assert.equal(r.body.items[0].reason, 'late_no_plasticity', JSON.stringify(r.body.items))
+      assert.equal(r.body.plasticity_applied, false)
+    })
+    const after = await memRow(cit.memory_id)
+    assert.equal(Number(after.credited_success_count), Number(before.credited_success_count), 'late outcome: zero plasticity')
+    const n = (await q('SELECT count(*)::INT4 AS n FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, attemptId])).rows[0].n
+    assert.equal(n, 1, 'late outcome still archived')
+    console.log('PASS 14 late outcome archived with zero plasticity')
+  }
+
+  // 15. memory 已删除：照单存档零塑性
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t15'
+    let cit
+    await withClient(AUTH, async (c) => { cit = await buildCitable(c, { content: 'deleted probe ' + suite, episode, attemptId, taskId }) })
+    await q('DELETE FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, cit.memory_id])
+    await withClient(AUTH, async (c) => {
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
+      assert.equal(r.body.ok, true, JSON.stringify(r.body))
+      assert.equal(r.body.items[0].reason, 'memory_deleted', JSON.stringify(r.body.items))
+    })
+    console.log('PASS 15 deleted memory: archived, zero plasticity')
+  }
+
+  // 16. 同 outcome 内 memory_id 去重：只加固一次
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t16'
+    let cit
+    await withClient(AUTH, async (c) => { cit = await buildCitable(c, { content: 'dedupe probe ' + suite, episode, attemptId, taskId }) })
+    await q(`UPDATE memories SET strength_anchor=0.5, strength_anchor_at=now() - INTERVAL '48 hours', last_rewarded_at=now() - INTERVAL '48 hours' WHERE tenant_id=$1 AND memory_id=$2`, [TENANT, cit.memory_id])
+    await withClient(AUTH, async (c) => {
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success',
+        attributions: [{ ...cit, role: 'credited' }, { ...cit, role: 'credited' }] })
+      assert.equal(r.body.ok, true, JSON.stringify(r.body))
+      assert.equal(r.body.items[0].applied, true)
+      assert.equal(r.body.items[1].reason, 'duplicate_memory_skipped', JSON.stringify(r.body.items))
+    })
+    const after = await memRow(cit.memory_id)
+    assert.equal(Number(after.credited_success_count), 1, 'dedupe: credited exactly once')
+    console.log('PASS 16 duplicate memory_id in one outcome credited once')
+  }
+
+  // 17. 同 key 异 payload 拒（keyed idempotency on outcomes table）
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t17', orid = rid()
+    await withClient(AUTH, async (c) => {
+      const first = await call(c, 'report_outcome', { outcome_request_id: orid, episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'cancelled' })
+      assert.equal(first.body.ok, true, JSON.stringify(first.body))
+      const diff = await call(c, 'report_outcome', { outcome_request_id: orid, episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'failure' })
+      assert.equal(diff.body.error, 'idempotency_key_reused', JSON.stringify(diff.body))
+    })
+    console.log('PASS 17 same key different payload rejected')
+  }
+
+  // 18. 真并发双终态：同 attempt 两个 key 同时报 success/failure，恰一个赢
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t18'
+    const mk = (status) => ({ outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status })
+    const [r1, r2] = await Promise.all([
+      withClient(AUTH, (c) => call(c, 'report_outcome', mk('success'))),
+      withClient(AUTH, (c) => call(c, 'report_outcome', mk('failure'))),
+    ])
+    const oks = [r1, r2].filter(r => r.body.ok === true)
+    const conflicts = [r1, r2].filter(r => r.body.error === 'outcome_conflict')
+    assert.equal(oks.length, 1, `exactly one winner: ${JSON.stringify([r1.body, r2.body])}`)
+    assert.equal(conflicts.length, 1, `exactly one conflict: ${JSON.stringify([r1.body, r2.body])}`)
+    const n = (await q('SELECT count(*)::INT4 AS n FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, attemptId])).rows[0].n
+    assert.equal(n, 1, 'exactly one terminal outcome row')
+    console.log('PASS 18 concurrent double-terminal: single winner')
+  }
+
+  // 19. cross-agent：second-agent 不能动 demo-agent 的 attempt/receipt/memory
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t19'
+    let cit
+    await withClient(AUTH, async (c) => { cit = await buildCitable(c, { content: 'xagent probe ' + suite, episode, attemptId, taskId }) })
+    const before = await memRow(cit.memory_id)
+    await withClient({ 'x-tidemark-auth': 'spike-second-key' }, async (c) => {
+      const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
+      assert.equal(r.body.error, 'attempt_scope_mismatch', JSON.stringify(r.body))
+    })
+    const after = await memRow(cit.memory_id)
+    assert.equal(Number(after.credited_success_count), Number(before.credited_success_count), 'cross-agent: memory untouched')
+    const rr = (await q('SELECT terminal_attempt_id FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, cit.recall_request_id])).rows[0]
+    assert.equal(rr.terminal_attempt_id, null, 'cross-agent: receipt not settled')
+    const n = (await q('SELECT count(*)::INT4 AS n FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, attemptId])).rows[0].n
+    assert.equal(n, 0, 'cross-agent: no outcome row claimed')
+    console.log('PASS 19 cross-agent replay fully rejected')
+  }
+
+  // 20/21. 晋级判定数【召回时点 candidate】而非全部 experience（Codex 初审#4 回归）
+  {
+    // 每组用独立 seed 文本（stub embedding 由内容决定）：组间向量不同，20 的经验不会污染 21 的召回
+    const mkExp = async (c, episode, status, tag, seedText) => {
+      const seed = await call(c, 'remember', { content: seedText, episode_id: episode, request_id: rid() })
+      const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seed.body.memory_id])).rows[0].e
+      const id = randomUUID(); directIds.push(id)
+      await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+               VALUES ($1,$2,$3,'experience',$4,$5,$6,$7,$8,'agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
+        [TENANT, AGENT, id, episode, `exp ${tag} body`, emb, JSON.stringify({ trigger: `when ${tag}`, correct_action: 'do it', caution: 'careful' }), status])
+      return id
+    }
+    // 20: candidate + verified 同注入 -> candidate 仍可记首验
+    {
+      const episode = ep(), attemptId = att(), taskId = suite + '-t20'
+      let candId
+      await withClient(AUTH, async (c) => {
+        const seed20 = `exp pair20 seed ${suite}`
+        candId = await mkExp(c, episode, 'candidate', 'cand20', seed20)
+        await mkExp(c, episode, 'verified', 'veri20', seed20)
+        const rrId = rid()
+        const rec = await call(c, 'recall', { query: seed20, purpose: 'unit', episode_id: episode, attempt_id: attemptId, request_id: rrId })
+        const items = rec.body.receipt.items
+        const candItem = items.find(i => i.memory_id === candId && i.injected)
+        assert.ok(candItem, `candidate injected: ${JSON.stringify(items.map(i => ({ m: i.memory_id, l: i.layer, inj: i.injected })))}`)
+        assert.equal(candItem.experience_status_at_recall, 'candidate', 'receipt snapshots exp status at recall')
+        const injectedExp = items.filter(i => i.layer === 'experience' && i.injected)
+        assert.ok(injectedExp.length >= 2, 'both experiences injected')
+        const ev = await call(c, 'log_event', { episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, request_id: rid(), event_type: 'memory_used', payload: { recall_request_id: rrId, receipt_item_id: candItem.receipt_item_id, memory_id: candId } })
+        const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success',
+          attributions: [{ recall_request_id: rrId, receipt_item_id: candItem.receipt_item_id, memory_id: candId, role: 'credited', evidence_event_id: ev.body.event_id }] })
+        assert.equal(r.body.ok, true, JSON.stringify(r.body))
+        assert.equal(r.body.items[0].promotion_guard, undefined, `verified must not block sole-candidate: ${JSON.stringify(r.body.items)}`)
+      })
+      const evd = (await q('SELECT count(*)::INT4 AS n FROM success_evidence WHERE tenant_id=$1 AND experience_id=$2', [TENANT, candId])).rows[0].n
+      assert.equal(evd, 1, 'first success_evidence recorded despite verified co-injection')
+      console.log('PASS 20 candidate+verified co-injection: candidate earns evidence')
+    }
+    // 21: candidate + candidate 同注入 -> not_sole_candidate，不记证据
+    {
+      const episode = ep(), attemptId = att(), taskId = suite + '-t21'
+      let candA
+      await withClient(AUTH, async (c) => {
+        const seed21 = `exp pair21 seed ${suite}`
+        candA = await mkExp(c, episode, 'candidate', 'candA21', seed21)
+        await mkExp(c, episode, 'candidate', 'candB21', seed21)
+        const rrId = rid()
+        const rec = await call(c, 'recall', { query: seed21, purpose: 'unit', episode_id: episode, attempt_id: attemptId, request_id: rrId })
+        const itemA = rec.body.receipt.items.find(i => i.memory_id === candA && i.injected)
+        assert.ok(itemA, 'candidate A injected')
+        const ev = await call(c, 'log_event', { episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, request_id: rid(), event_type: 'memory_used', payload: { recall_request_id: rrId, receipt_item_id: itemA.receipt_item_id, memory_id: candA } })
+        const r = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success',
+          attributions: [{ recall_request_id: rrId, receipt_item_id: itemA.receipt_item_id, memory_id: candA, role: 'credited', evidence_event_id: ev.body.event_id }] })
+        assert.equal(r.body.ok, true, JSON.stringify(r.body))
+        assert.equal(r.body.items[0].promotion_guard, 'not_sole_candidate', JSON.stringify(r.body.items))
+      })
+      const evd = (await q('SELECT count(*)::INT4 AS n FROM success_evidence WHERE tenant_id=$1 AND experience_id=$2', [TENANT, candA])).rows[0].n
+      assert.equal(evd, 0, 'two candidates: no evidence recorded')
+      console.log('PASS 21 candidate+candidate co-injection: not_sole_candidate')
+    }
+  }
+
+  console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED (21 scenarios)')
 } catch (e) {
   primaryError = e
 } finally {

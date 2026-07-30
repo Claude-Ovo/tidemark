@@ -114,7 +114,11 @@ const applyOne = async (client, migration) => {
 const main = async () => {
   const baseConnectionString = process.env.COCKROACH_DATABASE_URL
   if (!baseConnectionString) throw new Error('missing COCKROACH_DATABASE_URL')
-  const { database, createDatabase } = parseArgs(process.argv.slice(2))
+  const parsed = parseArgs(process.argv.slice(2))
+  // resolution order matches the service layer: --database > TIDEMARK_DATABASE > tidemark_dev
+  const database = parsed.database
+    ?? validateDatabaseName(process.env.TIDEMARK_DATABASE || 'tidemark_dev')
+  const { createDatabase } = parsed
 
   if (createDatabase) {
     const admin = await connectWithRetry(baseConnectionString, { label: 'admin database' })

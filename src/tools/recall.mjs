@@ -224,6 +224,9 @@ export const recallTool = async ({ principal, query, purpose, episode_id, attemp
       receipt_item_id: randomUUID(),
       memory_id: s.row.memory_id,
       layer: s.row.layer,
+      // content-free 快照：晋级判定读回执里的召回时点状态，不读 report 时点的活表
+      //（否则 recall 后被晋级的 verified 会让"恰 1 条 candidate"数错对象）
+      ...(s.row.layer === 'experience' ? { experience_status_at_recall: s.row.exp_status } : {}),
       rank: ++rank,
       raw_cosine_distance: Number(s.row.dist),
       similarity: +s.similarity.toFixed(6),
