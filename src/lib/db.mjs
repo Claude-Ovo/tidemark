@@ -11,7 +11,12 @@ export const getPool = () => {
     // Lambda 每执行环境 max=1（默认）；本地单进程开发用 TIDEMARK_POOL_MAX=10 等效账户并发预算(10x1)
     const max = Number(process.env.TIDEMARK_POOL_MAX || 1)
     if (!Number.isInteger(max) || max < 1 || max > 10) throw new Error(`invalid TIDEMARK_POOL_MAX "${process.env.TIDEMARK_POOL_MAX}"`)
-    pool = new pg.Pool({ connectionString: withDatabase(base, dbName), max, connectionTimeoutMillis: 15000 })
+    pool = new pg.Pool({
+      connectionString: withDatabase(base, dbName), max,
+      connectionTimeoutMillis: 15000,
+      idleTimeoutMillis: 10000,   // serverless 免费层会掐长空闲连接——主动淘汰，别攒尸体
+      keepAlive: true,
+    })
     pool.on('error', (e) => console.error(JSON.stringify({ evt: 'pool_idle_error', msg: e.message.slice(0, 120) })))
   }
   return pool

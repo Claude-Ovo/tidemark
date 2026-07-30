@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { z } from 'zod'
 import { rememberTool } from './tools/remember.mjs'
+import { recallTool } from './tools/recall.mjs'
 
 // spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
 const AUTH_MAP = {
@@ -14,7 +15,7 @@ const AUTH_MAP = {
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tool: 'remember' }))
+app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall'] }))
 
 app.post('/mcp', async (req, res) => {
   if (!req.rawHeaders || req.rawHeaders.length === 0) {   // serverless-http shim（本地无害）
@@ -31,6 +32,13 @@ app.post('/mcp', async (req, res) => {
     async (args) => asResult(await rememberTool({ principal, ...args }).catch(e => {
       console.error(JSON.stringify({ evt: 'remember_error', code: e.code, msg: e.message?.slice(0, 160) }))
       return { ok: false, error: 'internal_error' }        // 工具异常也返回结构化 JSON，不裸抛文本
+    })))
+  server.tool('recall',
+    'semantic recall with lifecycle rerank and persisted receipt. query + episode_id + attempt_id + request_id required.',
+    { query: z.string(), episode_id: z.string(), attempt_id: z.string(), request_id: z.string(), purpose: z.string().optional() },
+    async (args) => asResult(await recallTool({ principal, ...args }).catch(e => {
+      console.error(JSON.stringify({ evt: 'recall_error', code: e.code, msg: e.message?.slice(0, 160) }))
+      return { ok: false, error: 'internal_error' }
     })))
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
