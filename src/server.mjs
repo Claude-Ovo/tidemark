@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod'
 import { rememberTool } from './tools/remember.mjs'
 import { recallTool } from './tools/recall.mjs'
+import { logEventTool, EVENT_TYPES } from './tools/log-event.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
 // spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
@@ -30,7 +31,7 @@ const runToolResilient = async (label, fn) => {
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall'] }))
+app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event'] }))
 
 app.post('/mcp', async (req, res) => {
   if (!req.rawHeaders || req.rawHeaders.length === 0) {   // serverless-http shim（本地无害）
@@ -49,6 +50,11 @@ app.post('/mcp', async (req, res) => {
     'semantic recall with lifecycle rerank and persisted content-free receipt. query/purpose/episode_id/attempt_id/request_id required; token_budget optionally tightens total injection (never widens per-layer hard caps).',
     { query: z.string(), purpose: z.string(), episode_id: z.string(), attempt_id: z.string(), request_id: z.string(), token_budget: z.number().int().positive().optional() },
     async (args) => asResult(await runToolResilient('recall', () => recallTool({ principal, ...args }))))
+  server.tool('log_event',
+    'append one attempt event to the evidence ledger (idempotent). memory_used events are server-validated against the receipt.',
+    { episode_id: z.string(), task_instance_id: z.string(), attempt_id: z.string(), event_type: z.enum(EVENT_TYPES),
+      request_id: z.string(), tool_name: z.string().optional(), payload: z.record(z.string(), z.any()).optional() },
+    async (args) => asResult(await runToolResilient('log_event', () => logEventTool({ principal, ...args }))))
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
   try {
