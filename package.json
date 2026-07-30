@@ -13,7 +13,8 @@
     "test:remember": "node --env-file=.env src/test-remember.mjs",
     "test:recall": "node --env-file=.env src/test-recall.mjs",
     "test:log-event": "node --env-file=.env src/test-log-event.mjs",
-    "test:report-outcome": "node --env-file=.env src/test-report-outcome.mjs"
+    "test:report-outcome": "node --env-file=.env src/test-report-outcome.mjs",
+    "test:pin": "node --env-file=.env src/test-pin.mjs"
   },
   "keywords": [],
   "author": "",

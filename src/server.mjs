@@ -8,12 +8,14 @@ import { rememberTool } from './tools/remember.mjs'
 import { recallTool } from './tools/recall.mjs'
 import { logEventTool, EVENT_TYPES } from './tools/log-event.mjs'
 import { reportOutcomeTool } from './tools/report-outcome.mjs'
+import { pinTool } from './tools/pin.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
 // spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
+// capabilities：pin 是能力位不是默认权力（冻结 §12.3）——second-agent 故意不带，作越权测试对照
 const AUTH_MAP = {
-  'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent' },
-  'spike-second-key': { tenant_id: 'demo-tenant', agent_id: 'second-agent' },
+  'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent', capabilities: ['memory:pin'] },
+  'spike-second-key': { tenant_id: 'demo-tenant', agent_id: 'second-agent', capabilities: [] },
 }
 
 // 工具级瞬断韧性：底层事务各自重试 5 次后仍失败（serverless 集群连续掐连接）时，
@@ -32,7 +34,7 @@ const runToolResilient = async (label, fn) => {
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event', 'report_outcome'] }))
+app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event', 'report_outcome', 'pin'] }))
 
 app.post('/mcp', async (req, res) => {
   if (!req.rawHeaders || req.rawHeaders.length === 0) {   // serverless-http shim（本地无害）
@@ -63,6 +65,10 @@ app.post('/mcp', async (req, res) => {
       attributions: z.array(z.object({ recall_request_id: z.string(), receipt_item_id: z.string(), memory_id: z.string(),
         role: z.enum(['credited', 'blamed']), evidence_event_id: z.string() })).optional() },
     async (args) => asResult(await runToolResilient('report_outcome', () => reportOutcomeTool({ principal, ...args }))))
+  server.tool('pin',
+    'idempotent pin/unpin (capability-gated). Pin freezes CURRENT effective strength (materialize-then-set, never a boost); unpin resumes decay from now.',
+    { memory_id: z.string(), pinned: z.boolean(), reason: z.string(), request_id: z.string() },
+    async (args) => asResult(await runToolResilient('pin', () => pinTool({ principal, ...args }))))
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
   try {
