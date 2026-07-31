@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   connectWithRetry,
   isRetryableDatabaseError,
@@ -42,7 +42,7 @@ const assertSingleStatement = (sql, filename) => {
 
 const checksum = (sql) => createHash('sha256').update(sql).digest('hex')
 
-const loadMigrations = async () => {
+export const loadMigrations = async () => {
   const filenames = (await readdir(migrationsDir)).filter(name => MIGRATION_PATTERN.test(name)).sort()
   const versions = new Set()
   const migrations = []
@@ -59,7 +59,7 @@ const loadMigrations = async () => {
   return migrations
 }
 
-const ensureMigrationLedger = (client) => client.query(`
+export const ensureMigrationLedger = (client) => client.query(`
   CREATE TABLE IF NOT EXISTS public.schema_migrations (
     version INT8 NOT NULL,
     filename STRING NOT NULL,
@@ -86,7 +86,7 @@ const assertAppliedMatches = (migration, applied) => {
   }
 }
 
-const applyOne = async (client, migration) => {
+export const applyOne = async (client, migration) => {
   const existing = await readApplied(client, migration.version)
   if (existing) {
     assertAppliedMatches(migration, existing)
@@ -171,7 +171,10 @@ const main = async () => {
   }
 }
 
-main().catch(error => {
-  console.error(`migration failed: ${error.message}`)
-  process.exitCode = 1
-})
+// CLI 入口守卫：被集成测试 import 导出函数时绝不能触发整轮 migrate
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error(`migration failed: ${error.message}`)
+    process.exitCode = 1
+  })
+}

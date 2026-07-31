@@ -521,7 +521,38 @@ try {
     console.log('PASS 22 attributions cap: 33 rejected, exact-32 accepted')
   })
 
-  console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED (22 scenarios)')
+  // 23. unreplayable marker 永久 fail-closed（round-4 #2）：人工恢复后的 legacy claim
+  // 重放不得重开归因/塑性，terminal 槽持续占用，memory/receipt 零变化
+  {
+    const episode = ep(), attemptId = att(), taskId = suite + '-t23'
+    let cit
+    await withClient(AUTH, async (c) => { cit = await buildCitable(c, { content: 'marker probe ' + suite, episode, attemptId, taskId }) })
+    const before = await memRow(cit.memory_id)
+    // 直插 marker 行（preflight 016 指引的人工恢复产物），占住该 attempt 的终态槽
+    const markerOrid = randomUUID()
+    await q(
+      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json)
+       VALUES ($1,$2,$3,$4,$5,$6,'cancelled','[]',false,$7,'{"legacy_outcome_unreplayable": true}')`,
+      [TENANT, markerOrid, AGENT, episode, taskId, attemptId, Buffer.from([0])])
+    await withClient(AUTH, async (c) => {
+      // 同 key 重放（带真实可信归因也一样）：fail-closed，不进归因处理
+      const replay = await call(c, 'report_outcome', { outcome_request_id: markerOrid, episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
+      assert.equal(replay.body.error, 'legacy_outcome_unreplayable', JSON.stringify(replay.body))
+      // 同 attempt 异 key：终态槽仍被 marker 行占用
+      const squat = await call(c, 'report_outcome', { outcome_request_id: rid(), episode_id: episode, task_instance_id: taskId, attempt_id: attemptId, status: 'success', attributions: [{ ...cit, role: 'credited' }] })
+      assert.equal(squat.body.error, 'outcome_conflict', JSON.stringify(squat.body))
+    })
+    const after = await memRow(cit.memory_id)
+    assert.equal(Number(after.credited_success_count), Number(before.credited_success_count), 'marker replay: memory untouched')
+    assert.equal(Number(after.revision), Number(before.revision), 'marker replay: zero plasticity writes')
+    const rr = (await q('SELECT terminal_attempt_id FROM recall_requests WHERE tenant_id=$1 AND request_id=$2', [TENANT, cit.recall_request_id])).rows[0]
+    assert.equal(rr.terminal_attempt_id, null, 'marker replay: receipt not settled')
+    const n = (await q('SELECT count(*)::INT4 AS n FROM outcomes WHERE tenant_id=$1 AND attempt_id=$2', [TENANT, attemptId])).rows[0].n
+    assert.equal(n, 1, 'no new outcome row created')
+    console.log('PASS 23 unreplayable marker: permanently fail-closed, slot occupied, zero side effects')
+  }
+
+  console.log('ALL P0-05 REPORT_OUTCOME ASSERTIONS PASSED (23 scenarios)')
 } catch (e) {
   primaryError = e
 } finally {

@@ -72,8 +72,11 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
     // 幂等 claim 读自 outcomes 本表（SPEC §1.5：report_outcome 不进 tool_requests）
     const prior = await readPrior(c, tenant_id, outcome_request_id)
     if (prior) {
-      // 013 之前的 legacy 行无幂等证据（016/017 后不应存在）——诚实拒绝，不冒充 exact replay
-      if (!prior.payload_hmac || !prior.response_json) return { ok: false, error: 'legacy_outcome_unreplayable' }
+      // legacy 无证据行：NULL（017 前）或人工恢复打的 unreplayable marker（preflight 016 指引）——
+      // 同 key 永远 fail-closed，行保留 = attempt 终态槽持续占用，claim 绝不重开
+      if (!prior.payload_hmac?.length || !prior.response_json || prior.response_json.legacy_outcome_unreplayable === true) {
+        return { ok: false, error: 'legacy_outcome_unreplayable' }
+      }
       if (!prior.payload_hmac.equals(fingerprint)) return { ok: false, error: 'idempotency_key_reused' }
       return prior.response_json
     }
@@ -271,7 +274,9 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
       if (existing) return { ok: false, error: 'outcome_conflict', existing_status: existing.status }
       throw e
     }
-    if (!winner.payload_hmac || !winner.response_json) return { ok: false, error: 'legacy_outcome_unreplayable' }
+    if (!winner.payload_hmac?.length || !winner.response_json || winner.response_json.legacy_outcome_unreplayable === true) {
+      return { ok: false, error: 'legacy_outcome_unreplayable' }
+    }
     if (!winner.payload_hmac.equals(fingerprint)) return { ok: false, error: 'idempotency_key_reused' }
     return winner.response_json
   })
