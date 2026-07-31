@@ -15,6 +15,7 @@ import { pathToFileURL } from 'node:url'
 import { inSerializableTx } from '../lib/db.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext, consolidationProgress, TRANSITION_CFG } from '../lib/scheduler.mjs'
+import { claimNightlyRun, FUTURE_TOLERANCE_MS as HARNESS_TOLERANCE } from './run-harness.mjs'
 
 // pipeline_version 编码【实际生效】的参数（一审#3 + 三审#1）：语义策略（fade/hits/mult）
 // 首版全局冻结——scheduler 与全部 writers 都读 TRANSITION_CFG，nightly 不许独立覆写语义
@@ -35,9 +36,8 @@ export const assertSemanticPolicyFrozen = (cfg) => {
   }
 }
 
-// 未来评估硬闸（Codex 代码一审#1，结论 10）：真实转换只许 server time ± 抖动容差；
-// 时间模拟只能经显式 unsafe seam（代码内 cfg，CLI 不暴露）或可重置 demo tenant
-export const FUTURE_TOLERANCE_MS = 5 * 60_000
+// 未来评估硬闸（Codex 代码一审#1，结论 10）：由 harness 统一执行，此处 re-export 保持契约可见
+export const FUTURE_TOLERANCE_MS = HARNESS_TOLERANCE
 
 const decay = (anchor, anchorAt, halfLife, evalMs) =>
   Number(anchor) * Math.exp(-Math.LN2 * ((evalMs - new Date(anchorAt).getTime()) / 3600e3) / Number(halfLife))
@@ -52,107 +52,28 @@ const fingerprintOf = (sources, evaluationAtIso, pipelineVersion) => createHash(
   pipeline_version: pipelineVersion,
 })).digest()
 
-// claim 阶段（自己的短事务）：选源 + INSERT run。返回 null 表示 no-work。
-export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
-  const controlConfig = { lease_minutes: cfg.lease_minutes, max_attempts: cfg.max_attempts, batch_size: cfg.batch_size }
-  const pipelineVersion = pipelineVersionOf(cfg)
-  try {
-    const claimed = await inSerializableTx(async (c) => {
-      // 未来评估硬闸：DB 墙钟判定（不是应用机时钟），拒绝即零 run 零写入
-      const dbNow = (await c.query('SELECT now() AS db_now')).rows[0].db_now.getTime()
-      if (!cfg.unsafe_allow_future_evaluation && new Date(evaluationAtIso).getTime() > dbNow + FUTURE_TOLERANCE_MS) {
-        return { outcome: 'refused_future_evaluation', db_now: new Date(dbNow).toISOString() }
-      }
-      const sources = (await c.query(
-        `SELECT ${SOURCE_COLS} FROM memories
-         WHERE tenant_id=$1 AND next_transition_at IS NOT NULL AND next_transition_at <= $2
-         ORDER BY next_transition_at, memory_id LIMIT ${cfg.batch_size}`,
-        [tenantId, evaluationAtIso])).rows
-      if (sources.length === 0) {
-        // 空队列 != 无历史：同 scheduled_for 的既存 run（幂等重跑/failed 终态）优先于 no_work——
-        // no-work 短路只适用于"这个键从未有过 run 且当下无源"
-        const prior = (await c.query(
-          `SELECT run_id FROM nightly_runs WHERE tenant_id=$1 AND job_kind='transition' AND scheduled_for=$2 AND pipeline_version=$3`,
-          [tenantId, evaluationAtIso, pipelineVersion])).rows[0]
-        return prior ? { outcome: '_resolve_existing' } : { outcome: 'no_work' }
-      }
-      const snapshot = sources.map(r => ({ memory_id: r.memory_id, revision: String(r.revision) }))
-      const run = (await c.query(
-        `INSERT INTO nightly_runs (tenant_id, job_kind, scheduled_for, pipeline_version, status, lease_expires_at,
-           attempt_count, batch_size, source_snapshot, source_fingerprint, control_config)
-         VALUES ($1,'transition',$2,$3,'running', now() + ($4::FLOAT8 * INTERVAL '1 minute'), 1, $5, $6, $7, $8)
-         RETURNING run_id`,
-        [tenantId, evaluationAtIso, pipelineVersion, cfg.lease_minutes, cfg.batch_size,
-         JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso, pipelineVersion), controlConfig])).rows[0]
-      return { outcome: 'claimed', run_id: run.run_id, expected_attempt: 1, sources, control: controlConfig }
-    }, 'transition-claim')
-    // 既存 run 的分支解析在自己的事务里做（completed/failed/lease/takeover 全语义）
-    return claimed.outcome === '_resolve_existing' ? resolveClaimConflict(tenantId, evaluationAtIso, cfg) : claimed
-  } catch (e) {
-    if (e.code !== '23505') throw e
-    return resolveClaimConflict(tenantId, evaluationAtIso, cfg)
+// claim：委托通用 harness（src/nightly/run-harness.mjs，P0-07 抽取；行为与 P0-06 签字版逐字等价）。
+// transition 特有的只有选源 SQL 与 fingerprint 素材。
+const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIso) => {
+  const sources = (await c.query(
+    `SELECT ${SOURCE_COLS} FROM memories
+     WHERE tenant_id=$1 AND next_transition_at IS NOT NULL AND next_transition_at <= $2
+     ORDER BY next_transition_at, memory_id LIMIT ${cfg.batch_size}`,
+    [tenantId, evalIso])).rows
+  if (sources.length === 0) return null
+  return {
+    sources,
+    snapshot: sources.map(r => ({ memory_id: r.memory_id, revision: String(r.revision) })),
+    fingerprint: fingerprintOf(sources, evalIso, pipelineVersion),
   }
 }
 
-// 23505 之后的分支（schedule-UQ 或 fingerprint-UQ，分别显式处理——不笼统吞）：
-// completed -> 幂等返回；failed -> 终态返回；running 且 lease 未过期 -> lease_held；
-// running lease 过期 / stale -> CAS takeover（attempt+1、重选源换 snapshot；耗尽 -> 标 failed）
-const isPosInt = (v) => Number.isInteger(v) && v > 0
-const isPosFinite = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
-
-const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
+export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
   const pipelineVersion = pipelineVersionOf(cfg)
-  return inSerializableTx(async (c) => {
-    const row = (await c.query(
-      `SELECT run_id, status, attempt_count, lease_expires_at, control_config, lease_expires_at < now() AS lease_expired
-       FROM nightly_runs WHERE tenant_id=$1 AND job_kind='transition' AND scheduled_for=$2 AND pipeline_version=$3`,
-      [tenantId, evaluationAtIso, pipelineVersion])).rows[0]
-    if (!row) throw new Error('claim_conflict_without_schedule_row')   // fingerprint-UQ 独立撞不可能（含 evaluation_at），撞即不变量破坏
-    // 所有出口如实携带 run 行的冻结 control（审计快照）；legacy '{}' 原样带出 + control_invalid 标记，
-    // 绝不伪造为当前进程 cfg（三审#2）
-    const rawControl = row.control_config ?? null
-    if (row.status === 'completed') return { outcome: 'already_completed', run_id: row.run_id, control: rawControl }
-    if (row.status === 'failed') return { outcome: 'failed_terminal', run_id: row.run_id, control: rawControl }
-    // control 冻结值：takeover/耗尽判定只读 run 行——缺失或非法即 fail-closed，
-    // 绝不回退当前环境值（一审#4）；attempt/batch 必须正整数、lease 正有限数（三审#2 收紧）
-    const frozen = rawControl
-    if (!frozen || !isPosInt(frozen.max_attempts) || !isPosFinite(frozen.lease_minutes) || !isPosInt(frozen.batch_size)) {
-      throw new Error(`invalid_frozen_control_config:${row.run_id}`)
-    }
-    if (row.status === 'running' && !row.lease_expired) return { outcome: 'lease_held', run_id: row.run_id, control: frozen }
-    if (Number(row.attempt_count) >= Number(frozen.max_attempts)) {
-      const dead = await c.query(
-        `UPDATE nightly_runs SET status='failed', error_code='attempts_exhausted', updated_at=now()
-         WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$3`,
-        [tenantId, row.run_id, row.attempt_count])
-      if (dead.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id, control: frozen }   // 竞争者先动了
-      return { outcome: 'failed_terminal', run_id: row.run_id, control: frozen }
-    }
-    // reacquire：同 run key 重选源（行可能已被写点重排），换 snapshot/fingerprint，generation+1
-    const sources = (await c.query(
-      `SELECT ${SOURCE_COLS} FROM memories
-       WHERE tenant_id=$1 AND next_transition_at IS NOT NULL AND next_transition_at <= $2
-       ORDER BY next_transition_at, memory_id LIMIT ${frozen.batch_size}`,
-      [tenantId, evaluationAtIso])).rows
-    if (sources.length === 0) {
-      const done = await c.query(
-        `UPDATE nightly_runs SET status='completed', completed_at=now(), updated_at=now()
-         WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$3`,
-        [tenantId, row.run_id, row.attempt_count])
-      return done.rowCount === 1 ? { outcome: 'completed', run_id: row.run_id, counts: { fade: 0, consolidate: 0, reschedule: 0 }, control: frozen }
-                                 : { outcome: 'lease_held', run_id: row.run_id, control: frozen }
-    }
-    const snapshot = sources.map(r => ({ memory_id: r.memory_id, revision: String(r.revision) }))
-    const expected = Number(row.attempt_count) + 1
-    const cas = await c.query(
-      `UPDATE nightly_runs SET status='running', lease_expires_at=now() + ($4::FLOAT8 * INTERVAL '1 minute'),
-         attempt_count=$3, source_snapshot=$5, source_fingerprint=$6, updated_at=now()
-       WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$7`,
-      [tenantId, row.run_id, expected, frozen.lease_minutes,
-       JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso, pipelineVersion), row.attempt_count])
-    if (cas.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id, control: frozen }
-    return { outcome: 'claimed', run_id: row.run_id, expected_attempt: expected, sources, control: frozen }
-  }, 'transition-conflict')
+  return claimNightlyRun({
+    tenantId, evaluationAtIso, jobKind: 'transition', pipelineVersion, cfg,
+    selectAndSnapshot: mkSelectAndSnapshot(tenantId, cfg, pipelineVersion),
+  })
 }
 
 // execute 阶段（一个短 SERIALIZABLE 事务）：revalidate -> 三分支 set-based 批写 -> completed 同 commit
