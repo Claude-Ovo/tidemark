@@ -17,7 +17,7 @@
     "test:pin": "node --env-file=.env src/test-pin.mjs",
     "test:migrate-integration": "node --env-file=.env migrations/test-migrate-integration.mjs",
     "test:transition": "node --env-file=.env src/test-transition.mjs",
-    "nightly": "node --env-file=.env src/nightly/transition.mjs"
+    "nightly": "node --env-file=.env src/nightly/orchestrator.mjs"
   },
   "keywords": [],
   "author": "",
