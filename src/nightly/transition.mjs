@@ -16,14 +16,24 @@ import { inSerializableTx } from '../lib/db.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext, consolidationProgress, TRANSITION_CFG } from '../lib/scheduler.mjs'
 
-// pipeline_version 必须编码【实际生效】的候选语义参数（Codex 代码一审#3）——
-// 由有效 cfg 动态生成并贯穿 INSERT/冲突查询/fingerprint，宣称值与行为不可分离
+// pipeline_version 编码【实际生效】的参数（一审#3 + 三审#1）：语义策略（fade/hits/mult）
+// 首版全局冻结——scheduler 与全部 writers 都读 TRANSITION_CFG，nightly 不许独立覆写语义
+// （版本宣称与行为必须同一来源）；唯一每 run 可变的是 batch，取自实际 cfg。
+// 任何语义覆写在 assertSemanticPolicyFrozen 处 fail-closed。
 export const pipelineVersionOf = (cfg) => [
   'transition-v1', 'sched=v1',
-  `fade<=${cfg.fade_threshold}`, `hits=${cfg.consolidate_hits}`,
-  `mult=${cfg.consolidate_multiplier}`, `batch=${cfg.batch_size}`,
+  `fade<=${TRANSITION_CFG.fade_threshold}`, `hits=${TRANSITION_CFG.consolidate_hits}`,
+  `mult=${TRANSITION_CFG.consolidate_multiplier}`, `batch=${cfg.batch_size}`,
 ].join('|')
 export const TRANSITION_PIPELINE_VERSION = pipelineVersionOf(TRANSITION_CFG)
+
+export const assertSemanticPolicyFrozen = (cfg) => {
+  for (const k of ['fade_threshold', 'consolidate_hits', 'consolidate_multiplier']) {
+    if (k in cfg && cfg[k] !== TRANSITION_CFG[k]) {
+      throw new Error(`semantic_policy_override_forbidden:${k}`)
+    }
+  }
+}
 
 // 未来评估硬闸（Codex 代码一审#1，结论 10）：真实转换只许 server time ± 抖动容差；
 // 时间模拟只能经显式 unsafe seam（代码内 cfg，CLI 不暴露）或可重置 demo tenant
@@ -87,7 +97,8 @@ export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
 // 23505 之后的分支（schedule-UQ 或 fingerprint-UQ，分别显式处理——不笼统吞）：
 // completed -> 幂等返回；failed -> 终态返回；running 且 lease 未过期 -> lease_held；
 // running lease 过期 / stale -> CAS takeover（attempt+1、重选源换 snapshot；耗尽 -> 标 failed）
-const isPositive = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
+const isPosInt = (v) => Number.isInteger(v) && v > 0
+const isPosFinite = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
 
 const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
   const pipelineVersion = pipelineVersionOf(cfg)
@@ -97,22 +108,25 @@ const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
        FROM nightly_runs WHERE tenant_id=$1 AND job_kind='transition' AND scheduled_for=$2 AND pipeline_version=$3`,
       [tenantId, evaluationAtIso, pipelineVersion])).rows[0]
     if (!row) throw new Error('claim_conflict_without_schedule_row')   // fingerprint-UQ 独立撞不可能（含 evaluation_at），撞即不变量破坏
-    if (row.status === 'completed') return { outcome: 'already_completed', run_id: row.run_id }
-    if (row.status === 'failed') return { outcome: 'failed_terminal', run_id: row.run_id }
+    // 所有出口如实携带 run 行的冻结 control（审计快照）；legacy '{}' 原样带出 + control_invalid 标记，
+    // 绝不伪造为当前进程 cfg（三审#2）
+    const rawControl = row.control_config ?? null
+    if (row.status === 'completed') return { outcome: 'already_completed', run_id: row.run_id, control: rawControl }
+    if (row.status === 'failed') return { outcome: 'failed_terminal', run_id: row.run_id, control: rawControl }
     // control 冻结值：takeover/耗尽判定只读 run 行——缺失或非法即 fail-closed，
-    // 绝不回退当前环境值（Codex 代码一审#4：进程重启的新 cfg 不得越权改旧 run 契约）
-    const frozen = row.control_config
-    if (!frozen || !isPositive(frozen.max_attempts) || !isPositive(frozen.lease_minutes) || !isPositive(frozen.batch_size)) {
+    // 绝不回退当前环境值（一审#4）；attempt/batch 必须正整数、lease 正有限数（三审#2 收紧）
+    const frozen = rawControl
+    if (!frozen || !isPosInt(frozen.max_attempts) || !isPosFinite(frozen.lease_minutes) || !isPosInt(frozen.batch_size)) {
       throw new Error(`invalid_frozen_control_config:${row.run_id}`)
     }
-    if (row.status === 'running' && !row.lease_expired) return { outcome: 'lease_held', run_id: row.run_id }
+    if (row.status === 'running' && !row.lease_expired) return { outcome: 'lease_held', run_id: row.run_id, control: frozen }
     if (Number(row.attempt_count) >= Number(frozen.max_attempts)) {
       const dead = await c.query(
         `UPDATE nightly_runs SET status='failed', error_code='attempts_exhausted', updated_at=now()
          WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$3`,
         [tenantId, row.run_id, row.attempt_count])
-      if (dead.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id }   // 竞争者先动了
-      return { outcome: 'failed_terminal', run_id: row.run_id }
+      if (dead.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id, control: frozen }   // 竞争者先动了
+      return { outcome: 'failed_terminal', run_id: row.run_id, control: frozen }
     }
     // reacquire：同 run key 重选源（行可能已被写点重排），换 snapshot/fingerprint，generation+1
     const sources = (await c.query(
@@ -125,8 +139,8 @@ const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
         `UPDATE nightly_runs SET status='completed', completed_at=now(), updated_at=now()
          WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$3`,
         [tenantId, row.run_id, row.attempt_count])
-      return done.rowCount === 1 ? { outcome: 'completed', run_id: row.run_id, counts: { fade: 0, consolidate: 0, reschedule: 0 } }
-                                 : { outcome: 'lease_held', run_id: row.run_id }
+      return done.rowCount === 1 ? { outcome: 'completed', run_id: row.run_id, counts: { fade: 0, consolidate: 0, reschedule: 0 }, control: frozen }
+                                 : { outcome: 'lease_held', run_id: row.run_id, control: frozen }
     }
     const snapshot = sources.map(r => ({ memory_id: r.memory_id, revision: String(r.revision) }))
     const expected = Number(row.attempt_count) + 1
@@ -136,7 +150,7 @@ const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
        WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$7`,
       [tenantId, row.run_id, expected, frozen.lease_minutes,
        JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso, pipelineVersion), row.attempt_count])
-    if (cas.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id }
+    if (cas.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id, control: frozen }
     return { outcome: 'claimed', run_id: row.run_id, expected_attempt: expected, sources, control: frozen }
   }, 'transition-conflict')
 }
@@ -229,6 +243,7 @@ export const executeRun = async (tenantId, evaluationAtIso, run) => {
 
 export const runTransition = async ({ tenantId, scheduledFor, cfg = TRANSITION_CFG }) => {
   if (Number.isNaN(new Date(scheduledFor).getTime())) throw new Error('scheduled_for_invalid')
+  assertSemanticPolicyFrozen(cfg)
   const evaluationAtIso = new Date(scheduledFor).toISOString()   // UTC 规范化；即 evaluation_at
   const claim = await claimRun(tenantId, evaluationAtIso, cfg)
   const result = claim.outcome === 'claimed' ? { ...(await executeRun(tenantId, evaluationAtIso, claim)), control: claim.control } : claim

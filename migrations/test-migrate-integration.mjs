@@ -114,4 +114,39 @@ await disposable(async (client) => {
   console.log('PASS 4 marker SQL -> 016-019 green; marker row survives with claim + slot occupied')
 })
 
+// ===== Act 3: 021 态植入 future-anchor 行 -> 022 preflight 拒 -> 修复 -> 022/023 全通、回填成立 =====
+await withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn: async (client) => {
+  const migrations = await loadMigrations()
+  await ensureMigrationLedger(client)
+  for (const m of migrations.filter(m => m.version <= 21)) {
+    assert.equal(await applyOne(client, m), 'applied', m.filename)
+  }
+  const EMB = '[' + Array(512).fill('0.01').join(',') + ']'
+  const badId = randomUUID(), goodId = randomUUID()
+  const insRow = (id, anchorOffset) => client.query(
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+       state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+     VALUES ($1,$2,$3,'event','ep','x',$4,'agent_inferred','accepted','fresh',false,0.5,0.8, now()+($5::FLOAT8||' hours')::INTERVAL, now(), 108)`,
+    [T, A, id, EMB, anchorOffset])
+  await insRow(badId, 48)     // future anchor：022 必须拒
+  await insRow(goodId, -10)
+  await assert.rejects(
+    async () => { for (const m of migrations.filter(m => m.version >= 22)) await applyOne(client, m) },
+    (e) => e.message.includes('PREFLIGHT 022 REFUSED') && e.message.includes('FUTURE strength_anchor_at'),
+    '022 must refuse while an eligible future-anchor row exists')
+  const led = (await client.query('SELECT count(*)::INT4 AS n FROM schema_migrations WHERE version >= 22')).rows[0].n
+  assert.equal(led, 0, 'no 022+ ledger entries while refused')
+  console.log('PASS 5 022 preflight refuses future anchors on the real migration path')
+  // 显式人工修复（审计过的 re-anchor，非 clamp），重跑全通、回填成立
+  await client.query('UPDATE memories SET strength_anchor_at = now() - INTERVAL \'1 hour\' WHERE tenant_id=$1 AND memory_id=$2', [T, badId])
+  for (const m of migrations.filter(m => m.version >= 22)) {
+    assert.equal(await applyOne(client, m), 'applied', m.filename)
+  }
+  for (const id of [badId, goodId]) {
+    const r = (await client.query('SELECT next_transition_at FROM memories WHERE tenant_id=$1 AND memory_id=$2', [T, id])).rows[0]
+    assert.ok(r.next_transition_at, 'backfill scheduled the repaired/clean row')
+  }
+  console.log('PASS 6 repaired rows backfilled by 022, 023 applied')
+} })
+
 console.log('ALL MIGRATE INTEGRATION TESTS PASSED')

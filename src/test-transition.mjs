@@ -368,7 +368,40 @@ try {
     console.log('PASS S17 frozen control config rules takeover, empty config fails closed')
   }
 
-  console.log('ALL P0-06 TRANSITION ASSERTIONS PASSED (17 scenarios)')
+  // S18 语义策略冻结（三审#1）：nightly 覆写 fade/hits/mult 一律入口拒绝——
+  // 版本串的语义段永远来自冻结常数，宣称与行为同源
+  {
+    const T18 = t(18)
+    await assert.rejects(
+      () => runTransition({ tenantId: T18, scheduledFor: nowIso(), cfg: { ...TRANSITION_CFG, fade_threshold: 0.9 } }),
+      /semantic_policy_override_forbidden:fade_threshold/)
+    await assert.rejects(
+      () => runTransition({ tenantId: T18, scheduledFor: nowIso(), cfg: { ...TRANSITION_CFG, consolidate_hits: 1 } }),
+      /semantic_policy_override_forbidden:consolidate_hits/)
+    const runs = (await q('SELECT count(*)::INT4 AS n FROM nightly_runs WHERE tenant_id=$1', [T18])).rows[0].n
+    assert.equal(runs, 0, 'refused override leaves zero run rows')
+    // batch 覆写合法（唯一每 run 可变项），版本串语义段仍为冻结常数
+    assert.ok(pipelineVersionOf({ ...TRANSITION_CFG, batch_size: 7 }).includes('fade<=0.15'), 'semantic segment frozen')
+    assert.ok(pipelineVersionOf({ ...TRANSITION_CFG, batch_size: 7 }).includes('batch=7'), 'batch segment effective')
+    console.log('PASS S18 semantic policy override refused, batch-only variance')
+  }
+
+  // S19 各出口 control 快照（三审#2）：already_completed / failed_terminal 携带 run 行真实冻结值
+  {
+    const T19 = t(19)
+    const id = await ins(T19, { anchor: 0.5, anchorAtH: -200, nextH: -1 })
+    const s = new Date().toISOString()
+    const r1 = await runTransition({ tenantId: T19, scheduledFor: s })
+    assert.equal(r1.outcome, 'completed')
+    assert.ok(r1.control && r1.control.max_attempts === TRANSITION_CFG.max_attempts, `completed carries frozen control: ${JSON.stringify(r1.control)}`)
+    const r2 = await runTransition({ tenantId: T19, scheduledFor: s, cfg: { ...TRANSITION_CFG, max_attempts: 99 } })
+    assert.equal(r2.outcome, 'already_completed')
+    assert.ok(r2.control && r2.control.max_attempts === TRANSITION_CFG.max_attempts, `already_completed carries the RUN's frozen control (not process cfg 99): ${JSON.stringify(r2.control)}`)
+    void id
+    console.log('PASS S19 every exit carries the frozen control snapshot')
+  }
+
+  console.log('ALL P0-06 TRANSITION ASSERTIONS PASSED (19 scenarios)')
 } catch (e) {
   primaryError = e
 } finally {
