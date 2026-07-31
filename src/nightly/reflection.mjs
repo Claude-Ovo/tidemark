@@ -4,7 +4,7 @@
 //     选源 NOT EXISTS 反连接；semantic dedup 只去语义重复（一审#5）
 //   - 配对规则冻结：failure outcome 后 72h 内、同 (agent,task,episode) 的最早 success，
 //     tiebreak (reported_at, outcome_request_id, attempt_id)；双方 reported_at <= evaluation_at；
-//     failure 自身过窗（> 72h 无 success）永久放弃
+//     选源由近期 success 驱动反查（retention=120h 界定扫描窗，根治 failure 队首饥饿）
 //   - 终态真相=outcomes（二审#2）：账本存双方 outcome_request_id 并 FK；不伪造 attempt_end；
 //     pair_fingerprint 覆盖两 outcome IDs/status/reported_at + 全部送模事件 hashes
 //   - 截断先保必需证据（二审#3）：failure 侧 error/user_correction anchors + success 侧
@@ -42,12 +42,12 @@ export const REFLECT_CFG = {
 
 export const reflectPipelineVersionOf = (cfg) => [
   'reflect-v1', `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
-  `win=${REFLECT_CFG.window_hours}`, `maxp=${REFLECT_CFG.max_pairs}`, `maxev=${REFLECT_CFG.max_events_per_pair}`,
+  `win=${REFLECT_CFG.window_hours}`, `ret=${REFLECT_CFG.retention_hours}`, `maxp=${REFLECT_CFG.max_pairs}`, `maxev=${REFLECT_CFG.max_events_per_pair}`,
   `maxb=${REFLECT_CFG.max_pair_bytes}`, `dedup=${REFLECT_CFG.dedup_threshold}`, `scan=${cfg.batch_size}`,
 ].join('|')
 
 export const assertReflectPolicyFrozen = (cfg) => {
-  for (const k of ['window_hours', 'max_pairs', 'max_events_per_pair', 'max_pair_bytes', 'dedup_threshold']) {
+  for (const k of ['window_hours', 'retention_hours', 'max_pairs', 'max_events_per_pair', 'max_pair_bytes', 'dedup_threshold']) {
     if (k in cfg && cfg[k] !== REFLECT_CFG[k]) throw new Error(`semantic_policy_override_forbidden:${k}`)
   }
 }
@@ -63,10 +63,19 @@ const experienceIdOf = (pairFingerprint) => {
 // hash 覆盖全部实际送模字段（一审#9）：event_type/attempt/created_at 参与判定与 prompt，全部入指纹
 const eventHash = (e) => createHash('sha256').update(canonicalJson(
   [e.event_id, e.event_type, e.attempt_id, new Date(e.created_at).toISOString(), e.payload ?? {}])).digest('hex')
-const canonicalBytes = (evs) => Buffer.byteLength(canonicalJson(evs.map(e => [e.event_id, e.event_type, e.payload ?? {}])), 'utf8')
 
-// 截断（二审#3）：先固定必需 anchors，再按 created_at 升序填充；anchors 超限 -> null（input_too_large）
-const selectPairEvents = (failureEvents, successEvents) => {
+// canonical provider envelope（二审#4）：budget、fingerprint、provider 请求共用【同一字节串】——
+// 计数器与真实模型输入不可能再分离；attempt/task 字符串的长度也天然被同一预算约束
+export const mkEnvelope = (f, s, events) => canonicalJson({
+  task_instance_id: f.task_instance_id,
+  failure_attempt_id: f.attempt_id,
+  success_attempt_id: s.attempt_id,
+  events: events.map(e => [e.event_id, e.event_type, e.attempt_id, new Date(e.created_at).toISOString(), e.payload ?? {}]),
+})
+const envelopeBytes = (f, s, events) => Buffer.byteLength(mkEnvelope(f, s, events), 'utf8')
+
+// 截断（二审#3）：先固定必需 anchors，再按 created_at 升序填充；anchors 自身超限 -> null（input_too_large）
+const selectPairEvents = (f, s, failureEvents, successEvents) => {
   const anchors = [
     ...failureEvents.filter(e => e.event_type === 'tool_error' || e.event_type === 'user_correction'),
   ]
@@ -74,7 +83,7 @@ const selectPairEvents = (failureEvents, successEvents) => {
     ? [successEvents.reduce((a, b) => (a.created_at > b.created_at ? a : b))]
     : []
   anchors.push(...successTerminal)
-  if (anchors.length > REFLECT_CFG.max_events_per_pair || canonicalBytes(anchors) > REFLECT_CFG.max_pair_bytes) return null
+  if (anchors.length > REFLECT_CFG.max_events_per_pair || envelopeBytes(f, s, anchors) > REFLECT_CFG.max_pair_bytes) return null
   const anchorIds = new Set(anchors.map(e => e.event_id))
   const rest = [...failureEvents, ...successEvents]
     .filter(e => !anchorIds.has(e.event_id))
@@ -82,7 +91,7 @@ const selectPairEvents = (failureEvents, successEvents) => {
   const chosen = [...anchors]
   for (const e of rest) {
     if (chosen.length >= REFLECT_CFG.max_events_per_pair) break
-    if (canonicalBytes([...chosen, e]) > REFLECT_CFG.max_pair_bytes) continue
+    if (envelopeBytes(f, s, [...chosen, e]) > REFLECT_CFG.max_pair_bytes) continue
     chosen.push(e)
   }
   return { chosen, anchors }
@@ -91,25 +100,53 @@ const selectPairEvents = (failureEvents, successEvents) => {
 const OUT_COLS = 'outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, reported_at'
 
 const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIso) => {
-  // 物理硬上限（一审#3）：MATERIALIZED CTE 沿 031 键序先 LIMIT，anti-join 只作用于这 200 行——
-  // consumed 行再多也不放大扫描；retention 下限独立于配对窗口（一审#4）
-  const failures = (await c.query(
-    `WITH recent AS MATERIALIZED (
+  // success 驱动选源（二审#2：failure 队首饥饿的根治）：任何合法 pair 必有 retention 内的
+  // success——从最近 success 有界反查（031 索引反向扫），无 success 的 failure 堆积再多也
+  // 不占扫描窗；找到候选 failure 后仍按冻结规则正查其【最早】success 定配对（026 索引）。
+  const successes = (await c.query(
+    `WITH recent_success AS MATERIALIZED (
        SELECT ${OUT_COLS} FROM outcomes
-       WHERE tenant_id=$1 AND status='failure' AND reported_at <= $2
+       WHERE tenant_id=$1 AND status='success' AND reported_at <= $2
          AND reported_at >= $2::TIMESTAMPTZ - ($3::FLOAT8 * INTERVAL '1 hour')
-       ORDER BY reported_at, outcome_request_id LIMIT ${cfg.batch_size}
-     )
-     SELECT * FROM recent o
-     WHERE NOT EXISTS (SELECT 1 FROM reflection_pairs rp
-                       WHERE rp.tenant_id=$1 AND rp.agent_id=o.agent_id AND rp.failure_attempt_id=o.attempt_id)
-     ORDER BY reported_at, outcome_request_id`,
+       ORDER BY reported_at DESC, outcome_request_id DESC LIMIT ${cfg.batch_size}
+     ) SELECT * FROM recent_success`,
     [tenantId, evalIso, REFLECT_CFG.retention_hours])).rows
-  if (failures.length === 0) return null
+  if (successes.length === 0) return null
+  // 每个 success 反查其 72h 窗内、同 (agent,task,episode) 的未消费 failure 候选，并验证归属：
+  // 只认领"其最早 success 恰为本 S"的 failure（配对规则的反向一致性）——否则同 task 多对时
+  // 全部 S 都抢最早 F，同晚只出一对（链上其余顺延，白丢产能）。窗内候选有界 LIMIT 8。
+  const candidateFailures = new Map()
+  for (const su of successes) {
+    const fs = (await c.query(
+      `SELECT ${OUT_COLS} FROM outcomes o
+       WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='failure'
+         AND reported_at < $5 AND reported_at >= $5::TIMESTAMPTZ - ($6::FLOAT8 * INTERVAL '1 hour')
+         AND NOT EXISTS (SELECT 1 FROM reflection_pairs rp
+                         WHERE rp.tenant_id=$1 AND rp.agent_id=o.agent_id AND rp.failure_attempt_id=o.attempt_id)
+       ORDER BY reported_at, outcome_request_id LIMIT 8`,
+      [tenantId, su.agent_id, su.task_instance_id, su.episode_id, su.reported_at, REFLECT_CFG.window_hours])).rows
+    for (const f of fs) {
+      const sStar = (await c.query(
+        `SELECT attempt_id FROM outcomes
+         WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='success'
+           AND reported_at > $5 AND reported_at <= LEAST($6::TIMESTAMPTZ, $5::TIMESTAMPTZ + ($7::FLOAT8 * INTERVAL '1 hour'))
+         ORDER BY reported_at, outcome_request_id, attempt_id LIMIT 1`,
+        [tenantId, f.agent_id, f.task_instance_id, f.episode_id, f.reported_at, evalIso, REFLECT_CFG.window_hours])).rows[0]
+      if (sStar && sStar.attempt_id === su.attempt_id) {
+        candidateFailures.set(`${f.agent_id} ${f.attempt_id}`, f)
+        break
+      }
+    }
+  }
+  if (candidateFailures.size === 0) return null
+  // 稳定顺序：按 failure (reported_at, outcome_request_id) 升序处理
+  const failures = [...candidateFailures.values()]
+    .sort((a, b) => a.reported_at - b.reported_at || (a.outcome_request_id < b.outcome_request_id ? -1 : 1))
   const pairs = []
   let workableCount = 0
   for (const f of failures) {
     if (workableCount >= REFLECT_CFG.max_pairs) break   // skipped 不占可工作产物额度（一审#5）
+    // 冻结配对规则不变：failure 之后 72h 内同 scope 的【最早】success（正查定配对）
     const s = (await c.query(
       `SELECT ${OUT_COLS} FROM outcomes
        WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='success'
@@ -125,16 +162,18 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
       [tenantId, f.agent_id, [f.attempt_id, s.attempt_id], evalIso])).rows
     const failureEvents = evs.filter(e => e.attempt_id === f.attempt_id)
     const successEvents = evs.filter(e => e.attempt_id === s.attempt_id)
-    const sel = selectPairEvents(failureEvents, successEvents)
+    const sel = selectPairEvents(f, s, failureEvents, successEvents)
     if (!sel) { pairs.push({ skipped: 'input_too_large', failure: f, success: s }); continue }   // 不计 workableCount
+    const envelope = mkEnvelope(f, s, sel.chosen)
     const eventHashes = sel.chosen.map(e => [e.event_id, eventHash(e)])
     const fp = createHash('sha256').update(canonicalJson({
       failure: [f.outcome_request_id, f.status, new Date(f.reported_at).toISOString()],
       success: [s.outcome_request_id, s.status, new Date(s.reported_at).toISOString()],
+      envelope_sha256: createHash('sha256').update(envelope).digest('hex'),   // 二审#4：指纹覆盖真实模型输入
       event_hashes: eventHashes, evaluation_at: evalIso, pipeline_version: pipelineVersion,
     })).digest()
     pairs.push({
-      failure: f, success: s, events: sel.chosen, anchors: sel.anchors,
+      failure: f, success: s, events: sel.chosen, anchors: sel.anchors, envelope,
       event_hashes: eventHashes, pair_fingerprint: fp, experience_id: experienceIdOf(fp),
     })
     workableCount++
@@ -171,19 +210,16 @@ const cosine = (a, b) => {
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE', '57P01', '08006', '08001'])
 const isTransient = (e) => TRANSIENT_CODES.has(e?.code) || /timeout|throttl|5\d\d|reset/i.test(e?.message ?? '')
 
-export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG }) => {
-  if (Number.isNaN(new Date(scheduledFor).getTime())) throw new Error('scheduled_for_invalid')
-  assertReflectPolicyFrozen(cfg)
-  const evaluationAtIso = new Date(scheduledFor).toISOString()
+export const claimReflection = async (tenantId, evaluationAtIso, cfg = REFLECT_CFG) => {
   const pipelineVersion = reflectPipelineVersionOf(cfg)
-  const claim = await claimNightlyRun({
+  return claimNightlyRun({
     tenantId, evaluationAtIso, jobKind: 'reflection', pipelineVersion, cfg,
     selectAndSnapshot: mkSelectAndSnapshot(tenantId, cfg, pipelineVersion),
   })
-  if (claim.outcome !== 'claimed') {
-    console.log(JSON.stringify({ evt: 'reflection_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...claim }))
-    return claim
-  }
+}
+
+// execute 阶段独立导出（二审#5：真实 stale/race 测试需要 claim 与 execute 之间的注入点）
+export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
   const evalMs = new Date(evaluationAtIso).getTime()
   const fence = { tenantId, runId: claim.run_id, expectedAttempt: claim.expected_attempt }
   const workable = claim.sources.filter(p => !p.skipped)
@@ -195,11 +231,14 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
   try {
     products = []
     for (const p of workable) {
+      // provider 请求 = envelope 反序列化视图（budget/fingerprint/请求同一字节串，二审#4）
+      const env = JSON.parse(p.envelope)
+      const evView = env.events.map(([event_id, event_type, attempt_id, created_at, payload]) => ({ event_id, event_type, attempt_id, created_at, payload }))
       const narrative = await reflectExtract({
-        task_instance_id: p.failure.task_instance_id,
-        failure_attempt_id: p.failure.attempt_id, success_attempt_id: p.success.attempt_id,
-        failure_events: p.events.filter(e => e.attempt_id === p.failure.attempt_id),
-        success_events: p.events.filter(e => e.attempt_id === p.success.attempt_id),
+        task_instance_id: env.task_instance_id,
+        failure_attempt_id: env.failure_attempt_id, success_attempt_id: env.success_attempt_id,
+        failure_events: evView.filter(e => e.attempt_id === env.failure_attempt_id),
+        success_events: evView.filter(e => e.attempt_id === env.success_attempt_id),
       })
       for (const k of ['trigger', 'wrong_action', 'correct_action', 'caution']) {
         if (typeof narrative?.[k] !== 'string' || narrative[k].length < 1 || narrative[k].length > FIELD_MAX) {
@@ -237,14 +276,16 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
     throw e
   }
 
-  // batch 内 dedup（二审#4 + 代码一审#1）：仅同 (agent, scope) 分区内互查——
-  // 跨 agent 语义相同也绝不共享 experience（edges/ledger 不得跨 agent 指向）
+  // batch 内 dedup（一审#1 + 二审#1）：仅同 (agent, scope) 分区内互查；winner 存【root product
+  // 引用】而非 ID——root 的最终 resolved_experience_id 要等 DB dedup 之后才知道，
+  // 后继沿引用链取根，绝不指向可能永不落库的生成 ID
+  const rootOf = (prod) => { let r = prod; while (r.batchRoot) r = r.batchRoot; return r }
   for (let i = 0; i < products.length; i++) {
     for (let j = 0; j < i; j++) {
       if (products[j].pair.failure.agent_id !== products[i].pair.failure.agent_id) continue   // scope v1 恒 'task'
-      const w = products[j].winner ? products.find(x => x.pair.experience_id === products[j].winner) ?? products[j] : products[j]
+      const w = rootOf(products[j])
       if (cosine(products[i].f32, w.f32) >= REFLECT_CFG.dedup_threshold) {
-        products[i].winner = w.pair.experience_id
+        products[i].batchRoot = w
         break
       }
     }
@@ -268,13 +309,10 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
         }
       }
       let inserted = 0, dedupBatch = 0, dedupDb = 0
-      // pass 1：解析每个产物的 resolved_experience_id（batch winner 已标；否则 DB dedup）
+      // pass 1a：只有 batch root 做 DB dedup（二审#1：root 的最终 ID 可能是既有 DB candidate，
+      // 后继必须等 root 定型后沿引用链取，绝不提前指向可能永不落库的生成 ID）
       for (const prod of products) {
-        if (prod.winner) {
-          prod.resolved_experience_id = prod.winner
-          dedupBatch++
-          continue
-        }
+        if (prod.batchRoot) continue
         // DB 内 (agent, scope) dedup：有界候选 + 精确 cosine 复核（低频 nightly 路径，LIMIT 10）
         const cands = (await c.query(
           `SELECT memory_id, embedding::STRING AS emb FROM memories
@@ -292,6 +330,14 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
         }
         if (winner) { prod.resolved_experience_id = winner; dedupDb++ }
         else prod.resolved_experience_id = prod.pair.experience_id
+      }
+      // pass 1b：非 root 沿链传播 root 的【最终】resolved（含 root 命中 DB winner 的情形）
+      for (const prod of products) {
+        if (!prod.batchRoot) continue
+        let r = prod
+        while (r.batchRoot) r = r.batchRoot
+        prod.resolved_experience_id = r.resolved_experience_id
+        dedupBatch++
       }
       // pass 2：ledger 原子先占（一审#6）——任何副作用之前。冲突读现行核对指纹：
       // 同指纹=另一 run 已消费该 pair（幂等，本批放弃其副作用）；异指纹=竞态 -> 整批 stale
@@ -392,6 +438,18 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
   const final = { ...result, control: claim.control }
   console.log(JSON.stringify({ evt: 'reflection_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...final }))
   return final
+}
+
+export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG }) => {
+  if (Number.isNaN(new Date(scheduledFor).getTime())) throw new Error('scheduled_for_invalid')
+  assertReflectPolicyFrozen(cfg)
+  const evaluationAtIso = new Date(scheduledFor).toISOString()
+  const claim = await claimReflection(tenantId, evaluationAtIso, cfg)
+  if (claim.outcome !== 'claimed') {
+    console.log(JSON.stringify({ evt: 'reflection_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...claim }))
+    return claim
+  }
+  return executeReflection(tenantId, evaluationAtIso, claim)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

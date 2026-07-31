@@ -299,14 +299,22 @@ forget/export/unpin：owner/admin HTTP 面。`reflect` 无公共 tool。
 
 同步确定性 gate（无 LLM）：大小/类型/重复提示/敏感模式粗筛 → `accepted|quarantined|rejected`；quarantined 不 embedding 不注入，`quarantine_expires_at` 短 TTL；source 由 server 按调用路径分配；`derived` 必须带 evidence。
 
-## 6. Nightly（回应 P0-6 的顺序修正）
+## 6. Nightly（v1.2.5 可执行契约——P0-06/P0-07 实现真相源）
 
-执行顺序（每 job 独立 lease）：
-1. **dream job**：冻结 eligible snapshot（fresh、低 effective、非 pinned、admission accepted，记 `(memory_id, revision)`）→ Bedrock 浓缩（事务外）→ 单事务：revision revalidate → insert summary（derived, layer=event）+ **恰好这些 sources 转 faded** + run completed。dream 拥有自己的 fade 迁移，通用 transition 不抢
-2. **reflection job**：选源 `attempt_events JOIN outcomes`（attempt_events 自身无成败状态，必须联 outcomes 判定"失败 attempt + 同 task_instance 后续成功 attempt"）→ Bedrock 提炼 → 单事务插 experience(candidate) + `memory_event_evidence`（不是 memory_derivations）+ run completed
-3. **通用 state transitions**：处理到期行（fade/consolidate），排除当晚 dream 已锁定的 sources
+**单入口 orchestrator**（`src/nightly/orchestrator.mjs`，EventBridge 只触发它）：顺序 dream -> reflection -> transition。dream 占用 memory sources，其 `lease_held|retryable|stale|refused_future_evaluation` 一律短路整晚（transition 不得抢 fade）；dream terminal failed 降级继续（零产物零专属 fade）。reflection 不占 sources：任何结果都不阻止 transition——模型故障不得饿死确定性 lifecycle。
 
-幂等/lease/stale/batch 全按结论 13/16/17。Lambda 连接池 handler 外复用 max=1；EventBridge retry+DLQ。
+**通用 run harness**（`run-harness.mjs`，三 job 共用）：claim=有界选源+snapshot+fingerprint+INSERT run 同一短事务，空源 no-work 不落 run 行（同键既存 run 优先于 no-work 短路）；`evaluation_at = scheduled_for`（UTC）进 canonical fingerprint、跨 retry/takeover 固定，lease/CAS 只用 DB 墙钟；未来评估硬闸（db_now+5min 容差，unsafe seam 仅代码内）；conflict 按 status 分支（completed 幂等/failed 终态/lease held/过期或 stale 的 CAS takeover，attempt=generation token）；frozen `control_config` 缺失或非法 fail-closed，绝不回退进程 cfg；fencing：终态更新 rowCount 必须=1，否则整事务回滚；transient（provider/网络/embedding 瞬断）-> markRetryable（lease 立即过期待 takeover），schema/admission/invariant -> terminal failed。
+
+**dream**（`dream.mjs`）：选源=due 队列（`next_transition_at <= evaluation`）且 `layer='event' AND source<>'derived'（防梦中梦回流）AND admission='accepted' AND NOT pinned AND state='fresh' AND importance<0.5 AND credited_success_count=0 AND episode_id IS NOT NULL`，有界扫 `dream_scan_rows=200`；(agent_id, episode_id) 分组，>=`min_cluster=3` 成簇，簇内 created_at 升序取 `max_sources_per_cluster=8`（最旧优先），簇间逐字段排序取 `max_clusters=5`——dream 挑簇、transition 处理余行。每簇 `cluster_fingerprint=sha256(canonical{members(id,rev), evaluation_at, pipeline_version})`，`derived_memory_id` 由指纹确定性派生；run fingerprint=hash(ordered cluster fingerprints+evaluation+pipeline)。模型只产 summary/salient_points；结构校验 -> deterministic admission -> 才 embedding；salient 以固定 canonical rendering（`summary
+[salient] ...`）入 content 与 checksum；time_range 由 server 从源 created_at 计算。最终事务：整批 revision revalidate（mismatch=整批 stale 零写）-> 逐簇 idempotent insert（已存在则核对 content/agent/episode/source/admission/embedding digest 与 edge run 归属，分歧=invariant abort）-> 全簇成功才 fade 全部源（baseline=count）-> Dream Receipt 写 `result_receipt` -> completed。任一簇失败=整批零产物零 fade。
+
+**reflection**（`reflection.mjs`）：**success 驱动选源**（根治 failure 队首饥饿）——近期 success 有界扫（`reported_at DESC LIMIT reflect_scan=200`，retention=`120h` 界定窗口），每个 success 反查 72h 窗内同 (agent,task,episode) 的未消费 failure 并**验证归属**（该 failure 的最早 success 恰为本 S 才认领，LIMIT 8 候选循环）；配对规则冻结=failure 后 `window=72h` 内最早 success，tiebreak (reported_at, outcome_request_id, attempt_id)，双方 reported_at<=evaluation。**canonical envelope**：`{task_instance_id, failure/success_attempt_id, events[(id,type,attempt,created_at,payload)]}` 的 canonicalJson——budget（`32 事件/16384 UTF-8 字节`）、pair fingerprint（含 envelope_sha256）与 provider 请求共用同一字节串；截断先保必需 anchors（failure 侧 tool_error/user_correction + success 侧 terminal 事件），context 按 created_at 升序填充；anchors 自身超限 -> `input_too_large` 终态落账本（status=skipped，不吃 `max_pairs=5` 额度，跨晚不回）。`reflection_pairs` 账本承担 exactly-once：PK (tenant,agent,failure_attempt,success_attempt)、outcome 双 FK 锚定终态真相（无需 attempt_end）、原子占先于一切副作用——同指纹异 run=consumed_elsewhere（放弃副作用），异指纹=整批 stale。dedup：batch 内按 (agent,scope) 分区、winner 存 root 引用、root 先做 DB dedup（有界候选+精确 cosine>=`0.92`、ORDER BY distance,memory_id）后沿链传播最终 resolved id——绝不指向未落库的生成 ID；命中 winner 时 ledger/evidence 全指向 winner。evidence_ids 由 server 从冻结 anchors 写入（模型永不生成）；scope v1 冻结 'task'；confidence 有限 [0,1]。receipt 三值分明：generated_experience_id / resolved_experience_id / generated_output_checksum。
+
+**transition**（P0-06 契约不变）：canonical scheduler、边界 `<=`、consolidation baseline、set-based 批写、future anchor 停机。
+
+**验收清单（acceptance matrix，实测套件 `test:nightly` 21 场景 + `test:transition` 19 场景）**：dream 选源边界/截断稳定/幂等/第 2 簇失败整批零写/跨 agent 不串/真实 stale-reacquire；reflection 最早 success 配对/跨夜窗口边界/exactly-once 跨晚/anchors 抗 flood/oversized 终态跳过/双层 dedup 且 ledger 永不跨 agent/server 封口无 attempt_end provenance/真实 ledger race 整批 stale/DB-candidate+batch-twin 组合全指 winner/201 无匹配 failure 不饥饿/envelope 字节约束真实输入；orchestrator running-dream 短路零抢占/reflection 受阻不饿 lifecycle/全链 completed。
+
+幂等/lease/stale/batch 全按结论 13/16/17。Lambda 连接池 handler 外复用 max=1；EventBridge retry+DLQ（P0-09 接线）。
 
 ## 7. 评测（三档 A/B）
 

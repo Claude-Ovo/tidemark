@@ -5,15 +5,15 @@
 // 跨 agent 不串、配对窗口跨夜、exactly-once 跨晚、anchors 优先截断（failure 淹没 success）、
 // input_too_large 持久跳过、同批 dedup agent 分区、无 attempt_end 的 outcome provenance、
 // 异指纹竞态 stale、dream stale 短路 transition、reflection 不阻 transition。
-import './lib/test-env.mjs'   // 必须第一个 import：锁 stub provider
+import { assertStubLocked } from './lib/test-env.mjs'   // 必须第一个 import：无条件锁 stub
 import assert from 'node:assert/strict'
 import { randomUUID, createHash } from 'node:crypto'
 import { getPool } from './lib/db.mjs'
 import { connectWithRetry, withDatabase, isRetryableDatabaseError, sleep } from '../migrations/db.mjs'
 import { embed } from './lib/embed.mjs'
 import { toVectorLiteral } from './lib/vector-canonical.mjs'
-import { runDream, DREAM_CFG } from './nightly/dream.mjs'
-import { runReflection, REFLECT_CFG } from './nightly/reflection.mjs'
+import { runDream, DREAM_CFG, claimDream, executeDream } from './nightly/dream.mjs'
+import { runReflection, REFLECT_CFG, claimReflection, executeReflection } from './nightly/reflection.mjs'
 import { runTransition } from './nightly/transition.mjs'
 import { runNightly } from './nightly/orchestrator.mjs'
 import { claimRun } from './nightly/transition.mjs'
@@ -83,6 +83,7 @@ const mems = async (tenant, where = '', params = []) =>
 
 let primaryError = null
 try {
+  await assertStubLocked()   // 二审#3：加载后断言 provider 导出确为 stub
   // ===== D1 选源边界：高价值/derived/NULL episode/pinned/不足 min_cluster 全不入梦 =====
   {
     const T = t('d1'), A = T + '-a', EP = T + '-ep'
@@ -169,23 +170,23 @@ try {
     console.log('PASS D6 cross-agent same-name episodes never mix')
   }
 
-  // ===== D7 revalidate：claim 后写点介入 => stale 零写 =====
+  // ===== D7 真实 revalidate：claim 后写点介入 => 整批 stale 零写 => reacquire 完成 =====
   {
     const T = t('d7'), A = T + '-a', EP = T + '-ep'
     const ids = []
     for (let i = 0; i < 3; i++) ids.push(await insMem(T, A, EP, `d7 frag ${i}`))
-    const { claimRun: claimDream } = await import('./nightly/run-harness.mjs').then(m => ({ claimRun: null })).catch(() => ({ claimRun: null }))
-    // 用真实 runDream 分步不可行——直接用 harness 层重现：claim 由 runDream 内部做，
-    // 改用时序注入：先手动 UPDATE revision 于 claim 与 execute 之间不可达；改为验证 stale 语义
-    // 的等价路径：预插同 schedule 的 running run 行占键 => lease_held（短路语义由 N1 验证）
-    // 此处验证 dream 对 revision 的敏感性：直接构造 snapshot 失配
-    const s = nowIso()
-    // 手动 claim（照 dream 的选源逻辑做一份 snapshot），随后动 revision，再让 runDream 走 conflict->takeover 失败路径太绕；
-    // 采用最短可靠路径：跑 dream 前动一行使 due 集与 fingerprint 不一致的场景由 transition S11 已覆盖同一 harness 代码；
-    // dream 侧断言：completed 后 revision 已 bump（fade 写入），二次动行不影响已 completed run
-    const r = await runDream({ tenantId: T, scheduledFor: s })
-    assert.equal(r.outcome, 'completed')
-    console.log('PASS D7 dream shares the harness stale path (direct coverage in transition S11)')
+    const s7 = new Date().toISOString()
+    const claim = await claimDream(T, s7, DREAM_CFG)
+    assert.equal(claim.outcome, 'claimed', JSON.stringify(claim))
+    await q('UPDATE memories SET revision=revision+1 WHERE tenant_id=$1 AND memory_id=$2', [T, ids[0]])
+    const ex = await executeDream(T, s7, claim)
+    assert.equal(ex.outcome, 'stale', JSON.stringify(ex))
+    assert.equal((await mems(T, `AND source='derived'`)).length, 0, 'stale batch: zero products')
+    assert.equal((await mems(T, `AND state='faded'`)).length, 0, 'stale batch: zero fades')
+    const r = await runDream({ tenantId: T, scheduledFor: s7 })
+    assert.equal(r.outcome, 'completed', JSON.stringify(r))
+    assert.equal((await mems(T, `AND source='derived'`)).length, 1, 'reacquire with fresh snapshot completes')
+    console.log('PASS D7 dream revalidate: stale zero-write, reacquire completes')
   }
 
   // ===== R1 配对正确性：最早 success 胜出，episode 不一致不配 =====
@@ -305,11 +306,13 @@ try {
     console.log('PASS R7 server-sealed evidence, outcome-anchored provenance sans attempt_end')
   }
 
-  // ===== R8 异指纹竞态 => 整批 stale 零写 =====
+  // ===== R8 真实 ledger race：claim 后另一 run 抢占同 pair（异指纹）=> 整批 stale 零副作用 =====
   {
     const T = t('r8'), A = T + '-a'
-    const p = await mkPair(T, A, {})
-    // 预放一条同 pair 键、异指纹的账本行（伪造既有消费）
+    const p8 = await mkPair(T, A, {})
+    const s8 = new Date().toISOString()
+    const claim = await claimReflection(T, s8, REFLECT_CFG)
+    assert.equal(claim.outcome, 'claimed', JSON.stringify(claim))
     const runFx = randomUUID()
     await q(`INSERT INTO nightly_runs (tenant_id, run_id, job_kind, scheduled_for, pipeline_version, status, attempt_count, batch_size, source_snapshot, source_fingerprint, control_config)
              VALUES ($1,$2,'reflection', now() - INTERVAL '1 day', 'fx', 'completed', 1, 1, '[]', $3, '{}')`,
@@ -318,12 +321,62 @@ try {
              SELECT $1, $2, $3, $4, o1.outcome_request_id, o2.outcome_request_id, $5, NULL, $6, 'skipped_input_too_large'
              FROM (SELECT outcome_request_id FROM outcomes WHERE tenant_id=$1 AND attempt_id=$3) o1,
                   (SELECT outcome_request_id FROM outcomes WHERE tenant_id=$1 AND attempt_id=$4) o2`,
-      [T, A, p.attF, p.attS, Buffer.from('divergent-fingerprint-' + suite), runFx])
-    const r = await runReflection({ tenantId: T, scheduledFor: nowIso() })
-    // 选源 NOT EXISTS 已挡（该 pair 已在账本）=> no_work 即正确的 exactly-once 表现
-    assert.ok(['no_work', 'stale'].includes(r.outcome), `pre-consumed pair blocked: ${JSON.stringify(r.outcome)}`)
+      [T, A, p8.attF, p8.attS, Buffer.from('divergent-fingerprint-' + suite), runFx])
+    const ex = await executeReflection(T, s8, claim)
+    assert.equal(ex.outcome, 'stale', `divergent-fingerprint conflict must stale the batch: ${JSON.stringify(ex)}`)
     assert.equal((await q(`SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND layer='experience'`, [T])).rows[0].n, 0, 'zero side effects')
-    console.log('PASS R8 divergent ledger row blocks side effects (anti-join or stale)')
+    console.log('PASS R8 real ledger race: divergent fingerprint stales the batch, zero writes')
+  }
+
+  // ===== R9 二审#1 组合：DB 既有 candidate + 同批双胞胎 => 全链指向 DB winner E =====
+  {
+    const T = t('r9'), A = T + '-a', EP = T + '-ep', TK = T + '-task'
+    await mkPair(T, A, { episode: EP, task: TK, failOffH: -30, succOffH: -29 })
+    const r0 = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r0.outcome, 'completed')
+    const E = (await q(`SELECT memory_id FROM memories WHERE tenant_id=$1 AND layer='experience'`, [T])).rows[0].memory_id
+    await mkPair(T, A, { episode: EP, task: TK, failOffH: -4, succOffH: -3.5 })
+    await mkPair(T, A, { episode: EP, task: TK, failOffH: -2, succOffH: -1 })
+    const r1 = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r1.outcome, 'completed', JSON.stringify(r1))
+    assert.ok(r1.counts.dedup_db >= 1 && r1.counts.dedup_batch >= 1, `both dedup layers fired: ${JSON.stringify(r1.counts)}`)
+    assert.equal(r1.counts.inserted, 0, 'no new experience — everything resolves to E')
+    const expN = (await q(`SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND layer='experience'`, [T])).rows[0].n
+    assert.equal(expN, 1, 'still exactly one experience (E)')
+    const ledger = (await q(`SELECT experience_id FROM reflection_pairs WHERE tenant_id=$1 AND status='resolved'`, [T])).rows
+    assert.equal(ledger.length, 3)
+    assert.ok(ledger.every(x => x.experience_id === E), 'ledger rows ALL point at E')
+    const evid = (await q(`SELECT DISTINCT derived_memory_id FROM memory_event_evidence WHERE tenant_id=$1`, [T])).rows
+    assert.deepEqual(evid.map(x => x.derived_memory_id), [E], 'evidence edges ALL point at E — no dangling generated ids')
+    console.log('PASS R9 DB-candidate + batch-twin combo all resolves to E (the 23503 counterexample)')
+  }
+
+  // ===== R10 二审#2 饥饿根治：201 个无 success 的老 failure 在前 + 1 个合法新 pair 当晚发现 =====
+  {
+    const T = t('r10'), A = T + '-a'
+    await q(
+      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json, reported_at)
+       SELECT $1, gen_random_uuid()::STRING, $2, 'ep-starve', 'task-starve-' || i, 'att-starve-' || i, 'failure', '[]', false, $3, '{}',
+              now() - INTERVAL '100 hours' + (i || ' seconds')::INTERVAL
+       FROM generate_series(1, 201) AS g(i)`,
+      [T, A, Buffer.from('starve')])
+    await mkPair(T, A, { failOffH: -2, succOffH: -1 })
+    const r = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r.outcome, 'completed', JSON.stringify(r))
+    assert.equal(r.counts.pairs, 1, 'success-driven claim finds the legal pair on night one — no head-of-line starvation')
+    console.log('PASS R10 201 successless failures cannot starve a legal pair')
+  }
+
+  // ===== R11 二审#4 envelope 边界：巨型 task 字符串把真实输入推过 16KiB => input_too_large =====
+  {
+    const T = t('r11'), A = T + '-a'
+    const bigTask = 'task-' + 'x'.repeat(17000)
+    await mkPair(T, A, { task: bigTask })
+    const r = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r.outcome, 'completed', JSON.stringify(r))
+    assert.equal(r.counts.skipped, 1, `oversized ENVELOPE (not just payload) must skip: ${JSON.stringify(r.counts)}`)
+    assert.equal(r.counts.pairs, 0)
+    console.log('PASS R11 envelope bytes govern the real model input, task strings included')
   }
 
   // ===== N1 dream 占源：schedule 键被 running dream 占住 => 整体短路，transition 零抢占 =====
@@ -369,7 +422,7 @@ try {
     console.log('PASS N3 full-chain nightly completes')
   }
 
-  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R8 N1-N3)')
+  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R11 N1-N3)')
 } catch (e) {
   primaryError = e
 } finally {

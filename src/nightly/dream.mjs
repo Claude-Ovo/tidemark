@@ -107,19 +107,16 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE', '57P01', '08006', '08001'])
 const isTransient = (e) => TRANSIENT_CODES.has(e?.code) || /timeout|throttl|5\d\d|reset/i.test(e?.message ?? '')
 
-export const runDream = async ({ tenantId, scheduledFor, cfg = DREAM_CFG }) => {
-  if (Number.isNaN(new Date(scheduledFor).getTime())) throw new Error('scheduled_for_invalid')
-  assertDreamPolicyFrozen(cfg)
-  const evaluationAtIso = new Date(scheduledFor).toISOString()
+export const claimDream = async (tenantId, evaluationAtIso, cfg = DREAM_CFG) => {
   const pipelineVersion = dreamPipelineVersionOf(cfg)
-  const claim = await claimNightlyRun({
+  return claimNightlyRun({
     tenantId, evaluationAtIso, jobKind: 'dream', pipelineVersion, cfg,
     selectAndSnapshot: mkSelectAndSnapshot(tenantId, cfg, pipelineVersion),
   })
-  if (claim.outcome !== 'claimed') {
-    console.log(JSON.stringify({ evt: 'dream_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...claim }))
-    return claim
-  }
+}
+
+// execute 阶段独立导出（二审#5：真实 stale/race 测试需要 claim 与 execute 之间的注入点）
+export const executeDream = async (tenantId, evaluationAtIso, claim) => {
   const evalMs = new Date(evaluationAtIso).getTime()
   const fence = { tenantId, runId: claim.run_id, expectedAttempt: claim.expected_attempt }
 
@@ -243,6 +240,18 @@ export const runDream = async ({ tenantId, scheduledFor, cfg = DREAM_CFG }) => {
   const final = { ...result, control: claim.control }
   console.log(JSON.stringify({ evt: 'dream_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...final }))
   return final
+}
+
+export const runDream = async ({ tenantId, scheduledFor, cfg = DREAM_CFG }) => {
+  if (Number.isNaN(new Date(scheduledFor).getTime())) throw new Error('scheduled_for_invalid')
+  assertDreamPolicyFrozen(cfg)
+  const evaluationAtIso = new Date(scheduledFor).toISOString()
+  const claim = await claimDream(tenantId, evaluationAtIso, cfg)
+  if (claim.outcome !== 'claimed') {
+    console.log(JSON.stringify({ evt: 'dream_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...claim }))
+    return claim
+  }
+  return executeDream(tenantId, evaluationAtIso, claim)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
