@@ -15,6 +15,7 @@ const DOMAIN_TABLES = [
   'memory_tombstones',
   'memory_rebuild_queue',
   'reflection_pairs',
+  'reflection_cursor',
 ]
 
 const parseArgs = (argv) => {

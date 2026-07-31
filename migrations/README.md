@@ -51,6 +51,7 @@ Numbered migration files are immutable once released. Add a new numbered migrati
 | `memory_tombstones` | Content-free hard-delete marker |
 | `memory_rebuild_queue` | Content-free P2 rebuild request with deleted derived ID and surviving source IDs |
 | `reflection_pairs` | Exactly-once ledger for consumed failure->success reflection pairs (outcome-anchored terminal truth, durable skip decisions) |
+| `reflection_cursor` | Durable keyset cursor for the reflection failure scan (monotonic, seeded past pre-migration backlog) |
 
 No Row-Level TTL is enabled.
 
@@ -68,7 +69,7 @@ No Row-Level TTL is enabled.
 
 `verify.mjs` rolls every test back. It:
 
-- checks all 12 domain tables and the migration ledger exist;
+- checks all 13 domain tables and the migration ledger exist;
 - proves every domain primary key and foreign key is tenant-scoped;
 - requires every named domain `CHECK` to have a failing negative test;
 - tests key unique constraints;

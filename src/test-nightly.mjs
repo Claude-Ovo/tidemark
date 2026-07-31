@@ -444,17 +444,79 @@ try {
     console.log('PASS N4 reflection exception cannot block the deterministic lifecycle')
   }
 
-  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R11 N1-N4)')
+  // ===== R12 cursor 单调不变量（round-5 #1）：双 claim 反序提交，cursor 永不后退 =====
+  {
+    const T = t('r12'), A = T + '-a'
+    // 两条已过窗 failure（无 success）：F1 更早、F2 更晚
+    await q(
+      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json, reported_at)
+       SELECT $1, 'r12-f' || i, $2, 'ep', 'task-' || i, 'att-' || i, 'failure', '[]', false, $3, '{}',
+              now() - INTERVAL '100 hours' + (i || ' hours')::INTERVAL
+       FROM generate_series(1, 2) AS g(i)`,
+      [T, A, Buffer.from('h')])
+    const sEarly = new Date(Date.now() - 60_000).toISOString()   // A：较早 evaluation（相对窗口只判到 F1..F2 同样过窗——两 run 都可推进）
+    const sLate = new Date().toISOString()
+    const claimA = await claimReflection(T, sEarly, REFLECT_CFG)
+    assert.equal(claimA.outcome, 'claimed', JSON.stringify(claimA))
+    const claimB = await claimReflection(T, sLate, REFLECT_CFG)
+    assert.equal(claimB.outcome, 'claimed', JSON.stringify(claimB))
+    // 反序提交：B（更晚、推进更远）先 commit，A 后 commit——cursor 必须停在 max
+    const exB = await executeReflection(T, sLate, claimB)
+    assert.equal(exB.outcome, 'completed', JSON.stringify(exB))
+    const curAfterB = (await q('SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1', [T])).rows[0].last_outcome_request_id
+    const exA = await executeReflection(T, sEarly, claimA)
+    assert.equal(exA.outcome, 'completed', JSON.stringify(exA))
+    const curAfterA = (await q('SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1', [T])).rows[0].last_outcome_request_id
+    assert.equal(curAfterA, curAfterB, `cursor NEVER regresses on out-of-order commit: afterB=${curAfterB} afterA=${curAfterA}`)
+    assert.equal(curAfterA, 'r12-f2', 'cursor rests at the max tuple')
+    console.log('PASS R12 out-of-order commits cannot regress the cursor')
+  }
+
+  // ===== R13 首次 seed 跳过 pre-migration 积压（round-5 #2）：300 条窗外历史 + 当前合法 pair 首跑当晚配上 =====
+  {
+    const T = t('r13'), A = T + '-a'
+    await q(
+      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json, reported_at)
+       SELECT $1, gen_random_uuid()::STRING, $2, 'ep-backlog', 'task-b-' || i, 'att-b-' || i, 'failure', '[]', false, $3, '{}',
+              now() - INTERVAL '2000 hours' + (i || ' minutes')::INTERVAL
+       FROM generate_series(1, 300) AS g(i)`,
+      [T, A, Buffer.from('backlog')])
+    await mkPair(T, A, { failOffH: -2, succOffH: -1 })
+    const r = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r.outcome, 'completed', JSON.stringify(r))
+    assert.equal(r.counts.pairs, 1, `first run seeds past 300-row backlog and pairs on NIGHT ONE: ${JSON.stringify(r.counts)}`)
+    console.log('PASS R13 initial cursor seed skips pre-migration backlog entirely')
+  }
+
+  // ===== N4b unclassified 异常真实分阶段（round-5 #5 尾款）：run 落 retryable 可 takeover =====
+  {
+    const T = t('n4b'), A = T + '-a'
+    await mkPair(T, A, {})
+    const s4 = new Date().toISOString()
+    const claim = await claimReflection(T, s4, REFLECT_CFG)
+    assert.equal(claim.outcome, 'claimed')
+    claim.sources[0].envelope = null   // 污染 claim：JSON.parse(null) 前 provider 收 null -> unclassified throw
+    await assert.rejects(() => executeReflection(T, s4, claim), /./, 'unclassified path throws')
+    const run = (await q(`SELECT status, error_code, lease_expires_at < now() AS expired FROM nightly_runs WHERE tenant_id=$1 AND run_id=$2`, [T, claim.run_id])).rows[0]
+    assert.equal(run.status, 'running', 'run stays running but...')
+    assert.equal(run.error_code, 'unclassified_error')
+    assert.equal(run.expired, true, '...lease already expired: takeover-ready, never hung')
+    const retry = await runReflection({ tenantId: T, scheduledFor: s4 })   // takeover 收尾
+    assert.equal(retry.outcome, 'completed', `takeover completes the run: ${JSON.stringify(retry)}`)
+    console.log('PASS N4b unclassified exception leaves the run takeover-ready, retry completes')
+  }
+
+  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R13 N1-N4b)')
 } catch (e) {
   primaryError = e
 } finally {
   const cleanupErrors = []
   try {
-    for (const tbl of ['reflection_pairs', 'memory_event_evidence', 'memory_derivations', 'nightly_runs', 'outcomes', 'attempt_events', 'memories']) {
+    for (const tbl of ['reflection_cursor', 'reflection_pairs', 'memory_event_evidence', 'memory_derivations', 'nightly_runs', 'outcomes', 'attempt_events', 'memories']) {
       await q(`DELETE FROM ${tbl} WHERE tenant_id LIKE $1 || '%'`, [suite])
     }
     const counts = {}
-    for (const tbl of ['memories', 'nightly_runs', 'reflection_pairs', 'outcomes']) {
+    for (const tbl of ['memories', 'nightly_runs', 'reflection_pairs', 'reflection_cursor', 'outcomes']) {
       counts[tbl] = (await q(`SELECT count(*)::INT4 AS n FROM ${tbl} WHERE tenant_id LIKE $1 || '%'`, [suite])).rows[0].n
     }
     const leaks = Object.entries(counts).filter(([, n]) => n !== 0)

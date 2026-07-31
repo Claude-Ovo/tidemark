@@ -41,7 +41,8 @@ export const REFLECT_CFG = {
 }
 
 export const reflectPipelineVersionOf = (cfg) => [
-  'reflect-v1', `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
+  'reflect-v2', 'cursor=v1',   // v2: durable keyset cursor 选源（round-4/5）——snapshot/fingerprint/重试语义全变
+  `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
   `win=${REFLECT_CFG.window_hours}`, `ret=${REFLECT_CFG.retention_hours}`, `maxp=${REFLECT_CFG.max_pairs}`, `maxev=${REFLECT_CFG.max_events_per_pair}`,
   `maxb=${REFLECT_CFG.max_pair_bytes}`, `dedup=${REFLECT_CFG.dedup_threshold}`, `scan=${cfg.batch_size}`,
 ].join('|')
@@ -110,6 +111,17 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
   // 容量 SLA（SPEC §6）：每 tenant 窗内未配对 failure 须 < scan(200)，超出属运维事件。
   // cursor 比较全程留在 SQL 域（微秒精度）：JS Date 只有毫秒，读回再传回会把 cursor
   // 压小一截、行反复扫到自己。JS 只读 cursor 作 snapshot 审计记录，不参与比较。
+  // 首次 seed（round-5 #2）：cursor 不存在时，从 retention 窗外的最后一行 failure 起步——
+  // migration 前的历史积压被一步跳过（retention 由此重新成为有效语义参数），窗内行保留给扫描。
+  // 幂等 DO NOTHING；无窗外历史则不插，epoch 起点此时不含积压、安全。
+  await c.query(
+    `INSERT INTO reflection_cursor (tenant_id, last_reported_at, last_outcome_request_id, updated_at)
+     SELECT $1, reported_at, outcome_request_id, now() FROM outcomes
+     WHERE tenant_id=$1 AND status='failure'
+       AND reported_at < $2::TIMESTAMPTZ - ($3::FLOAT8 * INTERVAL '1 hour')
+     ORDER BY reported_at DESC, outcome_request_id DESC LIMIT 1
+     ON CONFLICT (tenant_id) DO NOTHING`,
+    [tenantId, evalIso, REFLECT_CFG.retention_hours])
   const cur = (await c.query(
     'SELECT last_reported_at, last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1',
     [tenantId])).rows[0] ?? { last_reported_at: new Date(0), last_outcome_request_id: '' }
@@ -438,10 +450,18 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
       if (snap?.cursor_advance) {
         // 微秒精度陷阱：JS Date/ISO 只有毫秒——cursor 若经 JS 序列化会永远比行小一截，
         // 行反复扫到自己。按 orid 回表取原生 TIMESTAMPTZ，微秒不过 JS 之手
+        // 单调不变量（round-5 #1）：反序提交的旧 run 绝不能把 cursor 写回退——
+        // ON CONFLICT 带 tuple-max 条件，只允许前进；平行 cursor-only run 反序到达时为 no-op
         await c.query(
-          `UPSERT INTO reflection_cursor (tenant_id, last_reported_at, last_outcome_request_id, updated_at)
+          `INSERT INTO reflection_cursor (tenant_id, last_reported_at, last_outcome_request_id, updated_at)
            SELECT $1, reported_at, outcome_request_id, now() FROM outcomes
-           WHERE tenant_id=$1 AND outcome_request_id=$2`,
+           WHERE tenant_id=$1 AND outcome_request_id=$2
+           ON CONFLICT (tenant_id) DO UPDATE SET
+             last_reported_at=excluded.last_reported_at,
+             last_outcome_request_id=excluded.last_outcome_request_id,
+             updated_at=now()
+           WHERE (excluded.last_reported_at, excluded.last_outcome_request_id)
+               > (reflection_cursor.last_reported_at, reflection_cursor.last_outcome_request_id)`,
           [tenantId, snap.cursor_advance.to_orid])
       }
       await fenceUpdate(c, fence, `status='completed', completed_at=now(), result_receipt=$4`, [receipt])

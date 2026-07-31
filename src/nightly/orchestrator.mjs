@@ -37,7 +37,10 @@ export const runNightly = async ({ tenantId, scheduledFor, _jobs = {} }) => {
     console.error(JSON.stringify({ evt: 'reflection_crashed', tenant_id: tenantId, error: reflection.error }))
   }
   const transition = await jobs.runTransition({ tenantId, scheduledFor })
-  const r = { outcome: degraded ? 'completed_degraded' : 'completed', dream, reflection, transition }
+  // reflection 的 crashed/failed/retryable 同样降级顶层 outcome（round-5 #5）——
+  // 监控不得把丢失的 reflection 当整晚完全成功
+  const reflectionDegraded = ['crashed', 'failed', 'failed_terminal', 'retryable'].includes(reflection.outcome)
+  const r = { outcome: (degraded || reflectionDegraded) ? 'completed_degraded' : 'completed', dream, reflection, transition }
   console.log(JSON.stringify({ evt: 'nightly_orchestrator', tenant_id: tenantId, scheduled_for: scheduledFor,
     outcome: r.outcome, dream: dream.outcome, reflection: reflection.outcome, transition: transition.outcome }))
   return r
