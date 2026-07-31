@@ -29,7 +29,8 @@ import { reflectExtract, NIGHTLY_PROVIDER, NIGHTLY_MODEL_ID, PROMPT_VERSION } fr
 import { claimNightlyRun, fenceUpdate, markRetryable } from './run-harness.mjs'
 
 export const REFLECT_CFG = {
-  window_hours: 72,
+  window_hours: 72,            // 只约束 success.reported_at - failure.reported_at
+  retention_hours: 120,        // failure 扫描下限=窗口+领取延迟 grace（覆盖 nightly 周期，一审#4）
   max_pairs: 5,
   max_events_per_pair: 32,
   max_pair_bytes: 16384,
@@ -59,7 +60,9 @@ const experienceIdOf = (pairFingerprint) => {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`
 }
 
-const payloadHash = (payload) => createHash('sha256').update(canonicalJson(payload ?? {})).digest('hex')
+// hash 覆盖全部实际送模字段（一审#9）：event_type/attempt/created_at 参与判定与 prompt，全部入指纹
+const eventHash = (e) => createHash('sha256').update(canonicalJson(
+  [e.event_id, e.event_type, e.attempt_id, new Date(e.created_at).toISOString(), e.payload ?? {}])).digest('hex')
 const canonicalBytes = (evs) => Buffer.byteLength(canonicalJson(evs.map(e => [e.event_id, e.event_type, e.payload ?? {}])), 'utf8')
 
 // 截断（二审#3）：先固定必需 anchors，再按 created_at 升序填充；anchors 超限 -> null（input_too_large）
@@ -88,18 +91,25 @@ const selectPairEvents = (failureEvents, successEvents) => {
 const OUT_COLS = 'outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, reported_at'
 
 const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIso) => {
+  // 物理硬上限（一审#3）：MATERIALIZED CTE 沿 031 键序先 LIMIT，anti-join 只作用于这 200 行——
+  // consumed 行再多也不放大扫描；retention 下限独立于配对窗口（一审#4）
   const failures = (await c.query(
-    `SELECT ${OUT_COLS} FROM outcomes o
-     WHERE tenant_id=$1 AND status='failure' AND reported_at <= $2
-       AND reported_at >= $2::TIMESTAMPTZ - ($3::FLOAT8 * INTERVAL '1 hour')
-       AND NOT EXISTS (SELECT 1 FROM reflection_pairs rp
-                       WHERE rp.tenant_id=o.tenant_id AND rp.agent_id=o.agent_id AND rp.failure_attempt_id=o.attempt_id)
-     ORDER BY reported_at, outcome_request_id LIMIT ${cfg.batch_size}`,
-    [tenantId, evalIso, REFLECT_CFG.window_hours])).rows
+    `WITH recent AS MATERIALIZED (
+       SELECT ${OUT_COLS} FROM outcomes
+       WHERE tenant_id=$1 AND status='failure' AND reported_at <= $2
+         AND reported_at >= $2::TIMESTAMPTZ - ($3::FLOAT8 * INTERVAL '1 hour')
+       ORDER BY reported_at, outcome_request_id LIMIT ${cfg.batch_size}
+     )
+     SELECT * FROM recent o
+     WHERE NOT EXISTS (SELECT 1 FROM reflection_pairs rp
+                       WHERE rp.tenant_id=$1 AND rp.agent_id=o.agent_id AND rp.failure_attempt_id=o.attempt_id)
+     ORDER BY reported_at, outcome_request_id`,
+    [tenantId, evalIso, REFLECT_CFG.retention_hours])).rows
   if (failures.length === 0) return null
   const pairs = []
+  let workableCount = 0
   for (const f of failures) {
-    if (pairs.length >= REFLECT_CFG.max_pairs) break
+    if (workableCount >= REFLECT_CFG.max_pairs) break   // skipped 不占可工作产物额度（一审#5）
     const s = (await c.query(
       `SELECT ${OUT_COLS} FROM outcomes
        WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='success'
@@ -116,8 +126,8 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
     const failureEvents = evs.filter(e => e.attempt_id === f.attempt_id)
     const successEvents = evs.filter(e => e.attempt_id === s.attempt_id)
     const sel = selectPairEvents(failureEvents, successEvents)
-    if (!sel) { pairs.push({ skipped: 'input_too_large', failure: f, success: s }); continue }
-    const eventHashes = sel.chosen.map(e => [e.event_id, payloadHash(e.payload)])
+    if (!sel) { pairs.push({ skipped: 'input_too_large', failure: f, success: s }); continue }   // 不计 workableCount
+    const eventHashes = sel.chosen.map(e => [e.event_id, eventHash(e)])
     const fp = createHash('sha256').update(canonicalJson({
       failure: [f.outcome_request_id, f.status, new Date(f.reported_at).toISOString()],
       success: [s.outcome_request_id, s.status, new Date(s.reported_at).toISOString()],
@@ -127,10 +137,10 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
       failure: f, success: s, events: sel.chosen, anchors: sel.anchors,
       event_hashes: eventHashes, pair_fingerprint: fp, experience_id: experienceIdOf(fp),
     })
+    workableCount++
   }
-  const workable = pairs.filter(p => !p.skipped)
-  if (workable.length === 0 && pairs.length === 0) return null
-  if (workable.length === 0) return null   // 全部 input_too_large：no-work（receipt 无 run 可挂，跳过记日志）
+  if (pairs.length === 0) return null
+  // 全 skipped 也成 run：把 input_too_large 决定持久化进账本（一审#5），否则每晚热循环
   return {
     sources: pairs,
     snapshot: { pairs: pairs.map(p => p.skipped ? {
@@ -178,6 +188,7 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
   const fence = { tenantId, runId: claim.run_id, expectedAttempt: claim.expected_attempt }
   const workable = claim.sources.filter(p => !p.skipped)
   const skipped = claim.sources.filter(p => p.skipped)
+  // resolved_experience_id 显式贯穿（一审#7）：product 上保存最终指向，receipt 三值分明
 
   // 模型段 + 校验 + embedding（事务外）
   let products
@@ -226,9 +237,11 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
     throw e
   }
 
-  // batch 内 dedup（二审#4）：按稳定 pair 顺序，后者查前面的 winners
+  // batch 内 dedup（二审#4 + 代码一审#1）：仅同 (agent, scope) 分区内互查——
+  // 跨 agent 语义相同也绝不共享 experience（edges/ledger 不得跨 agent 指向）
   for (let i = 0; i < products.length; i++) {
     for (let j = 0; j < i; j++) {
+      if (products[j].pair.failure.agent_id !== products[i].pair.failure.agent_id) continue   // scope v1 恒 'task'
       const w = products[j].winner ? products.find(x => x.pair.experience_id === products[j].winner) ?? products[j] : products[j]
       if (cosine(products[i].f32, w.f32) >= REFLECT_CFG.dedup_threshold) {
         products[i].winner = w.pair.experience_id
@@ -237,29 +250,32 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
     }
   }
 
-  const result = await inSerializableTx(async (c) => {
-    // 事件 hash 重读核对（append-only 的 revalidate 替代）：不符=不变量破坏 -> terminal
-    for (const p of workable) {
-      const evs = (await c.query(
-        `SELECT event_id, payload FROM attempt_events
-         WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id = ANY($3) AND created_at <= $4`,
-        [tenantId, p.failure.agent_id, [p.failure.attempt_id, p.success.attempt_id], evaluationAtIso])).rows
-      const liveHash = new Map(evs.map(e => [e.event_id, payloadHash(e.payload)]))
-      for (const [id, h] of p.event_hashes) {
-        if (liveHash.get(id) !== h) {
-          await fenceUpdate(c, fence, `status='failed', error_code='event_snapshot_divergence'`)
-          return { outcome: 'failed', run_id: claim.run_id, reason: 'event_snapshot_divergence' }
+  let result
+  try {
+    result = await inSerializableTx(async (c) => {
+      // 事件 hash 重读核对（append-only 的 revalidate 替代，一审#9：全字段同指纹）
+      for (const p of workable) {
+        const evs = (await c.query(
+          `SELECT event_id, attempt_id, event_type, payload, created_at FROM attempt_events
+           WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id = ANY($3) AND created_at <= $4`,
+          [tenantId, p.failure.agent_id, [p.failure.attempt_id, p.success.attempt_id], evaluationAtIso])).rows
+        const liveHash = new Map(evs.map(e => [e.event_id, eventHash(e)]))
+        for (const [id, h] of p.event_hashes) {
+          if (liveHash.get(id) !== h) {
+            await fenceUpdate(c, fence, `status='failed', error_code='event_snapshot_divergence'`)
+            return { outcome: 'failed', run_id: claim.run_id, reason: 'event_snapshot_divergence' }
+          }
         }
       }
-    }
-    let inserted = 0, dedupBatch = 0, dedupDb = 0
-    for (const prod of products) {
-      let finalExperienceId = prod.pair.experience_id
-      if (prod.winner) {
-        finalExperienceId = prod.winner
-        dedupBatch++
-      } else {
-        // DB 内 scope-aware dedup：有界候选 + 精确 cosine 复核（低频 nightly 路径，LIMIT 10）
+      let inserted = 0, dedupBatch = 0, dedupDb = 0
+      // pass 1：解析每个产物的 resolved_experience_id（batch winner 已标；否则 DB dedup）
+      for (const prod of products) {
+        if (prod.winner) {
+          prod.resolved_experience_id = prod.winner
+          dedupBatch++
+          continue
+        }
+        // DB 内 (agent, scope) dedup：有界候选 + 精确 cosine 复核（低频 nightly 路径，LIMIT 10）
         const cands = (await c.query(
           `SELECT memory_id, embedding::STRING AS emb FROM memories
            WHERE tenant_id=$1 AND agent_id=$2 AND layer='experience' AND exp_status='candidate'
@@ -274,60 +290,105 @@ export const runReflection = async ({ tenantId, scheduledFor, cfg = REFLECT_CFG 
             best = sim; winner = cd.memory_id
           }
         }
-        if (winner) { finalExperienceId = winner; dedupDb++ }
+        if (winner) { prod.resolved_experience_id = winner; dedupDb++ }
+        else prod.resolved_experience_id = prod.pair.experience_id
       }
-      if (finalExperienceId === prod.pair.experience_id) {
-        const existing = (await c.query('SELECT content FROM memories WHERE tenant_id=$1 AND memory_id=$2',
-          [tenantId, finalExperienceId])).rows[0]
-        if (existing) {
-          if (existing.content !== prod.content) throw new Error(`derived_payload_divergence:${finalExperienceId}`)
-        } else {
-          const body = { trigger: prod.narrative.trigger, wrong_action: prod.narrative.wrong_action,
-            correct_action: prod.narrative.correct_action, caution: prod.narrative.caution,
-            evidence_ids: prod.evidence_ids, confidence: prod.narrative.confidence, scope: SCOPE_V1 }
-          const halfLife = 2160 * (1 + 0.5)
-          const nextAt = scheduleNext({ admission: 'accepted', pinned: false, state: 'fresh',
-            strength_anchor: 1.0, strength_anchor_at: new Date(evalMs), half_life_hours: halfLife,
-            credited_success_count: 0, consolidation_baseline: 0 }, evalMs)
+      // pass 2：ledger 原子先占（一审#6）——任何副作用之前。冲突读现行核对指纹：
+      // 同指纹=另一 run 已消费该 pair（幂等，本批放弃其副作用）；异指纹=竞态 -> 整批 stale
+      const consumedElsewhere = new Set()
+      const claimPair = async (agentId, fAtt, sAtt, fOrid, sOrid, fingerprint, experienceId, status) => {
+        const ins = await c.query(
+          `INSERT INTO reflection_pairs (tenant_id, agent_id, failure_attempt_id, success_attempt_id,
+             failure_outcome_request_id, success_outcome_request_id, pair_fingerprint, experience_id, run_id, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (tenant_id, agent_id, failure_attempt_id, success_attempt_id) DO NOTHING`,
+          [tenantId, agentId, fAtt, sAtt, fOrid, sOrid, fingerprint, experienceId, claim.run_id, status])
+        if (ins.rowCount === 1) return 'claimed'
+        const cur = (await c.query(
+          `SELECT pair_fingerprint, run_id FROM reflection_pairs
+           WHERE tenant_id=$1 AND agent_id=$2 AND failure_attempt_id=$3 AND success_attempt_id=$4`,
+          [tenantId, agentId, fAtt, sAtt])).rows[0]
+        if (cur.run_id === claim.run_id) return 'claimed'                      // 同 run retry：已占即幂等
+        if (!cur.pair_fingerprint.equals(fingerprint)) {
+          throw Object.assign(new Error('pair_ledger_conflict'), { stale: true })
+        }
+        return 'consumed_elsewhere'                                            // 异 run 同指纹：放弃副作用
+      }
+      for (const prod of products) {
+        const p = prod.pair
+        const got = await claimPair(p.failure.agent_id, p.failure.attempt_id, p.success.attempt_id,
+          p.failure.outcome_request_id, p.success.outcome_request_id, p.pair_fingerprint,
+          prod.resolved_experience_id, 'resolved')
+        if (got === 'consumed_elsewhere') consumedElsewhere.add(p.pair_fingerprint.toString('hex'))
+      }
+      // skipped pairs 也落账本（status='skipped_input_too_large'，确定性指纹不含 evaluation——跨晚幂等）
+      for (const p of skipped) {
+        const skipFp = createHash('sha256').update(canonicalJson({
+          skipped: 'input_too_large', failure_attempt_id: p.failure.attempt_id, success_attempt_id: p.success.attempt_id,
+        })).digest()
+        await claimPair(p.failure.agent_id, p.failure.attempt_id, p.success.attempt_id,
+          p.failure.outcome_request_id, p.success.outcome_request_id, skipFp, null, 'skipped_input_too_large')
+      }
+      // pass 3：副作用（仅本 run 占到的 pair）
+      for (const prod of products) {
+        if (consumedElsewhere.has(prod.pair.pair_fingerprint.toString('hex'))) continue
+        const finalExperienceId = prod.resolved_experience_id
+        if (finalExperienceId === prod.pair.experience_id) {
+          const existing = (await c.query('SELECT content, agent_id, episode_id, source, admission FROM memories WHERE tenant_id=$1 AND memory_id=$2',
+            [tenantId, finalExperienceId])).rows[0]
+          if (existing) {
+            if (existing.content !== prod.content || existing.agent_id !== prod.pair.failure.agent_id
+                || existing.episode_id !== prod.pair.failure.episode_id
+                || existing.source !== 'derived' || existing.admission !== 'accepted') {
+              throw new Error(`derived_payload_divergence:${finalExperienceId}`)
+            }
+          } else {
+            const body = { trigger: prod.narrative.trigger, wrong_action: prod.narrative.wrong_action,
+              correct_action: prod.narrative.correct_action, caution: prod.narrative.caution,
+              evidence_ids: prod.evidence_ids, confidence: prod.narrative.confidence, scope: SCOPE_V1 }
+            const halfLife = 2160 * (1 + 0.5)
+            const nextAt = scheduleNext({ admission: 'accepted', pinned: false, state: 'fresh',
+              strength_anchor: 1.0, strength_anchor_at: new Date(evalMs), half_life_hours: halfLife,
+              credited_success_count: 0, consolidation_baseline: 0 }, evalMs)
+            await c.query(
+              `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding,
+                 experience_body, exp_status, source, admission, state, pinned, importance,
+                 strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
+                 credited_success_count, consolidation_baseline, next_transition_at)
+               VALUES ($1,$2,$3,'experience',$4,$5,$6,$7,'candidate','derived','accepted','fresh',false,0.5,
+                 1.0,$8,$8,$9,0,0,$10)`,
+              [tenantId, prod.pair.failure.agent_id, finalExperienceId, prod.pair.failure.episode_id,
+               prod.content, toVectorLiteral(prod.f32), JSON.stringify(body), new Date(evalMs), halfLife, nextAt])
+            inserted++
+          }
+        }
+        for (const a of prod.pair.anchors) {
           await c.query(
-            `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding,
-               experience_body, exp_status, source, admission, state, pinned, importance,
-               strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
-               credited_success_count, consolidation_baseline, next_transition_at)
-             VALUES ($1,$2,$3,'experience',$4,$5,$6,$7,'candidate','derived','accepted','fresh',false,0.5,
-               1.0,$8,$8,$9,0,0,$10)`,
-            [tenantId, prod.pair.failure.agent_id, finalExperienceId, prod.pair.failure.episode_id,
-             prod.content, toVectorLiteral(prod.f32), JSON.stringify(body), new Date(evalMs), halfLife, nextAt])
-          inserted++
+            `INSERT INTO memory_event_evidence (tenant_id, derived_memory_id, attempt_id, event_id, run_id)
+             VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id, derived_memory_id, attempt_id, event_id) DO NOTHING`,
+            [tenantId, finalExperienceId, a.attempt_id, a.event_id, claim.run_id])
         }
       }
-      for (const a of prod.pair.anchors) {
-        await c.query(
-          `INSERT INTO memory_event_evidence (tenant_id, derived_memory_id, attempt_id, event_id, run_id)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id, derived_memory_id, attempt_id, event_id) DO NOTHING`,
-          [tenantId, finalExperienceId, a.attempt_id, a.event_id, claim.run_id])
+      // receipt 三值分明（一审#7）：生成 ID、最终指向、生成物 checksum 各是各的
+      const receipt = {
+        schema_version: 'reflection-receipt-v1',
+        provider: NIGHTLY_PROVIDER, model_id: NIGHTLY_MODEL_ID, prompt_version: PROMPT_VERSION,
+        pairs_processed: products.length, inserted, dedup_batch: dedupBatch, dedup_db: dedupDb,
+        skipped: skipped.map(p => ({ reason: p.skipped, failure_attempt_id: p.failure.attempt_id })),
+        outputs: products.map(p => ({ pair_fingerprint: p.pair.pair_fingerprint.toString('hex'),
+          generated_experience_id: p.pair.experience_id, resolved_experience_id: p.resolved_experience_id,
+          generated_output_checksum: p.output_checksum, embed: p.embedMeta,
+          consumed_elsewhere: consumedElsewhere.has(p.pair.pair_fingerprint.toString('hex')) || undefined })),
       }
-      await c.query(
-        `INSERT INTO reflection_pairs (tenant_id, agent_id, failure_attempt_id, success_attempt_id,
-           failure_outcome_request_id, success_outcome_request_id, pair_fingerprint, experience_id, run_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (tenant_id, agent_id, failure_attempt_id, success_attempt_id) DO NOTHING`,
-        [tenantId, prod.pair.failure.agent_id, prod.pair.failure.attempt_id, prod.pair.success.attempt_id,
-         prod.pair.failure.outcome_request_id, prod.pair.success.outcome_request_id,
-         prod.pair.pair_fingerprint, finalExperienceId, claim.run_id])
-    }
-    const receipt = {
-      schema_version: 'reflection-receipt-v1',
-      provider: NIGHTLY_PROVIDER, model_id: NIGHTLY_MODEL_ID, prompt_version: PROMPT_VERSION,
-      pairs_processed: products.length, inserted, dedup_batch: dedupBatch, dedup_db: dedupDb,
-      skipped: skipped.map(p => ({ reason: p.skipped, failure_attempt_id: p.failure.attempt_id })),
-      outputs: products.map(p => ({ pair_fingerprint: p.pair.pair_fingerprint.toString('hex'),
-        experience_id: p.winner ?? p.pair.experience_id, output_checksum: p.output_checksum, embed: p.embedMeta })),
-    }
-    await fenceUpdate(c, fence, `status='completed', completed_at=now(), result_receipt=$4`, [receipt])
-    return { outcome: 'completed', run_id: claim.run_id,
-             counts: { pairs: products.length, inserted, dedup_batch: dedupBatch, dedup_db: dedupDb, skipped: skipped.length } }
-  }, 'reflect-execute')
+      await fenceUpdate(c, fence, `status='completed', completed_at=now(), result_receipt=$4`, [receipt])
+      return { outcome: 'completed', run_id: claim.run_id,
+               counts: { pairs: products.length, inserted, dedup_batch: dedupBatch, dedup_db: dedupDb, skipped: skipped.length } }
+    }, 'reflect-execute')
+  } catch (e) {
+    if (!e.stale) throw e
+    await inSerializableTx(async (c) => fenceUpdate(c, fence, `status='stale'`), 'reflect-stale')
+    result = { outcome: 'stale', run_id: claim.run_id, reason: 'pair_ledger_conflict' }
+  }
   const final = { ...result, control: claim.control }
   console.log(JSON.stringify({ evt: 'reflection_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...final }))
   return final

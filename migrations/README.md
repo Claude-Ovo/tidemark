@@ -1,6 +1,6 @@
 # P0-02 CockroachDB migrations
 
-This directory is the executable schema for SPEC v1.2.3.
+This directory is the executable schema for SPEC v1.2.5.
 
 ## Run
 
@@ -50,6 +50,7 @@ Numbered migration files are immutable once released. Add a new numbered migrati
 | `success_evidence` | Candidate experience credit across distinct task instances |
 | `memory_tombstones` | Content-free hard-delete marker |
 | `memory_rebuild_queue` | Content-free P2 rebuild request with deleted derived ID and surviving source IDs |
+| `reflection_pairs` | Exactly-once ledger for consumed failure->success reflection pairs (outcome-anchored terminal truth, durable skip decisions) |
 
 No Row-Level TTL is enabled.
 
@@ -67,7 +68,7 @@ No Row-Level TTL is enabled.
 
 `verify.mjs` rolls every test back. It:
 
-- checks all 11 domain tables and the migration ledger exist;
+- checks all 12 domain tables and the migration ledger exist;
 - proves every domain primary key and foreign key is tenant-scoped;
 - requires every named domain `CHECK` to have a failing negative test;
 - tests key unique constraints;

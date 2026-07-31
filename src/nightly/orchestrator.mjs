@@ -11,22 +11,22 @@ import { runDream } from './dream.mjs'
 import { runReflection } from './reflection.mjs'
 import { runTransition } from './transition.mjs'
 
-const SHORT_CIRCUIT = new Set(['lease_held', 'retryable', 'refused_future_evaluation'])
+// dream 占用 memory sources：running/暂态/stale（revision 变动，可能马上 reacquire）都必须
+// 短路 transition，否则 transition 会抢 fade dream 正在处理的源（代码一审#2 前半）。
+const DREAM_SHORT_CIRCUIT = new Set(['lease_held', 'retryable', 'stale', 'refused_future_evaluation'])
 
 export const runNightly = async ({ tenantId, scheduledFor }) => {
   const dream = await runDream({ tenantId, scheduledFor })
-  if (SHORT_CIRCUIT.has(dream.outcome)) {
+  if (DREAM_SHORT_CIRCUIT.has(dream.outcome)) {
     const r = { outcome: 'short_circuited_at_dream', dream }
     console.log(JSON.stringify({ evt: 'nightly_orchestrator', tenant_id: tenantId, scheduled_for: scheduledFor, ...r }))
     return r
   }
   const degraded = dream.outcome === 'failed' || dream.outcome === 'failed_terminal'
+  // reflection 不占 memory sources（消费的是 outcomes/attempt_events）：无论模型终态/暂态
+  // 都不得阻止 deterministic transition——Bedrock reflection 故障绝不饿死 lifecycle
+  //（代码一审#2 后半）。future evaluation 由 transition 自身的硬闸同样 fail-closed。
   const reflection = await runReflection({ tenantId, scheduledFor })
-  if (SHORT_CIRCUIT.has(reflection.outcome)) {
-    const r = { outcome: 'short_circuited_at_reflection', dream, reflection }
-    console.log(JSON.stringify({ evt: 'nightly_orchestrator', tenant_id: tenantId, scheduled_for: scheduledFor, ...r }))
-    return r
-  }
   const transition = await runTransition({ tenantId, scheduledFor })
   const r = { outcome: degraded ? 'completed_degraded' : 'completed', dream, reflection, transition }
   console.log(JSON.stringify({ evt: 'nightly_orchestrator', tenant_id: tenantId, scheduled_for: scheduledFor,

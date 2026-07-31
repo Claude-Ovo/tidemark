@@ -14,6 +14,7 @@ const DOMAIN_TABLES = [
   'success_evidence',
   'memory_tombstones',
   'memory_rebuild_queue',
+  'reflection_pairs',
 ]
 
 const parseArgs = (argv) => {
@@ -133,6 +134,32 @@ const nightlyRunInsert = (overrides = {}) => {
       JSON.stringify(row.source_snapshot),
       row.source_fingerprint,
     ],
+    row,
+  }
+}
+
+const reflectionPairInsert = (overrides = {}) => {
+  const row = {
+    tenant_id: 'verify_tenant',
+    agent_id: 'verify_agent',
+    failure_attempt_id: `fa-${randomUUID()}`,
+    success_attempt_id: `sa-${randomUUID()}`,
+    failure_outcome_request_id: null,   // caller must wire real outcomes for FK-positive paths
+    success_outcome_request_id: null,
+    pair_fingerprint: randomBytes(32),
+    experience_id: null,
+    run_id: randomUUID(),
+    status: 'skipped_input_too_large',
+    ...overrides,
+  }
+  return {
+    text: `INSERT INTO public.reflection_pairs (
+      tenant_id, agent_id, failure_attempt_id, success_attempt_id,
+      failure_outcome_request_id, success_outcome_request_id, pair_fingerprint, experience_id, run_id, status
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    values: [row.tenant_id, row.agent_id, row.failure_attempt_id, row.success_attempt_id,
+      row.failure_outcome_request_id, row.success_outcome_request_id, row.pair_fingerprint,
+      row.experience_id, row.run_id, row.status],
     row,
   }
 }
@@ -448,6 +475,71 @@ const runUniqueTests = async (client) => {
   })
 }
 
+const runReflectionPairTests = async (client) => {
+  // 完整合法 setup 链（run + 两个 outcome），每例只违反目标约束
+  const mkSetup = () => {
+    const run = nightlyRunInsert()
+    const of_ = outcomeInsert({ status: 'failure' })
+    const os_ = outcomeInsert({ status: 'success' })
+    const base = { run_id: run.row.run_id,
+      failure_outcome_request_id: of_.row.outcome_request_id,
+      success_outcome_request_id: os_.row.outcome_request_id }
+    return { setup: [run, of_, os_], base }
+  }
+  {
+    const { setup, base } = mkSetup()
+    await expectViolation(client, {
+      name: 'CHECK reflection_pairs resolved requires experience',
+      setup,
+      operation: reflectionPairInsert({ ...base, status: 'resolved', experience_id: null }),
+      expectedCode: '23514',
+      expectedConstraint: 'rp_status_experience_ck',
+    })
+  }
+  {
+    const { setup, base } = mkSetup()
+    await expectViolation(client, {
+      name: 'CHECK reflection_pairs status enum',
+      setup,
+      operation: reflectionPairInsert({ ...base, status: 'invalid' }),
+      expectedCode: '23514',
+    })
+  }
+  {
+    const { setup, base } = mkSetup()
+    await expectViolation(client, {
+      name: 'FK reflection_pairs run must exist',
+      setup: setup.slice(1),   // 不建 run
+      operation: reflectionPairInsert({ ...base, run_id: randomUUID() }),
+      expectedCode: '23503',
+      expectedConstraint: 'rp_run_fk',
+    })
+  }
+  {
+    const runB = nightlyRunInsert({ tenant_id: 'verify_tenant_b' })
+    const of_ = outcomeInsert({ status: 'failure' })
+    const os_ = outcomeInsert({ status: 'success' })
+    await expectViolation(client, {
+      name: 'FK reflection_pairs run cannot cross tenant',
+      setup: [runB, of_, os_],
+      operation: reflectionPairInsert({ run_id: runB.row.run_id,
+        failure_outcome_request_id: of_.row.outcome_request_id,
+        success_outcome_request_id: os_.row.outcome_request_id }),
+      expectedCode: '23503',
+      expectedConstraint: 'rp_run_fk',
+    })
+  }
+  {
+    const { setup, base } = mkSetup()
+    await expectViolation(client, {
+      name: 'FK reflection_pairs failure outcome must exist',
+      setup,
+      operation: reflectionPairInsert({ ...base, failure_outcome_request_id: 'outcome-nonexistent' }),
+      expectedCode: '23503',
+    })
+  }
+}
+
 const runForeignKeyTests = async (client) => {
   {
     const sourceA = memoryInsert({ tenant_id: 'tenant_a' })
@@ -595,6 +687,7 @@ const main = async () => {
     await runUniqueTests(client)
     await runPositiveProvenanceTest(client)
     await runForeignKeyTests(client)
+    await runReflectionPairTests(client)
     await assertNoVerifyRows(client)
     console.log(`ALL MIGRATION VERIFICATIONS PASSED (${checkCases.length} CHECK negatives)`)
   } finally {
