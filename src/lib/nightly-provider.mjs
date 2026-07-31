@@ -27,9 +27,11 @@ export const reflectExtract = async (pairContext) => {
   const err = pairContext.failure_events.find(e => e.event_type === 'tool_error')
   const corr = pairContext.failure_events.find(e => e.event_type === 'user_correction')
   return {
+    // 叙述讲模式不讲个例：不嵌 attempt id——经验的语义单位是 task 级教训，
+    // 同 task 的重复教训应当在语义上可合并（dedup 才有意义）
     trigger: clip(`when ${err?.payload?.error_type ?? 'a failure'} occurs in ${pairContext.task_instance_id}`, 200),
-    wrong_action: clip(`the approach recorded in attempt ${pairContext.failure_attempt_id}`, 200),
-    correct_action: clip(`the approach recorded in attempt ${pairContext.success_attempt_id}` + (corr ? ' (after user correction)' : ''), 200),
+    wrong_action: clip(`the failing approach first recorded for ${pairContext.task_instance_id}`, 200),
+    correct_action: clip(`the approach of the earliest subsequent success` + (corr ? ' (after user correction)' : ''), 200),
     caution: clip(`verify against ${err?.payload?.error_type ?? 'the failure mode'} before retrying`, 200),
     confidence: 0.5,
   }
