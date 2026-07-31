@@ -8,8 +8,9 @@
 //   marker 行存续（0x00 单字节 + unreplayable 标记），017 NOT NULL 成立。
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { connectWithRetry, quoteIdentifier, validateDatabaseName, withDatabase } from './db.mjs'
+import { connectWithRetry, validateDatabaseName } from './db.mjs'
 import { loadMigrations, ensureMigrationLedger, applyOne } from './apply.mjs'
+import { withDisposableDb } from './disposable-db.mjs'
 
 const base = process.env.COCKROACH_DATABASE_URL
 if (!base) throw new Error('missing COCKROACH_DATABASE_URL')
@@ -17,38 +18,14 @@ if (!base) throw new Error('missing COCKROACH_DATABASE_URL')
 const mkDbName = () =>
   validateDatabaseName(`tidemark_mig_${process.pid}_${randomUUID().replaceAll('-', '').slice(0, 8)}`)
 
-// 唯一随机库 + created flag：CREATE 成功才允许 finally 清理；碰撞直接 fail-closed
-const withDisposableDb = async (fn) => {
-  const DB = mkDbName()
-  let created = false
-  {
-    const admin = await connectWithRetry(base, { label: 'admin' })
-    try { await admin.query(`CREATE DATABASE ${quoteIdentifier(DB)}`); created = true }
-    finally { await admin.end().catch(() => {}) }
-  }
-  const client = await connectWithRetry(withDatabase(base, DB), { label: DB })
-  try {
-    return await fn(client)
-  } finally {
-    await client.end().catch(() => {})
-    if (created) {
-      try {
-        const admin2 = await connectWithRetry(base, { label: 'admin-cleanup' })
-        try { await admin2.query(`DROP DATABASE ${quoteIdentifier(DB)} CASCADE`); console.log(`disposable db dropped: ${DB}`) }
-        finally { await admin2.end().catch(() => {}) }
-      } catch (e) {
-        // 不吞主错误：报告残留并置退出码，人工按库名清理
-        console.error(`CLEANUP FAILED: disposable db ${DB} still exists: ${e.message}`)
-        process.exitCode = 1
-      }
-    }
-  }
-}
+// 生命周期封装在 disposable-db.mjs（CREATE/connect/fn 同一最外层 try——round-6 反例修复），
+// 其"connect 失败仍精确清理"行为由 src/test-disposable-db.mjs 以注入 fake 单测锁定
+const disposable = (fn) => withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn })
 
 const T = 'mig-test-tenant', A = 'mig-test-agent'
 
 // ===== Act 1: 停在 013 + 证据尚在 -> 014 前拒 -> backfill -> 全通 =====
-await withDisposableDb(async (client) => {
+await disposable(async (client) => {
   const migrations = await loadMigrations()
   await ensureMigrationLedger(client)
   for (const m of migrations.filter(m => m.version <= 13)) {
@@ -98,7 +75,7 @@ await withDisposableDb(async (client) => {
 })
 
 // ===== Act 2: 已越过 014（证据已丢）-> 016 拒 -> README marker SQL -> 全通、行存续 =====
-await withDisposableDb(async (client) => {
+await disposable(async (client) => {
   const migrations = await loadMigrations()
   await ensureMigrationLedger(client)
   // 推进到 015：库干净所以 014 preflight 放行——正是"已越过 014"的历史状态
