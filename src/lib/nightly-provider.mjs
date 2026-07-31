@@ -13,7 +13,9 @@ const clip = (s, n) => (s ?? '').replaceAll(/\s+/g, ' ').trim().slice(0, n)
 
 // dream：整簇正文 -> { summary, salient_points[] }。确定性：同输入同输出。
 export const dreamSummarize = async (cluster) => {
-  if (NIGHTLY_PROVIDER === 'bedrock') throw new Error('bedrock_provider_not_wired_yet')   // allowlisting 批后接（结论 36）
+  if (NIGHTLY_PROVIDER === 'bedrock') {
+    throw Object.assign(new Error('bedrock_provider_not_wired_yet'), { terminal: true })   // allowlisting 批后接（结论 36）
+  }
   const bodies = cluster.map(m => clip(m.content, 120))
   return {
     summary: clip(`Condensed ${cluster.length} low-salience fragments: ` + bodies.join(' | '), 800),
@@ -21,9 +23,20 @@ export const dreamSummarize = async (cluster) => {
   }
 }
 
-// reflection：配对上下文 -> 叙述字段。确定性 stub 从 anchor 事件构造。
-export const reflectExtract = async (pairContext) => {
-  if (NIGHTLY_PROVIDER === 'bedrock') throw new Error('bedrock_provider_not_wired_yet')
+// reflection：入参=canonical envelope 字符串（round-3 #4：与 budget/fingerprint 同一字节串），
+// provider 内部解析。确定性 stub 从 anchor 事件构造。
+export const reflectExtract = async (envelopeString) => {
+  if (NIGHTLY_PROVIDER === 'bedrock') {
+    throw Object.assign(new Error('bedrock_provider_not_wired_yet'), { terminal: true })   // config 错不会自愈
+  }
+  const env = JSON.parse(envelopeString)
+  const events = env.events.map(([event_id, event_type, attempt_id, created_at, payload]) => ({ event_id, event_type, attempt_id, created_at, payload }))
+  const pairContext = {
+    task_instance_id: env.task_instance_id,
+    failure_attempt_id: env.failure_attempt_id, success_attempt_id: env.success_attempt_id,
+    failure_events: events.filter(e => e.attempt_id === env.failure_attempt_id),
+    success_events: events.filter(e => e.attempt_id === env.success_attempt_id),
+  }
   const err = pairContext.failure_events.find(e => e.event_type === 'tool_error')
   const corr = pairContext.failure_events.find(e => e.event_type === 'user_correction')
   return {

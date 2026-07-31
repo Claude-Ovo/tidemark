@@ -162,6 +162,7 @@ export const executeDream = async (tenantId, evaluationAtIso, claim) => {
       console.log(JSON.stringify({ evt: 'dream_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...r }))
       return r
     }
+    await markRetryable({ ...fence, errorCode: 'unclassified_error' }).catch(() => {})
     throw e
   }
 

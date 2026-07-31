@@ -15,8 +15,9 @@ import { runTransition } from './transition.mjs'
 // 短路 transition，否则 transition 会抢 fade dream 正在处理的源（代码一审#2 前半）。
 const DREAM_SHORT_CIRCUIT = new Set(['lease_held', 'retryable', 'stale', 'refused_future_evaluation'])
 
-export const runNightly = async ({ tenantId, scheduledFor }) => {
-  const dream = await runDream({ tenantId, scheduledFor })
+export const runNightly = async ({ tenantId, scheduledFor, _jobs = {} }) => {
+  const jobs = { runDream, runReflection, runTransition, ..._jobs }   // 注入 seam：仅异常契约测试用
+  const dream = await jobs.runDream({ tenantId, scheduledFor })
   if (DREAM_SHORT_CIRCUIT.has(dream.outcome)) {
     const r = { outcome: 'short_circuited_at_dream', dream }
     console.log(JSON.stringify({ evt: 'nightly_orchestrator', tenant_id: tenantId, scheduled_for: scheduledFor, ...r }))
@@ -26,8 +27,16 @@ export const runNightly = async ({ tenantId, scheduledFor }) => {
   // reflection 不占 memory sources（消费的是 outcomes/attempt_events）：无论模型终态/暂态
   // 都不得阻止 deterministic transition——Bedrock reflection 故障绝不饿死 lifecycle
   //（代码一审#2 后半）。future evaluation 由 transition 自身的硬闸同样 fail-closed。
-  const reflection = await runReflection({ tenantId, scheduledFor })
-  const transition = await runTransition({ tenantId, scheduledFor })
+  // round-3 #3：reflection 的【异常】同样不得阻断 transition——try/catch 结构化，
+  // transition 无条件尝试（reflection 自身已保证不悬 running）
+  let reflection
+  try {
+    reflection = await jobs.runReflection({ tenantId, scheduledFor })
+  } catch (e) {
+    reflection = { outcome: 'crashed', error: String(e?.message ?? e).slice(0, 160) }
+    console.error(JSON.stringify({ evt: 'reflection_crashed', tenant_id: tenantId, error: reflection.error }))
+  }
+  const transition = await jobs.runTransition({ tenantId, scheduledFor })
   const r = { outcome: degraded ? 'completed_degraded' : 'completed', dream, reflection, transition }
   console.log(JSON.stringify({ evt: 'nightly_orchestrator', tenant_id: tenantId, scheduled_for: scheduledFor,
     outcome: r.outcome, dream: dream.outcome, reflection: reflection.outcome, transition: transition.outcome }))

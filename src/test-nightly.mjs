@@ -223,10 +223,13 @@ try {
     await mkPair(T, A, {})
     assert.equal((await runReflection({ tenantId: T, scheduledFor: nowIso() })).outcome, 'completed')
     const n1 = (await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND layer=\'experience\'', [T])).rows[0].n
-    const r2 = await runReflection({ tenantId: T, scheduledFor: nowIso() })   // 新的晚上
-    assert.equal(r2.outcome, 'no_work', `consumed pair never re-enters: ${JSON.stringify(r2)}`)
+    // cursor 语义：第二晚=越过 consumed 行的推进 run（0 对零产物），第三晚 cursor 已过=真 no_work
+    const r2 = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r2.counts?.pairs ?? 0, 0, `consumed pair yields zero pairs: ${JSON.stringify(r2)}`)
     assert.equal((await q('SELECT count(*)::INT4 AS n FROM memories WHERE tenant_id=$1 AND layer=\'experience\'', [T])).rows[0].n, n1)
-    console.log('PASS R3 pair consumed exactly once across nights')
+    const r3 = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r3.outcome, 'no_work', `cursor passed: third night is quiet: ${JSON.stringify(r3)}`)
+    console.log('PASS R3 pair consumed exactly once across nights (cursor advances past it)')
   }
 
   // ===== R4 anchors 优先截断：failure 侧 40 条事件淹没，success terminal 仍在证据里 =====
@@ -351,7 +354,8 @@ try {
     console.log('PASS R9 DB-candidate + batch-twin combo all resolves to E (the 23503 counterexample)')
   }
 
-  // ===== R10 二审#2 饥饿根治：201 个无 success 的老 failure 在前 + 1 个合法新 pair 当晚发现 =====
+  // ===== R10 饥饿根治（cursor 语义）：201 个过窗 failure 压阵，推进速率 200/晚，
+  // 合法 pair 最迟第二晚配上——keyset progress 的 SLA 实证 =====
   {
     const T = t('r10'), A = T + '-a'
     await q(
@@ -361,10 +365,15 @@ try {
        FROM generate_series(1, 201) AS g(i)`,
       [T, A, Buffer.from('starve')])
     await mkPair(T, A, { failOffH: -2, succOffH: -1 })
-    const r = await runReflection({ tenantId: T, scheduledFor: nowIso() })
-    assert.equal(r.outcome, 'completed', JSON.stringify(r))
-    assert.equal(r.counts.pairs, 1, 'success-driven claim finds the legal pair on night one — no head-of-line starvation')
-    console.log('PASS R10 201 successless failures cannot starve a legal pair')
+    const r1 = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r1.outcome, 'completed', JSON.stringify(r1))
+    const night1pairs = r1.counts.pairs
+    const r2 = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    const total = night1pairs + (r2.counts?.pairs ?? 0)
+    assert.equal(total, 1, `legal pair found within two nights (cursor rate 200/night): n1=${night1pairs} n2=${JSON.stringify(r2.counts)}`)
+    const lg = (await q(`SELECT count(*)::INT4 AS n FROM reflection_pairs WHERE tenant_id=$1 AND status='resolved'`, [T])).rows[0].n
+    assert.equal(lg, 1, 'exactly one resolved ledger row')
+    console.log('PASS R10 201 expired failures cannot starve a legal pair (bounded cursor progress)')
   }
 
   // ===== R11 二审#4 envelope 边界：巨型 task 字符串把真实输入推过 16KiB => input_too_large =====
@@ -422,7 +431,20 @@ try {
     console.log('PASS N3 full-chain nightly completes')
   }
 
-  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R11 N1-N3)')
+  // ===== N4 reflection 异常隔离（round-3 #3）：throw 也不得阻断 transition =====
+  {
+    const T = t('n4'), A = T + '-a', EP = T + '-ep'
+    const id = await insMem(T, A, EP, 'n4 lone due row', { importance: 0.8 })
+    const r = await runNightly({ tenantId: T, scheduledFor: nowIso(),
+      _jobs: { runReflection: async () => { throw new Error('provider exploded mid-flight') } } })
+    assert.equal(r.reflection.outcome, 'crashed', JSON.stringify(r.reflection))
+    assert.ok(r.reflection.error.includes('exploded'), 'exception honestly structured')
+    assert.equal(r.transition.outcome, 'completed', `transition ran despite reflection THROW: ${JSON.stringify(r.transition)}`)
+    assert.equal((await mems(T, `AND memory_id='${id}'`))[0].state, 'faded', 'lifecycle proceeded')
+    console.log('PASS N4 reflection exception cannot block the deterministic lifecycle')
+  }
+
+  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R11 N1-N4)')
 } catch (e) {
   primaryError = e
 } finally {

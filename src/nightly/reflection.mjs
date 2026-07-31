@@ -100,89 +100,98 @@ const selectPairEvents = (f, s, failureEvents, successEvents) => {
 const OUT_COLS = 'outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, reported_at'
 
 const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIso) => {
-  // success 驱动选源（二审#2：failure 队首饥饿的根治）：任何合法 pair 必有 retention 内的
-  // success——从最近 success 有界反查（031 索引反向扫），无 success 的 failure 堆积再多也
-  // 不占扫描窗；找到候选 failure 后仍按冻结规则正查其【最早】success 定配对（026 索引）。
-  const successes = (await c.query(
-    `WITH recent_success AS MATERIALIZED (
-       SELECT ${OUT_COLS} FROM outcomes
-       WHERE tenant_id=$1 AND status='success' AND reported_at <= $2
-         AND reported_at >= $2::TIMESTAMPTZ - ($3::FLOAT8 * INTERVAL '1 hour')
-       ORDER BY reported_at DESC, outcome_request_id DESC LIMIT ${cfg.batch_size}
-     ) SELECT * FROM recent_success`,
-    [tenantId, evalIso, REFLECT_CFG.retention_hours])).rows
-  if (successes.length === 0) return null
-  // 每个 success 反查其 72h 窗内、同 (agent,task,episode) 的未消费 failure 候选，并验证归属：
-  // 只认领"其最早 success 恰为本 S"的 failure（配对规则的反向一致性）——否则同 task 多对时
-  // 全部 S 都抢最早 F，同晚只出一对（链上其余顺延，白丢产能）。窗内候选有界 LIMIT 8。
-  const candidateFailures = new Map()
-  for (const su of successes) {
-    const fs = (await c.query(
-      `SELECT ${OUT_COLS} FROM outcomes o
-       WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='failure'
-         AND reported_at < $5 AND reported_at >= $5::TIMESTAMPTZ - ($6::FLOAT8 * INTERVAL '1 hour')
-         AND NOT EXISTS (SELECT 1 FROM reflection_pairs rp
-                         WHERE rp.tenant_id=$1 AND rp.agent_id=o.agent_id AND rp.failure_attempt_id=o.attempt_id)
-       ORDER BY reported_at, outcome_request_id LIMIT 8`,
-      [tenantId, su.agent_id, su.task_instance_id, su.episode_id, su.reported_at, REFLECT_CFG.window_hours])).rows
-    for (const f of fs) {
-      const sStar = (await c.query(
-        `SELECT attempt_id FROM outcomes
-         WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='success'
-           AND reported_at > $5 AND reported_at <= LEAST($6::TIMESTAMPTZ, $5::TIMESTAMPTZ + ($7::FLOAT8 * INTERVAL '1 hour'))
-         ORDER BY reported_at, outcome_request_id, attempt_id LIMIT 1`,
-        [tenantId, f.agent_id, f.task_instance_id, f.episode_id, f.reported_at, evalIso, REFLECT_CFG.window_hours])).rows[0]
-      if (sStar && sStar.attempt_id === su.attempt_id) {
-        candidateFailures.set(`${f.agent_id} ${f.attempt_id}`, f)
-        break
-      }
-    }
-  }
-  if (candidateFailures.size === 0) return null
-  // 稳定顺序：按 failure (reported_at, outcome_request_id) 升序处理
-  const failures = [...candidateFailures.values()]
-    .sort((a, b) => a.reported_at - b.reported_at || (a.outcome_request_id < b.outcome_request_id ? -1 : 1))
+  // round-3 #1/#2：durable keyset cursor + 单条 set-based 查询。
+  // 扫描 = cursor 之后的 failure 有界 200 行（无论有无 success——方向回到 failure 驱动，
+  // 但 cursor 保证 keyset progress：过窗无望的行被永久越过，不再遮挡后来者）；
+  // LATERAL 在同一查询内为每行取最早 success（计划内点查，非 200 次 round trip）。
+  // fan-out 天然成立：五个 failure 共享同一 success 也各自成对。
+  // cursor 推进规则：只越过【前缀连续的已终结行】——本晚配对/skip 入账本、历史已消费、
+  // 或 已过窗且无 success（永久无望）；窗内 waiting 或本晚超额度的行挡住 cursor（语义正确的等待）。
+  // 容量 SLA（SPEC §6）：每 tenant 窗内未配对 failure 须 < scan(200)，超出属运维事件。
+  // cursor 比较全程留在 SQL 域（微秒精度）：JS Date 只有毫秒，读回再传回会把 cursor
+  // 压小一截、行反复扫到自己。JS 只读 cursor 作 snapshot 审计记录，不参与比较。
+  const cur = (await c.query(
+    'SELECT last_reported_at, last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1',
+    [tenantId])).rows[0] ?? { last_reported_at: new Date(0), last_outcome_request_id: '' }
+  const scan = (await c.query(
+    `WITH cur AS (
+       SELECT COALESCE((SELECT last_reported_at FROM reflection_cursor WHERE tenant_id=$1), '1970-01-01'::TIMESTAMPTZ) AS at,
+              COALESCE((SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1), '') AS orid
+     ), scan AS MATERIALIZED (
+       SELECT ${OUT_COLS} FROM outcomes, cur
+       WHERE tenant_id=$1 AND status='failure' AND reported_at <= $2
+         AND (reported_at, outcome_request_id) > (cur.at, cur.orid)
+       ORDER BY reported_at, outcome_request_id LIMIT ${cfg.batch_size}
+     )
+     SELECT f.*, s.outcome_request_id AS s_orid, s.attempt_id AS s_attempt, s.reported_at AS s_reported,
+            EXISTS (SELECT 1 FROM reflection_pairs rp
+                    WHERE rp.tenant_id=$1 AND rp.agent_id=f.agent_id AND rp.failure_attempt_id=f.attempt_id) AS consumed
+     FROM scan f
+     LEFT JOIN LATERAL (
+       SELECT outcome_request_id, attempt_id, reported_at FROM outcomes s
+       WHERE s.tenant_id=$1 AND s.agent_id=f.agent_id AND s.task_instance_id=f.task_instance_id
+         AND s.episode_id=f.episode_id AND s.status='success'
+         AND s.reported_at > f.reported_at
+         AND s.reported_at <= LEAST($2::TIMESTAMPTZ, f.reported_at + ($3::FLOAT8 * INTERVAL '1 hour'))
+       ORDER BY s.reported_at, s.outcome_request_id, s.attempt_id LIMIT 1
+     ) s ON true
+     ORDER BY f.reported_at, f.outcome_request_id`,
+    [tenantId, evalIso, REFLECT_CFG.window_hours])).rows
+  if (scan.length === 0) return null
+  const evalMs = new Date(evalIso).getTime()
   const pairs = []
   let workableCount = 0
-  for (const f of failures) {
-    if (workableCount >= REFLECT_CFG.max_pairs) break   // skipped 不占可工作产物额度（一审#5）
-    // 冻结配对规则不变：failure 之后 72h 内同 scope 的【最早】success（正查定配对）
-    const s = (await c.query(
-      `SELECT ${OUT_COLS} FROM outcomes
-       WHERE tenant_id=$1 AND agent_id=$2 AND task_instance_id=$3 AND episode_id=$4 AND status='success'
-         AND reported_at > $5 AND reported_at <= LEAST($6::TIMESTAMPTZ, $5::TIMESTAMPTZ + ($7::FLOAT8 * INTERVAL '1 hour'))
-       ORDER BY reported_at, outcome_request_id, attempt_id LIMIT 1`,
-      [tenantId, f.agent_id, f.task_instance_id, f.episode_id, f.reported_at, evalIso, REFLECT_CFG.window_hours])).rows[0]
-    if (!s) continue
-    // 冻结两 attempt 的事件快照（created_at <= evaluation）——append-only 无 revision 的替代
-    const evs = (await c.query(
-      `SELECT event_id, attempt_id, event_type, payload, created_at FROM attempt_events
-       WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id = ANY($3) AND created_at <= $4
-       ORDER BY created_at, event_id`,
-      [tenantId, f.agent_id, [f.attempt_id, s.attempt_id], evalIso])).rows
-    const failureEvents = evs.filter(e => e.attempt_id === f.attempt_id)
-    const successEvents = evs.filter(e => e.attempt_id === s.attempt_id)
-    const sel = selectPairEvents(f, s, failureEvents, successEvents)
-    if (!sel) { pairs.push({ skipped: 'input_too_large', failure: f, success: s }); continue }   // 不计 workableCount
-    const envelope = mkEnvelope(f, s, sel.chosen)
-    const eventHashes = sel.chosen.map(e => [e.event_id, eventHash(e)])
-    const fp = createHash('sha256').update(canonicalJson({
-      failure: [f.outcome_request_id, f.status, new Date(f.reported_at).toISOString()],
-      success: [s.outcome_request_id, s.status, new Date(s.reported_at).toISOString()],
-      envelope_sha256: createHash('sha256').update(envelope).digest('hex'),   // 二审#4：指纹覆盖真实模型输入
-      event_hashes: eventHashes, evaluation_at: evalIso, pipeline_version: pipelineVersion,
-    })).digest()
-    pairs.push({
-      failure: f, success: s, events: sel.chosen, anchors: sel.anchors, envelope,
-      event_hashes: eventHashes, pair_fingerprint: fp, experience_id: experienceIdOf(fp),
-    })
-    workableCount++
+  let cursorRow = null
+  let prefixOpen = true
+  for (const row of scan) {
+    const f = { outcome_request_id: row.outcome_request_id, agent_id: row.agent_id, episode_id: row.episode_id,
+                task_instance_id: row.task_instance_id, attempt_id: row.attempt_id, status: row.status, reported_at: row.reported_at }
+    const expired = row.s_orid == null && new Date(row.reported_at).getTime() + REFLECT_CFG.window_hours * 3600e3 < evalMs
+    let terminated = false
+    if (row.consumed || expired) {
+      terminated = true                       // 历史已消费（幂等防重）或过窗无望（永久越过）
+    } else if (row.s_orid != null && workableCount < REFLECT_CFG.max_pairs) {
+      const su = { outcome_request_id: row.s_orid, attempt_id: row.s_attempt, reported_at: row.s_reported, status: 'success',
+                   agent_id: row.agent_id, episode_id: row.episode_id, task_instance_id: row.task_instance_id }
+      const evs = (await c.query(
+        `SELECT event_id, attempt_id, event_type, payload, created_at FROM attempt_events
+         WHERE tenant_id=$1 AND agent_id=$2 AND attempt_id = ANY($3) AND created_at <= $4
+         ORDER BY created_at, event_id`,
+        [tenantId, f.agent_id, [f.attempt_id, su.attempt_id], evalIso])).rows
+      const failureEvents = evs.filter(e => e.attempt_id === f.attempt_id)
+      const successEvents = evs.filter(e => e.attempt_id === su.attempt_id)
+      const sel = selectPairEvents(f, su, failureEvents, successEvents)
+      if (!sel) {
+        pairs.push({ skipped: 'input_too_large', failure: f, success: su })
+        terminated = true                     // skip 也落账本 = 终结
+      } else {
+        const envelope = mkEnvelope(f, su, sel.chosen)
+        const eventHashes = sel.chosen.map(e => [e.event_id, eventHash(e)])
+        const fp = createHash('sha256').update(canonicalJson({
+          failure: [f.outcome_request_id, f.status, new Date(f.reported_at).toISOString()],
+          success: [su.outcome_request_id, 'success', new Date(su.reported_at).toISOString()],
+          envelope_sha256: createHash('sha256').update(envelope).digest('hex'),
+          event_hashes: eventHashes, evaluation_at: evalIso, pipeline_version: pipelineVersion,
+        })).digest()
+        pairs.push({ failure: f, success: su, events: sel.chosen, anchors: sel.anchors, envelope,
+                     event_hashes: eventHashes, pair_fingerprint: fp, experience_id: experienceIdOf(fp) })
+        workableCount++
+        terminated = true
+      }
+    }
+    // waiting（窗内无 success）或超额度的可配行：挡住 cursor
+    if (prefixOpen && terminated) cursorRow = f
+    else prefixOpen = false
   }
-  if (pairs.length === 0) return null
-  // 全 skipped 也成 run：把 input_too_large 决定持久化进账本（一审#5），否则每晚热循环
+  const cursorAdvance = cursorRow ? {
+    from_at: new Date(cur.last_reported_at).toISOString(), from_orid: cur.last_outcome_request_id,
+    to_at: new Date(cursorRow.reported_at).toISOString(), to_orid: cursorRow.outcome_request_id,
+  } : null
+  if (pairs.length === 0 && !cursorAdvance) return null   // 全 waiting：无事可做、cursor 不动
   return {
     sources: pairs,
-    snapshot: { pairs: pairs.map(p => p.skipped ? {
+    cursorAdvance,
+    snapshot: { cursor_advance: cursorAdvance, pairs: pairs.map(p => p.skipped ? {
       skipped: p.skipped, failure_attempt_id: p.failure.attempt_id, success_attempt_id: p.success.attempt_id,
     } : {
       failure_outcome_request_id: p.failure.outcome_request_id, success_outcome_request_id: p.success.outcome_request_id,
@@ -194,7 +203,7 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
     fingerprint: createHash('sha256').update(canonicalJson({
       job_kind: 'reflection',
       pair_fingerprints: pairs.filter(p => !p.skipped).map(p => p.pair_fingerprint.toString('hex')),
-      evaluation_at: evalIso, pipeline_version: pipelineVersion,
+      cursor_advance: cursorAdvance, evaluation_at: evalIso, pipeline_version: pipelineVersion,
     })).digest(),
   }
 }
@@ -231,15 +240,9 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
   try {
     products = []
     for (const p of workable) {
-      // provider 请求 = envelope 反序列化视图（budget/fingerprint/请求同一字节串，二审#4）
-      const env = JSON.parse(p.envelope)
-      const evView = env.events.map(([event_id, event_type, attempt_id, created_at, payload]) => ({ event_id, event_type, attempt_id, created_at, payload }))
-      const narrative = await reflectExtract({
-        task_instance_id: env.task_instance_id,
-        failure_attempt_id: env.failure_attempt_id, success_attempt_id: env.success_attempt_id,
-        failure_events: evView.filter(e => e.attempt_id === env.failure_attempt_id),
-        success_events: evView.filter(e => e.attempt_id === env.success_attempt_id),
-      })
+      // provider 直接收 canonical envelope 字符串（round-3 #4）：budget/fingerprint/请求同一字节串，
+      // provider 内部自行解析——不存在第二种序列化形态
+      const narrative = await reflectExtract(p.envelope)
       for (const k of ['trigger', 'wrong_action', 'correct_action', 'caution']) {
         if (typeof narrative?.[k] !== 'string' || narrative[k].length < 1 || narrative[k].length > FIELD_MAX) {
           throw Object.assign(new Error(`reflection_output_schema_rejected:${k}`), { terminal: true })
@@ -273,6 +276,8 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
       console.log(JSON.stringify({ evt: 'reflection_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...r }))
       return r
     }
+    // 未分类异常：run 标 retryable（lease 立即过期可 takeover）后再抛——绝不悬 running 等 lease
+    await markRetryable({ ...fence, errorCode: 'unclassified_error' }).catch(() => {})
     throw e
   }
 
@@ -425,6 +430,19 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
           generated_experience_id: p.pair.experience_id, resolved_experience_id: p.resolved_experience_id,
           generated_output_checksum: p.output_checksum, embed: p.embedMeta,
           consumed_elsewhere: consumedElsewhere.has(p.pair.pair_fingerprint.toString('hex')) || undefined })),
+      }
+      // durable cursor 推进（round-3 #1）：读本 run 行冻结的 snapshot（takeover 后依然一致），
+      // 与 completed 同一 fencing 事务——幂等重放/竞态下 cursor 不会双跳
+      const snap = (await c.query('SELECT source_snapshot FROM nightly_runs WHERE tenant_id=$1 AND run_id=$2',
+        [tenantId, claim.run_id])).rows[0].source_snapshot
+      if (snap?.cursor_advance) {
+        // 微秒精度陷阱：JS Date/ISO 只有毫秒——cursor 若经 JS 序列化会永远比行小一截，
+        // 行反复扫到自己。按 orid 回表取原生 TIMESTAMPTZ，微秒不过 JS 之手
+        await c.query(
+          `UPSERT INTO reflection_cursor (tenant_id, last_reported_at, last_outcome_request_id, updated_at)
+           SELECT $1, reported_at, outcome_request_id, now() FROM outcomes
+           WHERE tenant_id=$1 AND outcome_request_id=$2`,
+          [tenantId, snap.cursor_advance.to_orid])
       }
       await fenceUpdate(c, fence, `status='completed', completed_at=now(), result_receipt=$4`, [receipt])
       return { outcome: 'completed', run_id: claim.run_id,
