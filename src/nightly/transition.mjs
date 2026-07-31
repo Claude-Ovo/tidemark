@@ -16,11 +16,18 @@ import { inSerializableTx } from '../lib/db.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext, consolidationProgress, TRANSITION_CFG } from '../lib/scheduler.mjs'
 
-export const TRANSITION_PIPELINE_VERSION = [
+// pipeline_version 必须编码【实际生效】的候选语义参数（Codex 代码一审#3）——
+// 由有效 cfg 动态生成并贯穿 INSERT/冲突查询/fingerprint，宣称值与行为不可分离
+export const pipelineVersionOf = (cfg) => [
   'transition-v1', 'sched=v1',
-  `fade<=${TRANSITION_CFG.fade_threshold}`, `hits=${TRANSITION_CFG.consolidate_hits}`,
-  `mult=${TRANSITION_CFG.consolidate_multiplier}`, `batch=${TRANSITION_CFG.batch_size}`,
+  `fade<=${cfg.fade_threshold}`, `hits=${cfg.consolidate_hits}`,
+  `mult=${cfg.consolidate_multiplier}`, `batch=${cfg.batch_size}`,
 ].join('|')
+export const TRANSITION_PIPELINE_VERSION = pipelineVersionOf(TRANSITION_CFG)
+
+// 未来评估硬闸（Codex 代码一审#1，结论 10）：真实转换只许 server time ± 抖动容差；
+// 时间模拟只能经显式 unsafe seam（代码内 cfg，CLI 不暴露）或可重置 demo tenant
+export const FUTURE_TOLERANCE_MS = 5 * 60_000
 
 const decay = (anchor, anchorAt, halfLife, evalMs) =>
   Number(anchor) * Math.exp(-Math.LN2 * ((evalMs - new Date(anchorAt).getTime()) / 3600e3) / Number(halfLife))
@@ -28,18 +35,24 @@ const decay = (anchor, anchorAt, halfLife, evalMs) =>
 const SOURCE_COLS = `memory_id, revision, admission, pinned, state, layer, strength_anchor, strength_anchor_at,
   half_life_hours, credited_success_count, consolidation_baseline`
 
-const fingerprintOf = (sources, evaluationAtIso) => createHash('sha256').update(canonicalJson({
+const fingerprintOf = (sources, evaluationAtIso, pipelineVersion) => createHash('sha256').update(canonicalJson({
   job_kind: 'transition',
   sources: sources.map(r => [r.memory_id, String(r.revision)]),
   evaluation_at: evaluationAtIso,
-  pipeline_version: TRANSITION_PIPELINE_VERSION,
+  pipeline_version: pipelineVersion,
 })).digest()
 
 // claim 阶段（自己的短事务）：选源 + INSERT run。返回 null 表示 no-work。
 export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
   const controlConfig = { lease_minutes: cfg.lease_minutes, max_attempts: cfg.max_attempts, batch_size: cfg.batch_size }
+  const pipelineVersion = pipelineVersionOf(cfg)
   try {
     const claimed = await inSerializableTx(async (c) => {
+      // 未来评估硬闸：DB 墙钟判定（不是应用机时钟），拒绝即零 run 零写入
+      const dbNow = (await c.query('SELECT now() AS db_now')).rows[0].db_now.getTime()
+      if (!cfg.unsafe_allow_future_evaluation && new Date(evaluationAtIso).getTime() > dbNow + FUTURE_TOLERANCE_MS) {
+        return { outcome: 'refused_future_evaluation', db_now: new Date(dbNow).toISOString() }
+      }
       const sources = (await c.query(
         `SELECT ${SOURCE_COLS} FROM memories
          WHERE tenant_id=$1 AND next_transition_at IS NOT NULL AND next_transition_at <= $2
@@ -50,7 +63,7 @@ export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
         // no-work 短路只适用于"这个键从未有过 run 且当下无源"
         const prior = (await c.query(
           `SELECT run_id FROM nightly_runs WHERE tenant_id=$1 AND job_kind='transition' AND scheduled_for=$2 AND pipeline_version=$3`,
-          [tenantId, evaluationAtIso, TRANSITION_PIPELINE_VERSION])).rows[0]
+          [tenantId, evaluationAtIso, pipelineVersion])).rows[0]
         return prior ? { outcome: '_resolve_existing' } : { outcome: 'no_work' }
       }
       const snapshot = sources.map(r => ({ memory_id: r.memory_id, revision: String(r.revision) }))
@@ -59,9 +72,9 @@ export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
            attempt_count, batch_size, source_snapshot, source_fingerprint, control_config)
          VALUES ($1,'transition',$2,$3,'running', now() + ($4::FLOAT8 * INTERVAL '1 minute'), 1, $5, $6, $7, $8)
          RETURNING run_id`,
-        [tenantId, evaluationAtIso, TRANSITION_PIPELINE_VERSION, cfg.lease_minutes, cfg.batch_size,
-         JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso), controlConfig])).rows[0]
-      return { outcome: 'claimed', run_id: run.run_id, expected_attempt: 1, sources }
+        [tenantId, evaluationAtIso, pipelineVersion, cfg.lease_minutes, cfg.batch_size,
+         JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso, pipelineVersion), controlConfig])).rows[0]
+      return { outcome: 'claimed', run_id: run.run_id, expected_attempt: 1, sources, control: controlConfig }
     }, 'transition-claim')
     // 既存 run 的分支解析在自己的事务里做（completed/failed/lease/takeover 全语义）
     return claimed.outcome === '_resolve_existing' ? resolveClaimConflict(tenantId, evaluationAtIso, cfg) : claimed
@@ -74,17 +87,24 @@ export const claimRun = async (tenantId, evaluationAtIso, cfg) => {
 // 23505 之后的分支（schedule-UQ 或 fingerprint-UQ，分别显式处理——不笼统吞）：
 // completed -> 幂等返回；failed -> 终态返回；running 且 lease 未过期 -> lease_held；
 // running lease 过期 / stale -> CAS takeover（attempt+1、重选源换 snapshot；耗尽 -> 标 failed）
+const isPositive = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
+
 const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
+  const pipelineVersion = pipelineVersionOf(cfg)
   return inSerializableTx(async (c) => {
     const row = (await c.query(
       `SELECT run_id, status, attempt_count, lease_expires_at, control_config, lease_expires_at < now() AS lease_expired
        FROM nightly_runs WHERE tenant_id=$1 AND job_kind='transition' AND scheduled_for=$2 AND pipeline_version=$3`,
-      [tenantId, evaluationAtIso, TRANSITION_PIPELINE_VERSION])).rows[0]
+      [tenantId, evaluationAtIso, pipelineVersion])).rows[0]
     if (!row) throw new Error('claim_conflict_without_schedule_row')   // fingerprint-UQ 独立撞不可能（含 evaluation_at），撞即不变量破坏
     if (row.status === 'completed') return { outcome: 'already_completed', run_id: row.run_id }
     if (row.status === 'failed') return { outcome: 'failed_terminal', run_id: row.run_id }
-    // control 冻结值：takeover 判定只读 run 行，不读当前环境（023 契约）
-    const frozen = { max_attempts: cfg.max_attempts, lease_minutes: cfg.lease_minutes, ...(row.control_config ?? {}) }
+    // control 冻结值：takeover/耗尽判定只读 run 行——缺失或非法即 fail-closed，
+    // 绝不回退当前环境值（Codex 代码一审#4：进程重启的新 cfg 不得越权改旧 run 契约）
+    const frozen = row.control_config
+    if (!frozen || !isPositive(frozen.max_attempts) || !isPositive(frozen.lease_minutes) || !isPositive(frozen.batch_size)) {
+      throw new Error(`invalid_frozen_control_config:${row.run_id}`)
+    }
     if (row.status === 'running' && !row.lease_expired) return { outcome: 'lease_held', run_id: row.run_id }
     if (Number(row.attempt_count) >= Number(frozen.max_attempts)) {
       const dead = await c.query(
@@ -98,7 +118,7 @@ const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
     const sources = (await c.query(
       `SELECT ${SOURCE_COLS} FROM memories
        WHERE tenant_id=$1 AND next_transition_at IS NOT NULL AND next_transition_at <= $2
-       ORDER BY next_transition_at, memory_id LIMIT ${frozen.batch_size ?? cfg.batch_size}`,
+       ORDER BY next_transition_at, memory_id LIMIT ${frozen.batch_size}`,
       [tenantId, evaluationAtIso])).rows
     if (sources.length === 0) {
       const done = await c.query(
@@ -114,10 +134,10 @@ const resolveClaimConflict = async (tenantId, evaluationAtIso, cfg) => {
       `UPDATE nightly_runs SET status='running', lease_expires_at=now() + ($4::FLOAT8 * INTERVAL '1 minute'),
          attempt_count=$3, source_snapshot=$5, source_fingerprint=$6, updated_at=now()
        WHERE tenant_id=$1 AND run_id=$2 AND status IN ('running','stale') AND attempt_count=$7`,
-      [tenantId, row.run_id, expected, frozen.lease_minutes ?? cfg.lease_minutes,
-       JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso), row.attempt_count])
+      [tenantId, row.run_id, expected, frozen.lease_minutes,
+       JSON.stringify(snapshot), fingerprintOf(sources, evaluationAtIso, pipelineVersion), row.attempt_count])
     if (cas.rowCount !== 1) return { outcome: 'lease_held', run_id: row.run_id }
-    return { outcome: 'claimed', run_id: row.run_id, expected_attempt: expected, sources }
+    return { outcome: 'claimed', run_id: row.run_id, expected_attempt: expected, sources, control: frozen }
   }, 'transition-conflict')
 }
 
@@ -208,12 +228,12 @@ export const executeRun = async (tenantId, evaluationAtIso, run) => {
 }
 
 export const runTransition = async ({ tenantId, scheduledFor, cfg = TRANSITION_CFG }) => {
+  if (Number.isNaN(new Date(scheduledFor).getTime())) throw new Error('scheduled_for_invalid')
   const evaluationAtIso = new Date(scheduledFor).toISOString()   // UTC 规范化；即 evaluation_at
-  if (Number.isNaN(new Date(evaluationAtIso).getTime())) throw new Error('scheduled_for_invalid')
   const claim = await claimRun(tenantId, evaluationAtIso, cfg)
-  const result = claim.outcome === 'claimed' ? await executeRun(tenantId, evaluationAtIso, claim) : claim
-  console.log(JSON.stringify({ evt: 'transition_run', tenant_id: tenantId, scheduled_for: evaluationAtIso,
-    ...result, control: { lease_minutes: cfg.lease_minutes, max_attempts: cfg.max_attempts, batch_size: cfg.batch_size } }))
+  const result = claim.outcome === 'claimed' ? { ...(await executeRun(tenantId, evaluationAtIso, claim)), control: claim.control } : claim
+  // control 字段 = 本 run 实际生效的冻结控制面（takeover 时为行内 frozen，绝非当前进程 cfg）
+  console.log(JSON.stringify({ evt: 'transition_run', tenant_id: tenantId, scheduled_for: evaluationAtIso, ...result }))
   return result
 }
 

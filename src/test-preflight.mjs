@@ -26,4 +26,14 @@ console.log('PASS preflight 016 refuses with marker guidance (no deletion path)'
 await PREFLIGHTS[16](mockClient(0))
 console.log('PASS preflight 016 passes on zero legacy rows')
 
+// 022：eligible 行带未来 strength_anchor_at -> 拒绝回填（不许把污染洗成远期调度）
+await assert.rejects(
+  () => PREFLIGHTS[22](mockClient(2)),
+  (e) => e.message.includes('PREFLIGHT 022 REFUSED') && e.message.includes('FUTURE strength_anchor_at')
+    && e.message.includes('never clamp'),
+  '022 must refuse future anchors before backfill')
+console.log('PASS preflight 022 refuses future anchors')
+await PREFLIGHTS[22](mockClient(0))
+console.log('PASS preflight 022 passes on clean rows')
+
 console.log('ALL PREFLIGHT TESTS PASSED')

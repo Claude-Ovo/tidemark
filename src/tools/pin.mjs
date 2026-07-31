@@ -53,7 +53,9 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
     if (m.admission !== 'accepted') return { ok: false, error: 'only_accepted_memories_pinnable' }
     if (m.layer === 'experience' && m.exp_status === 'superseded') return { ok: false, error: 'superseded_not_pinnable' }
 
-    const now = Date.now()
+    // 单一评估时钟：DB now() 取值，materialize 计算与写入的 anchor_at 同源同值（P0-06 代码一审#2）
+    const now = (await c.query('SELECT now() AS db_now')).rows[0].db_now.getTime()
+    const txNow = new Date(now)
     // 时间不变量（结论 10）：未来锚点拒绝一切状态转换——pin 会把它 materialize 到 now、
     // unpin 会把它 reset 到 now，两者都是回拨清洗。no-op 路径一并拒，行为统一
     if (new Date(m.strength_anchor_at).getTime() > now) return { ok: false, error: 'future_timestamp_rejected' }
@@ -65,10 +67,10 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
       // pin：materialize 冻结当下 effective（结论 15：不偷偷升 1）；退出 lifecycle 队列（scheduler: pinned -> NULL）
       const eff = decay(m.strength_anchor, m.strength_anchor_at, m.half_life_hours, now)
       await c.query(
-        `UPDATE memories SET pinned=true, strength_anchor=$4, strength_anchor_at=now(), revision=revision+1,
+        `UPDATE memories SET pinned=true, strength_anchor=$4, strength_anchor_at=$5, revision=revision+1,
            next_transition_at=NULL
          WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
-        [tenant_id, agent_id, memory_id, eff])
+        [tenant_id, agent_id, memory_id, eff, txNow])
       response = { ok: true, memory_id, pinned: true, transition: true, frozen_at_strength: +eff.toFixed(6) }
     } else {
       // unpin：保 anchor、重置 anchor_at，恢复衰减并重新入队——pinned 期间攒的 progress
@@ -80,10 +82,10 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
         consolidation_baseline: m.consolidation_baseline,
       }, now)
       await c.query(
-        `UPDATE memories SET pinned=false, strength_anchor_at=now(), revision=revision+1,
+        `UPDATE memories SET pinned=false, strength_anchor_at=$5, revision=revision+1,
            next_transition_at=$4
          WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
-        [tenant_id, agent_id, memory_id, nextAt])
+        [tenant_id, agent_id, memory_id, nextAt, txNow])
       response = { ok: true, memory_id, pinned: false, transition: true, resumed_at_strength: Number(m.strength_anchor) }
     }
     await c.query(

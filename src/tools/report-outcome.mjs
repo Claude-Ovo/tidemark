@@ -96,7 +96,11 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
       return { ok: false, error: 'attempt_scope_mismatch' }
     }
 
-    const now = Date.now()
+    // 单一评估时钟：DB now() 一次取值，decay/spacing/late/future 判定与写入行的
+    // strength_anchor_at/last_rewarded_at 全部复用同一值——应用机时钟偏差不再造成
+    // canonical schedule 与真实 decay anchor 漂移（P0-06 代码一审#2）
+    const now = (await c.query('SELECT now() AS db_now')).rows[0].db_now.getTime()
+    const txNow = new Date(now)
     const items = []
     const seenMemory = new Set()          // 同 outcome 按 memory_id 去重（SPEC §1.4）
     const receiptCache = new Map()
@@ -187,11 +191,11 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
             half_life_hours: newHalfLife, credited_success_count: newCount, consolidation_baseline: newBaseline,
           }, now)
           await c.query(
-            `UPDATE memories SET strength_anchor=$4, strength_anchor_at=now(), last_rewarded_at=now(),
+            `UPDATE memories SET strength_anchor=$4, strength_anchor_at=$9, last_rewarded_at=$9,
                credited_success_count = credited_success_count + 1, revision = revision + 1,
                state = $5, half_life_hours = $6, consolidation_baseline = $7, next_transition_at = $8
              WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
-            [tenant_id, agent_id, a.memory_id, newAnchor, revive ? 'fresh' : m.state, newHalfLife, newBaseline, nextAt])
+            [tenant_id, agent_id, a.memory_id, newAnchor, revive ? 'fresh' : m.state, newHalfLife, newBaseline, nextAt, txNow])
           item.applied = true
           item.plasticity = { effective_before: +eff.toFixed(6), spacing_factor: +spacing.toFixed(6), reinforcement_gain: +gain.toFixed(6), strength_anchor_after: +newAnchor.toFixed(6), revived: revive }
         }
@@ -228,11 +232,11 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
             consolidation_baseline: m.consolidation_baseline,
           }, now)
           await c.query(
-            `UPDATE memories SET strength_anchor=$4, strength_anchor_at=now(),
+            `UPDATE memories SET strength_anchor=$4, strength_anchor_at=$6,
                evidenced_blame_count = evidenced_blame_count + 1, revision = revision + 1,
                next_transition_at = $5
              WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,     // last_rewarded_at 不动：惩罚不重置 spacing
-            [tenant_id, agent_id, a.memory_id, newAnchor, nextAt])
+            [tenant_id, agent_id, a.memory_id, newAnchor, nextAt, txNow])
           item.applied = true
           item.plasticity = { effective_before: +eff.toFixed(6), strength_anchor_after: +newAnchor.toFixed(6) }
         }
