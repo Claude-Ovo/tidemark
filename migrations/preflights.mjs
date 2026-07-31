@@ -35,6 +35,26 @@ export const PREFLIGHTS = {
       )
     }
   },
+  // 022 backfills the lifecycle due-clock from strength_anchor_at. A future
+  // anchor on an eligible row would be laundered into a "legitimate" far-future
+  // schedule -- conclusion 10 forbids clamping or hiding it. Fail closed.
+  22: async (client) => {
+    const { rows } = await client.query(
+      `SELECT count(*)::INT4 AS n FROM public.memories
+       WHERE admission = 'accepted' AND NOT pinned AND state <> 'faded'
+         AND next_transition_at IS NULL AND strength_anchor_at > now()`,
+    )
+    const n = rows[0].n
+    if (n > 0) {
+      throw new Error(
+        `PREFLIGHT 022 REFUSED: ${n} eligible row(s) carry a FUTURE strength_anchor_at; backfilling ` +
+        'would launder the contamination into a far-future schedule (conclusion 10: never clamp). ' +
+        'Investigate how the future timestamps were written, repair them explicitly (e.g. restore from ' +
+        'a known-good anchor or re-anchor via an audited materialize), then re-run migrate. Do not ' +
+        'rewrite timestamps blindly and do not exclude the rows just to make the migration pass.',
+      )
+    }
+  },
   // Defense in depth: reaching 016 with NULL rows means 014 already ran (or was
   // bypassed) and the tool_requests evidence is gone. Mark, never delete.
   16: async (client) => {

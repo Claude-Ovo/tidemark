@@ -9,6 +9,7 @@ import { createHmac } from 'node:crypto'
 import { inSerializableTx } from '../lib/db.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
+import { scheduleNext } from '../lib/scheduler.mjs'
 
 const HMAC_KEY = resolveHmacKey(process.env)
 if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
@@ -44,7 +45,8 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
     }
 
     const m = (await c.query(
-      `SELECT admission, state, exp_status, layer, pinned, strength_anchor, strength_anchor_at, half_life_hours
+      `SELECT admission, state, exp_status, layer, pinned, strength_anchor, strength_anchor_at, half_life_hours,
+              credited_success_count, consolidation_baseline
        FROM memories WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
       [tenant_id, agent_id, memory_id])).rows[0]
     if (!m) return { ok: false, error: 'memory_not_found_in_scope' }
@@ -60,19 +62,28 @@ export const pinTool = async ({ principal, memory_id, pinned, reason, request_id
       // 幂等 set：状态已一致，零副作用
       response = { ok: true, memory_id, pinned, transition: false, strength_anchor: Number(m.strength_anchor) }
     } else if (pinned) {
-      // pin：materialize 冻结当下 effective（结论 15：不偷偷升 1）
+      // pin：materialize 冻结当下 effective（结论 15：不偷偷升 1）；退出 lifecycle 队列（scheduler: pinned -> NULL）
       const eff = decay(m.strength_anchor, m.strength_anchor_at, m.half_life_hours, now)
       await c.query(
-        `UPDATE memories SET pinned=true, strength_anchor=$4, strength_anchor_at=now(), revision=revision+1
+        `UPDATE memories SET pinned=true, strength_anchor=$4, strength_anchor_at=now(), revision=revision+1,
+           next_transition_at=NULL
          WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
         [tenant_id, agent_id, memory_id, eff])
       response = { ok: true, memory_id, pinned: true, transition: true, frozen_at_strength: +eff.toFixed(6) }
     } else {
-      // unpin：保 anchor、重置 anchor_at，恢复衰减
+      // unpin：保 anchor、重置 anchor_at，恢复衰减并重新入队——pinned 期间攒的 progress
+      // 若已达标，scheduler 会立即 due（修 Codex 方案审 #4 的漏资格）
+      const nextAt = scheduleNext({
+        admission: m.admission, pinned: false, state: m.state,
+        strength_anchor: m.strength_anchor, strength_anchor_at: new Date(now),
+        half_life_hours: m.half_life_hours, credited_success_count: m.credited_success_count,
+        consolidation_baseline: m.consolidation_baseline,
+      }, now)
       await c.query(
-        `UPDATE memories SET pinned=false, strength_anchor_at=now(), revision=revision+1
+        `UPDATE memories SET pinned=false, strength_anchor_at=now(), revision=revision+1,
+           next_transition_at=$4
          WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
-        [tenant_id, agent_id, memory_id])
+        [tenant_id, agent_id, memory_id, nextAt])
       response = { ok: true, memory_id, pinned: false, transition: true, resumed_at_strength: Number(m.strength_anchor) }
     }
     await c.query(

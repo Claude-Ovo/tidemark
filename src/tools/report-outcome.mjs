@@ -9,6 +9,7 @@ import { createHmac } from 'node:crypto'
 import { inSerializableTx } from '../lib/db.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
+import { scheduleNext } from '../lib/scheduler.mjs'
 
 const HMAC_KEY = resolveHmacKey(process.env)
 if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
@@ -152,7 +153,7 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
       // 4) 塑性（行仍在才施加；删除在途 -> memory_deleted，其余照常）
       const m = (await c.query(
         `SELECT layer, state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
-                credited_success_count, evidenced_blame_count, exp_status
+                credited_success_count, evidenced_blame_count, consolidation_baseline, exp_status
          FROM memories WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
         [tenant_id, agent_id, a.memory_id])).rows[0]
       if (!m) { item.reason = 'memory_deleted'; continue }
@@ -176,12 +177,21 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
           const revive = m.state === 'faded'
           // faded -> fresh 唯一复活路径：half_life 重置回 fresh 基础值（consolidation 重新挣，SPEC §2.4）
           const newHalfLife = revive ? OUTCOME_CFG.base_half_life[m.layer] * (1 + Number(m.importance)) : Number(m.half_life_hours)
+          // canonical scheduler（P0-06）：revive 时 baseline=复活后 count——复活那次 credited 不计进度，
+          // 需 hits 次全新 credited 才再固化（严格"重新挣"）；progress 达标则 next=now 唤醒 nightly
+          const newCount = Number(m.credited_success_count) + 1
+          const newBaseline = revive ? newCount : Number(m.consolidation_baseline)
+          const nextAt = scheduleNext({
+            admission: 'accepted', pinned: false, state: revive ? 'fresh' : m.state,
+            strength_anchor: newAnchor, strength_anchor_at: new Date(now),
+            half_life_hours: newHalfLife, credited_success_count: newCount, consolidation_baseline: newBaseline,
+          }, now)
           await c.query(
             `UPDATE memories SET strength_anchor=$4, strength_anchor_at=now(), last_rewarded_at=now(),
                credited_success_count = credited_success_count + 1, revision = revision + 1,
-               state = $5, half_life_hours = $6
+               state = $5, half_life_hours = $6, consolidation_baseline = $7, next_transition_at = $8
              WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,
-            [tenant_id, agent_id, a.memory_id, newAnchor, revive ? 'fresh' : m.state, newHalfLife])
+            [tenant_id, agent_id, a.memory_id, newAnchor, revive ? 'fresh' : m.state, newHalfLife, newBaseline, nextAt])
           item.applied = true
           item.plasticity = { effective_before: +eff.toFixed(6), spacing_factor: +spacing.toFixed(6), reinforcement_gain: +gain.toFixed(6), strength_anchor_after: +newAnchor.toFixed(6), revived: revive }
         }
@@ -210,11 +220,19 @@ export const reportOutcomeTool = async ({ principal, outcome_request_id, episode
         } else {
           const eff = decay(m.strength_anchor, m.strength_anchor_at, m.half_life_hours, now)
           const newAnchor = eff * OUTCOME_CFG.blame_factor
+          // scheduler 先判 progress 再排 fade crossing——blamed 不会误关已达标的 consolidate 唤醒
+          const nextAt = scheduleNext({
+            admission: 'accepted', pinned: false, state: m.state,
+            strength_anchor: newAnchor, strength_anchor_at: new Date(now),
+            half_life_hours: m.half_life_hours, credited_success_count: m.credited_success_count,
+            consolidation_baseline: m.consolidation_baseline,
+          }, now)
           await c.query(
             `UPDATE memories SET strength_anchor=$4, strength_anchor_at=now(),
-               evidenced_blame_count = evidenced_blame_count + 1, revision = revision + 1
+               evidenced_blame_count = evidenced_blame_count + 1, revision = revision + 1,
+               next_transition_at = $5
              WHERE tenant_id=$1 AND agent_id=$2 AND memory_id=$3`,     // last_rewarded_at 不动：惩罚不重置 spacing
-            [tenant_id, agent_id, a.memory_id, newAnchor])
+            [tenant_id, agent_id, a.memory_id, newAnchor, nextAt])
           item.applied = true
           item.plasticity = { effective_before: +eff.toFixed(6), strength_anchor_after: +newAnchor.toFixed(6) }
         }

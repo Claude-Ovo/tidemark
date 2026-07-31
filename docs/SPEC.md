@@ -1,5 +1,6 @@
-# SPEC v1.2.3 — Tidemark（会遗忘的记忆）
+# SPEC v1.2.4 — Tidemark（会遗忘的记忆）
 
+> v1.2.4（2026-07-31，P0-06 生命周期调度，Codex 两轮方案审驱动）：状态机边界统一 `<=`（消除阈值等值热循环）；consolidation progress 独立于 lifetime count（`consolidation_baseline`，migration 020/021，"复活后重新挣"可执行化）；`next_transition_at` canonical scheduler 收口（结论 39 债务清偿，migration 022 回填 + PREFLIGHTS[22]）；nightly_runs 增 `control_config`（023，takeover 只读冻结控制面）；transition job 契约=evaluation_at=scheduled_for 进 fingerprint、lease 用墙钟、fencing generation token、no-work 不落 run、整批 stale 零写入。
 > v1.2.3（2026-07-31，P0-05 实现修正同步，Codex 二审/三审驱动）：outcomes 终态唯一改 per `(tenant, agent, attempt)`（migrations 018/019）；幂等归属 outcomes 本表（payload_hmac/response_json 两列，013/016/017）；`max_attributions=32` 冻结；attempt ledger 锚降为一致性检测。仅同步已实现并经交叉审查的行为，无新增 feature。
 
 > **Tidemark — memory that ebbs, and proves what the tide left.**（2026-07-29 Ovo定名）
@@ -43,6 +44,7 @@ CREATE TABLE memories (
   last_rewarded_at   TIMESTAMPTZ NOT NULL,                 -- 创建时 = created_at
   half_life_hours    FLOAT NOT NULL CHECK (half_life_hours > 0),
   credited_success_count INT NOT NULL DEFAULT 0 CHECK (credited_success_count >= 0),
+  consolidation_baseline INT8 NOT NULL DEFAULT 0,  -- v1.2.4：本轮固化进度基线（migration 020），lifetime count 永不重置
   evidenced_blame_count  INT NOT NULL DEFAULT 0 CHECK (evidenced_blame_count >= 0),
   revision       INT8 NOT NULL DEFAULT 0,
   next_transition_at TIMESTAMPTZ,
@@ -238,12 +240,16 @@ recall 不改 memory 行。事务 B（§4）内，逐条去重后的归因：
 - faded → fresh 复活：先 materialize，再把该列**重置回 fresh 基础值**（丢失 consolidation，重新挣）
 合法域：`half_life>0, cooldown>0, 0<=base_gain<=1, 0<blame_factor<=1, multiplier>=1`。
 
+**consolidation progress（v1.2.4）**：`progress = credited_success_count - consolidation_baseline`（lifetime count 只增不减，utility 公式不变）。baseline 更新点：创建=0；nightly/dream fade 时=当前 count（该轮进度清零，fade 胜 consolidate 同此）；事务 B revive 时=复活后 count（复活那次 credited 不计进度——严格"重新挣"，需 hits 次全新 credited）；consolidate 落袋时=当前 count。
+
+**next_transition_at（v1.2.4，结论 39 收口）**：语义为"下次值得 nightly 检查本行的时刻"——调度提示非转换承诺，领取后一律 revalidate。canonical scheduler 三分支（全写点唯一口径，src/lib/scheduler.mjs）：`admission!='accepted' OR pinned OR faded -> NULL`；`fresh 且 progress>=hits -> 立即 due`；否则解析解 `strength_anchor_at + half_life * log2(anchor/fade_threshold)`（anchor<=threshold 时立即 due；解出的过去时刻保留原值）。写点矩阵：remember 初始化 / credited·blamed·revive 重排 / pin 置 NULL / unpin 重排（攒满 progress 则立即 due）/ nightly 各分支重排——nightly 仅重排也 `revision+1`（next 影响 eligibility）。首版常数：`fade_threshold=0.15, consolidate_hits=3, multiplier=3.0, batch=200, lease=10m, max_attempts=3`。
+
 ### 2.5 状态机
 
 ```
-fresh --(effective < fade_threshold 且非 pinned, nightly 通用 transition)--> faded
-fresh --(credited_success_count >= consolidate_hits, nightly)--> consolidated   -- 迁移时 materialize + 乘 multiplier
-consolidated --(effective < fade_threshold, nightly)--> faded
+fresh --(effective <= fade_threshold 且非 pinned, nightly 通用 transition)--> faded
+fresh --(credited_success_count - consolidation_baseline >= consolidate_hits, nightly)--> consolidated   -- 迁移时 materialize + 乘 multiplier；fade 优先于 consolidate（衰穿的行不配固化）
+consolidated --(effective <= fade_threshold, nightly)--> faded
 faded --(credited outcome, 事务 B)--> fresh
 dream 专属：eligible fresh 低权重碎片 --(dream 事务)--> faded（见 §6）
 其余迁移非法：拒绝 + 记错误

@@ -8,11 +8,12 @@ import { canonicalDigest, toVectorLiteral } from '../lib/vector-canonical.mjs'
 
 // fail-closed：非空 key 判断经 config.mjs（.env.example 复制出的空串不算已配置）；key 永不落日志
 import { resolveHmacKey } from '../lib/config.mjs'
+import { TRANSITION_CFG } from '../lib/scheduler.mjs'
 const HMAC_KEY = resolveHmacKey(process.env)
 if (!HMAC_KEY) throw new Error('TIDEMARK_HMAC_KEY not set to a non-empty value (or export TIDEMARK_DEV_INSECURE=1 for local dev only)')
 const BASE_HALF_LIFE_HOURS = { event: 72, experience: 2160 }
-// TODO(P0-06 显式收口，Codex 裁定)：next_transition_at 初始化公式属 P0-06——
-// 届时必须 (a) remember 落行时初始化 (b) 回填此前的 NULL 行；两者都进 P0-06 验收测试。
+// P0-06 已收口（结论 39 债务清偿）：remember 落行即初始化 next_transition_at（下方 INSERT），
+// 存量 NULL 行由 migration 022 回填，公式同 src/lib/scheduler.mjs 的 canonical 三分支。
 
 const payloadHmac = (payload) =>
   createHmac('sha256', HMAC_KEY).update(JSON.stringify(payload)).digest()
@@ -72,16 +73,22 @@ export const rememberTool = async ({ principal, content, kind, episode_id, reque
       throw Object.assign(new Error('concurrent_first_writer'), { code: 'CONCURRENT_WINNER' })
     }
     if (gate.admission !== 'rejected') {
+      // next_transition_at：canonical scheduler 的新行分支（P0-06）。新行 anchor=1.0/progress=0，
+      // 唯一变量是 admission——quarantined 不进 lifecycle 队列（走 quarantine_expires_at 清理）。
+      // 与 anchor_at 同用 DB now()，SQL 表达式即 scheduler 解析解（与 JS 版一致性由集成测试锁定）
       await c.query(
         `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, kind, episode_id, content, embedding,
            source, admission, quarantine_expires_at, importance, strength_anchor, strength_anchor_at,
-           last_rewarded_at, half_life_hours)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, 1.0, now(), now(), $13)`,
+           last_rewarded_at, half_life_hours, next_transition_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, 1.0, now(), now(), $13,
+           CASE WHEN $10 = 'accepted'
+                THEN now() + ($13 * (ln(1.0 / $14::FLOAT8) / ln(2::FLOAT8))) * INTERVAL '1 hour'
+                ELSE NULL END)`,
         [tenant_id, agent_id, memory_id, layer, kind ?? null, episode_id, gate.canonical,
          f32 ? toVectorLiteral(f32) : null,
          source, gate.admission,
          gate.admission === 'quarantined' ? new Date(Date.now() + QUARANTINE_TTL_HOURS * 3600e3) : null,
-         imp, BASE_HALF_LIFE_HOURS[layer] * (1 + imp)])
+         imp, BASE_HALF_LIFE_HOURS[layer] * (1 + imp), TRANSITION_CFG.fade_threshold])
     }
     console.log(JSON.stringify({ evt: 'remember', request_id, memory_id: response.memory_id, tenant_id, agent_id, admission: gate.admission }))
     return response

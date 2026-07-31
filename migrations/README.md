@@ -25,6 +25,10 @@ For legacy outcomes settled by the pre-013 implementation, the idempotency evide
 
 Historical note: 016's in-file comment predates this preflight mechanism and still calls itself a "no-op guard". Numbered migrations are immutable (checksummed), so the file text stays; this section and `preflights.mjs` supersede that description. Integration regression: `npm run test:migrate-integration` replays the real upgrade (012-state + legacy row -> refused at 014 with evidence intact on both sides -> backfill -> full green).
 
+## P0-06 lifecycle cutover (migrations 020-023)
+
+Maintenance-window order -- "code in the repo" is NOT "writers switched"; the demo runs services manually, so the honest sequence is: stop writers/nightly -> `020` (add `consolidation_baseline`) -> `021` (baseline = lifetime count: every pre-P0-06 row re-earns consolidation from zero) -> `022` (backfill `next_transition_at` with the canonical three-branch formula; `PREFLIGHTS[22]` refuses eligible rows with future `strength_anchor_at` -- conclusion 10, never launder) -> `023` (`nightly_runs.control_config`, frozen control plane per run) -> deploy and start the scheduler-wired writers -> enable `npm run nightly -- --scheduled-for <ts>`. All four are idempotent and re-runnable.
+
 Each numbered file contains exactly one idempotent schema-change statement. CockroachDB does not guarantee atomic rollback for multiple schema changes in one explicit transaction, so the runner applies one autocommit DDL statement and then records its LF-normalized SHA-256 in `schema_migrations`. A disconnect between DDL and ledger insert is repaired safely on rerun. An applied filename/checksum mismatch is fatal.
 
 Numbered migration files are immutable once released. Add a new numbered migration instead of editing an existing file. Before any manual recovery in the narrow DDL-applied/ledger-missing window, first confirm the `schema_migrations` ledger state.
