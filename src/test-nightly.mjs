@@ -444,32 +444,32 @@ try {
     console.log('PASS N4 reflection exception cannot block the deterministic lifecycle')
   }
 
-  // ===== R12 cursor 单调不变量（round-5 #1）：双 claim 反序提交，cursor 永不后退 =====
+  // ===== R12 cursor 单调（round-6 修正为真区分力反例）：A 只终结 F1、B 终结 F2，
+  // 反序提交后 cursor 必须停在 F2——旧的无条件 UPSERT 会被 A 写回 F1（Codex 原复现） =====
   {
     const T = t('r12'), A = T + '-a'
-    // 两条已过窗 failure（无 success）：F1 更早、F2 更晚
-    await q(
+    const mkF = (orid, offH) => q(
       `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json, reported_at)
-       SELECT $1, 'r12-f' || i, $2, 'ep', 'task-' || i, 'att-' || i, 'failure', '[]', false, $3, '{}',
-              now() - INTERVAL '100 hours' + (i || ' hours')::INTERVAL
-       FROM generate_series(1, 2) AS g(i)`,
-      [T, A, Buffer.from('h')])
-    const sEarly = new Date(Date.now() - 60_000).toISOString()   // A：较早 evaluation（相对窗口只判到 F1..F2 同样过窗——两 run 都可推进）
+       VALUES ($1,$2,$3,'ep',$2,$2,'failure','[]',false,$4,'{}', now()+($5::FLOAT8||' hours')::INTERVAL)`,
+      [T, orid, A, Buffer.from('h'), offH])
+    await mkF('r12-f1', -100)   // 两个评估时刻下都已过窗（expired）
+    await mkF('r12-f2', -73)    // 窗关于 -1h：sEarly(-2h) 时仍 waiting，sLate(now) 时 expired
+    const sEarly = new Date(Date.now() - 2 * HOUR).toISOString()
     const sLate = new Date().toISOString()
-    const claimA = await claimReflection(T, sEarly, REFLECT_CFG)
+    const claimA = await claimReflection(T, sEarly, REFLECT_CFG)   // A：F1 expired、F2 waiting -> cursor 只到 F1
     assert.equal(claimA.outcome, 'claimed', JSON.stringify(claimA))
-    const claimB = await claimReflection(T, sLate, REFLECT_CFG)
+    assert.equal(claimA.sources.length, 0)
+    const claimB = await claimReflection(T, sLate, REFLECT_CFG)    // B：F1/F2 都 expired -> cursor 到 F2
     assert.equal(claimB.outcome, 'claimed', JSON.stringify(claimB))
-    // 反序提交：B（更晚、推进更远）先 commit，A 后 commit——cursor 必须停在 max
-    const exB = await executeReflection(T, sLate, claimB)
+    const exB = await executeReflection(T, sLate, claimB)          // 反序：更远的 B 先提交
     assert.equal(exB.outcome, 'completed', JSON.stringify(exB))
-    const curAfterB = (await q('SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1', [T])).rows[0].last_outcome_request_id
-    const exA = await executeReflection(T, sEarly, claimA)
+    const afterB = (await q('SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1', [T])).rows[0].last_outcome_request_id
+    assert.equal(afterB, 'r12-f2')
+    const exA = await executeReflection(T, sEarly, claimA)         // 落后的 A 后提交：必须 no-op
     assert.equal(exA.outcome, 'completed', JSON.stringify(exA))
-    const curAfterA = (await q('SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1', [T])).rows[0].last_outcome_request_id
-    assert.equal(curAfterA, curAfterB, `cursor NEVER regresses on out-of-order commit: afterB=${curAfterB} afterA=${curAfterA}`)
-    assert.equal(curAfterA, 'r12-f2', 'cursor rests at the max tuple')
-    console.log('PASS R12 out-of-order commits cannot regress the cursor')
+    const afterA = (await q('SELECT last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1', [T])).rows[0].last_outcome_request_id
+    assert.equal(afterA, 'r12-f2', `stale run must NOT regress the cursor: afterB=${afterB} afterA=${afterA}`)
+    console.log('PASS R12 out-of-order commits cannot regress the cursor (discriminating repro)')
   }
 
   // ===== R13 首次 seed 跳过 pre-migration 积压（round-5 #2）：300 条窗外历史 + 当前合法 pair 首跑当晚配上 =====
@@ -486,6 +486,24 @@ try {
     assert.equal(r.outcome, 'completed', JSON.stringify(r))
     assert.equal(r.counts.pairs, 1, `first run seeds past 300-row backlog and pairs on NIGHT ONE: ${JSON.stringify(r.counts)}`)
     console.log('PASS R13 initial cursor seed skips pre-migration backlog entirely')
+  }
+
+  // ===== R13b 旧 cursor 升级（round-6 #1）：round-4 遗留的 epoch cursor + 300 条窗外积压，
+  // seed 以 tuple-max 抬升，首跑当晚配上合法 pair =====
+  {
+    const T = t('r13b'), A = T + '-a'
+    await q(`INSERT INTO reflection_cursor (tenant_id, last_reported_at, last_outcome_request_id) VALUES ($1, '1970-01-01', '')`, [T])
+    await q(
+      `INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json, reported_at)
+       SELECT $1, gen_random_uuid()::STRING, $2, 'ep-old', 'task-o-' || i, 'att-o-' || i, 'failure', '[]', false, $3, '{}',
+              now() - INTERVAL '2000 hours' + (i || ' minutes')::INTERVAL
+       FROM generate_series(1, 300) AS g(i)`,
+      [T, A, Buffer.from('old')])
+    await mkPair(T, A, { failOffH: -2, succOffH: -1 })
+    const r = await runReflection({ tenantId: T, scheduledFor: nowIso() })
+    assert.equal(r.outcome, 'completed', JSON.stringify(r))
+    assert.equal(r.counts.pairs, 1, `stale epoch cursor upgraded by seed, pair found NIGHT ONE: ${JSON.stringify(r.counts)}`)
+    console.log('PASS R13b pre-existing epoch cursor is lifted by the seed, no replay')
   }
 
   // ===== N4b unclassified 异常真实分阶段（round-5 #5 尾款）：run 落 retryable 可 takeover =====
@@ -506,7 +524,7 @@ try {
     console.log('PASS N4b unclassified exception leaves the run takeover-ready, retry completes')
   }
 
-  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R13 N1-N4b)')
+  console.log('ALL P0-07 NIGHTLY ASSERTIONS PASSED (D1-D7 R1-R13b N1-N4b)')
 } catch (e) {
   primaryError = e
 } finally {

@@ -312,7 +312,7 @@ forget/export/unpin：owner/admin HTTP 面。`reflect` 无公共 tool。
 
 **transition**（P0-06 契约不变）：canonical scheduler、边界 `<=`、consolidation baseline、set-based 批写、future anchor 停机。
 
-**验收清单（acceptance matrix，实测套件 `test:nightly` 22 场景 + `test:transition` 19 场景）**：dream 选源边界/截断稳定/幂等/第 2 簇失败整批零写/跨 agent 不串/真实 stale-reacquire；reflection 最早 success 配对/跨夜窗口边界/exactly-once 跨晚/anchors 抗 flood/oversized 终态跳过/双层 dedup 且 ledger 永不跨 agent/server 封口无 attempt_end provenance/真实 ledger race 整批 stale/DB-candidate+batch-twin 组合全指 winner/201 无匹配 failure 不饥饿/envelope 字节约束真实输入；orchestrator running-dream 短路零抢占/reflection 受阻不饿 lifecycle/reflection **异常**同样不阻断（try-catch 结构化 crashed）/全链 completed；cursor：consumed 越过后次晚静默/201 过窗行两晚内推进完毕。
+**验收清单（acceptance matrix，实测套件 `test:nightly` 25 场景 + `test:transition` 19 场景）**：dream 选源边界/截断稳定/幂等/第 2 簇失败整批零写/跨 agent 不串/真实 stale-reacquire；reflection 最早 success 配对/跨夜窗口边界/exactly-once 跨晚/anchors 抗 flood/oversized 终态跳过/双层 dedup 且 ledger 永不跨 agent/server 封口无 attempt_end provenance/真实 ledger race 整批 stale/DB-candidate+batch-twin 组合全指 winner/201 无匹配 failure 不饥饿/envelope 字节约束真实输入；orchestrator running-dream 短路零抢占/reflection 受阻不饿 lifecycle/reflection **异常**同样不阻断（try-catch 结构化 crashed）/全链 completed；cursor：consumed 越过后次晚静默/201 过窗行两晚内推进完毕。
 
 幂等/lease/stale/batch 全按结论 13/16/17。Lambda 连接池 handler 外复用 max=1；EventBridge retry+DLQ（P0-09 接线）。
 

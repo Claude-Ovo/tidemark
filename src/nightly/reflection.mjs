@@ -111,16 +111,22 @@ const mkSelectAndSnapshot = (tenantId, cfg, pipelineVersion) => async (c, evalIs
   // 容量 SLA（SPEC §6）：每 tenant 窗内未配对 failure 须 < scan(200)，超出属运维事件。
   // cursor 比较全程留在 SQL 域（微秒精度）：JS Date 只有毫秒，读回再传回会把 cursor
   // 压小一截、行反复扫到自己。JS 只读 cursor 作 snapshot 审计记录，不参与比较。
-  // 首次 seed（round-5 #2）：cursor 不存在时，从 retention 窗外的最后一行 failure 起步——
-  // migration 前的历史积压被一步跳过（retention 由此重新成为有效语义参数），窗内行保留给扫描。
-  // 幂等 DO NOTHING；无窗外历史则不插，epoch 起点此时不含积压、安全。
+  // retention seed（round-5 #2 + round-6 #1）：每次 claim 都以 tuple-max 语义把 cursor
+  // 抬到"retention 窗外最后一行"——不仅覆盖首次接触，也升级 round-4 遗留的 epoch/落后
+  // cursor（它们同样不许按 200/晚回放 migration 前历史）。当前 cursor 已更远则 no-op；
+  // 与推进用同一单调不变量，seed 永不使 cursor 后退。
   await c.query(
     `INSERT INTO reflection_cursor (tenant_id, last_reported_at, last_outcome_request_id, updated_at)
      SELECT $1, reported_at, outcome_request_id, now() FROM outcomes
      WHERE tenant_id=$1 AND status='failure'
        AND reported_at < $2::TIMESTAMPTZ - ($3::FLOAT8 * INTERVAL '1 hour')
      ORDER BY reported_at DESC, outcome_request_id DESC LIMIT 1
-     ON CONFLICT (tenant_id) DO NOTHING`,
+     ON CONFLICT (tenant_id) DO UPDATE SET
+       last_reported_at=excluded.last_reported_at,
+       last_outcome_request_id=excluded.last_outcome_request_id,
+       updated_at=now()
+     WHERE (excluded.last_reported_at, excluded.last_outcome_request_id)
+         > (reflection_cursor.last_reported_at, reflection_cursor.last_outcome_request_id)`,
     [tenantId, evalIso, REFLECT_CFG.retention_hours])
   const cur = (await c.query(
     'SELECT last_reported_at, last_outcome_request_id FROM reflection_cursor WHERE tenant_id=$1',
