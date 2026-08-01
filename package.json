@@ -29,10 +29,12 @@
   "type": "commonjs",
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1097.0",
+    "@aws-sdk/client-secrets-manager": "^3.1101.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "pg": "^8.22.0",
+    "serverless-http": "^4.0.0",
     "zod": "^4.4.3"
   }
 }

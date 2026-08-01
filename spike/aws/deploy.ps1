@@ -27,7 +27,9 @@ npm ci --omit=dev | Out-Null
 Assert-NativeSuccess "npm ci"
 if ($ResetSpikeTable) { node --env-file=$envFile migrate.mjs --reset } else { node --env-file=$envFile migrate.mjs }
 Assert-NativeSuccess "migrate (schema mismatch? try -ResetSpikeTable)"
-Compress-Archive -Path handler.mjs,vector-canonical.mjs,package.json,node_modules -DestinationPath spike.zip -Force
+# vector-canonical implementation moved to src/lib in P0-09; pack it into the zip ROOT by path
+# (Compress-Archive flattens each item to its basename) so handler's './vector-canonical.mjs' resolves.
+Compress-Archive -Path handler.mjs,..\..\src\lib\vector-canonical.mjs,package.json,node_modules -DestinationPath spike.zip -Force
 
 # Credential never enters argv: env config goes through a BOM-less JSON file, deleted afterwards.
 # TODO(P0-09): switch to Secrets Manager ARN so function config no longer holds plaintext.

@@ -1,23 +1,4 @@
-// 向量 canonical 化的唯一实现——handler 与测试共同 import，杜绝复制品分叉
-import { createHash } from 'node:crypto'
-
-export const DIMS = 512
-
-export const toF32 = (vec) => {
-  if (!Array.isArray(vec) && !(vec instanceof Float32Array)) throw new Error('vector must be array')
-  if (vec.length !== DIMS) throw new Error(`embedding length ${vec.length} != ${DIMS}`)
-  const f = new Float32Array(DIMS)
-  for (let i = 0; i < DIMS; i++) {
-    const v = Math.fround(vec[i])
-    if (!Number.isFinite(v)) throw new Error(`non-finite component at ${i}`)
-    f[i] = v
-  }
-  return f
-}
-
-export const canonicalDigest = (f32) =>
-  createHash('sha256').update(Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength)).digest('hex')
-
-export const toVectorLiteral = (f32) => '[' + Array.from(f32, v => String(v)).join(',') + ']'
-
-export const parseVector = (s) => toF32(s.replace(/^\[|\]$/g, '').split(',').map(Number))
+// 单一实现原则不变，方向自 P0-09 翻转：实现体在 src/lib/vector-canonical.mjs（主服务
+// 部署树），本文件只转发。spike 打包时 deploy.ps1 直接把 src/lib 的实现文件收进 zip 根
+//（Compress-Archive 按 basename 落位），线上 handler 的 './vector-canonical.mjs' 照常解析。
+export * from '../../src/lib/vector-canonical.mjs'

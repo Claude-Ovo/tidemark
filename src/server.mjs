@@ -1,5 +1,8 @@
 // Tidemark Memory MCP（P0-03 纵切：remember + admission + 幂等）
 // 运行: node --env-file=.env src/server.mjs  （仓库根执行；EMBED_PROVIDER=stub 本地开发）
+// P0-09：本文件导出 app（Lambda handler 经 serverless-http 复用同一实例）；
+// 仅作为主模块直跑时才 listen——两条运行路径共享全部路由与鉴权语义
+import { pathToFileURL } from 'node:url'
 import express from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -12,13 +15,31 @@ import { pinTool } from './tools/pin.mjs'
 import { forgetMemory } from './admin/forget.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
-// spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
+// 认证上下文（P0-09 接真实密钥源）：TIDEMARK_AGENT_KEYS（Secrets Manager 注入的 JSON）
+// 存在时【整表取代】内置 dev 映射——生产环境不保留任何硬编码可猜 key；缺失时回退 dev 表
+// 供本地开发与测试（与既有套件兼容）。表结构冻结：key -> { tenant_id, agent_id, capabilities[] }
 // capabilities：pin 是能力位不是默认权力（冻结 §12.3）——second-agent 故意不带，作越权测试对照
-const AUTH_MAP = {
+const DEV_AUTH_MAP = {
   'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent', capabilities: ['memory:pin'] },
   'spike-second-key': { tenant_id: 'demo-tenant', agent_id: 'second-agent', capabilities: [] },
   // third-agent 有 pin 能力位：专测"capability 过了、agent scope 也必须过"（两道门独立）
   'spike-third-key':  { tenant_id: 'demo-tenant', agent_id: 'third-agent', capabilities: ['memory:pin'] },
+}
+let authMapCache = null
+const resolveAuthMap = () => {
+  if (authMapCache) return authMapCache
+  const raw = process.env.TIDEMARK_AGENT_KEYS
+  if (!raw) return (authMapCache = DEV_AUTH_MAP)
+  // fail-closed：配置了生产密钥表但形状非法 -> 抛出（请求得 5xx），绝不静默回退 dev 表
+  const parsed = JSON.parse(raw)
+  for (const [k, p] of Object.entries(parsed)) {
+    if (typeof p?.tenant_id !== 'string' || !p.tenant_id || typeof p?.agent_id !== 'string' || !p.agent_id
+        || !Array.isArray(p.capabilities) || p.capabilities.some(c => typeof c !== 'string')) {
+      throw new Error(`TIDEMARK_AGENT_KEYS entry invalid for key ${k.slice(0, 4)}***`)
+    }
+  }
+  if (Object.keys(parsed).length === 0) throw new Error('TIDEMARK_AGENT_KEYS must not be empty')
+  return (authMapCache = parsed)
 }
 
 // 工具级瞬断韧性：底层事务各自重试 5 次后仍失败（serverless 集群连续掐连接）时，
@@ -62,7 +83,7 @@ app.post('/mcp', async (req, res) => {
     req.rawHeaders = Object.entries(req.headers).flatMap(([k, v]) =>
       Array.isArray(v) ? v.flatMap(x => [k, x]) : [k, String(v)])
   }
-  const principal = AUTH_MAP[req.headers['x-tidemark-auth']] ?? null
+  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
   const asResult = (body) => ({ content: [{ type: 'text', text: JSON.stringify(body) }], isError: body.ok === false })
 
   const server = new McpServer({ name: 'tidemark-memory', version: '0.1.0' })
@@ -103,5 +124,9 @@ app.post('/mcp', async (req, res) => {
   }
 })
 
-const port = Number(process.env.PORT || 3901)
-app.listen(port, () => console.log(`tidemark-memory-mcp listening :${port}`))
+export { app }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const port = Number(process.env.PORT || 3901)
+  app.listen(port, () => console.log(`tidemark-memory-mcp listening :${port}`))
+}
