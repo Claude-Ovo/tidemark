@@ -15,6 +15,31 @@ import { inSerializableTx } from '../lib/db.mjs'
 const RX_SLUG = /^[a-z0-9_.-]{1,64}$/i
 const RX_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// 撤销重建授权（round-1 P0）：ids 既作为"被删 derived"撤销其自身 queue，也作为
+// "已死源"从其他 active queue 的 remaining_source_memory_ids 中剪除；剪空即 abandoned。
+// P2 worker 启用前须冻结取消/fencing 语义（processing 行在此一并 abandoned——当前无 worker，
+// 无并发提交窗口；worker 上线时其提交必须 CAS status='processing' 才能写，abandoned 即失败）。
+const revokeRebuildAuthorizations = async (c, tenantId, explicitIds, allDeadIds) => {
+  // (a) 只有【显式点名】的对象撤销自身授权——级联死者的 queue 是合法登记（F6 语义），
+  // 它们的复活权由"源是否幸存"裁决，不因级联本身作废
+  const own = await c.query(
+    `UPDATE memory_rebuild_queue SET status='abandoned', last_error='explicitly_forgotten', updated_at=now()
+     WHERE tenant_id=$1 AND deleted_derived_memory_id = ANY($2) AND status IN ('pending','processing')`,
+    [tenantId, explicitIds])
+  // (b) 全部死者（显式+级联）从所有 active queue 的幸存源中剪除——死源不可被引用
+  await c.query(
+    `UPDATE memory_rebuild_queue
+     SET remaining_source_memory_ids = ARRAY(SELECT x FROM unnest(remaining_source_memory_ids) AS x WHERE x <> ALL($2::UUID[])),
+         updated_at = now()
+     WHERE tenant_id=$1 AND status IN ('pending','processing') AND remaining_source_memory_ids && $2::UUID[]`,
+    [tenantId, allDeadIds])
+  const emptied = await c.query(
+    `UPDATE memory_rebuild_queue SET status='abandoned', last_error='all_sources_forgotten', updated_at=now()
+     WHERE tenant_id=$1 AND status IN ('pending','processing') AND cardinality(remaining_source_memory_ids) = 0`,
+    [tenantId])
+  return own.rowCount + emptied.rowCount
+}
+
 export const forgetMemory = async ({ tenantId, memoryId, reason }) => {
   if (!tenantId || typeof tenantId !== 'string') return { ok: false, error: 'tenant_id_required' }
   if (!memoryId || !RX_UUID.test(memoryId)) return { ok: false, error: 'memory_id_invalid' }
@@ -26,7 +51,12 @@ export const forgetMemory = async ({ tenantId, memoryId, reason }) => {
     if (!target) {
       const tomb = (await c.query(
         'SELECT memory_id FROM memory_tombstones WHERE tenant_id=$1 AND memory_id=$2', [tenantId, memoryId])).rows[0]
-      if (tomb) return { ok: true, already_forgotten: true, deleted: [] }
+      if (tomb) {
+        // 显式 forget 一个已被 cascade 删除的 ID：幂等，但它的重建授权必须随显式意图撤销
+        //（round-1 P0：pending queue 就是未来复活授权，用户点名删=授权作废）
+        const revoked = await revokeRebuildAuthorizations(c, tenantId, [memoryId], [memoryId])
+        return { ok: true, already_forgotten: true, deleted: [], rebuilds_revoked: revoked }
+      }
       return { ok: false, error: 'memory_not_found' }
     }
 
@@ -82,7 +112,13 @@ export const forgetMemory = async ({ tenantId, memoryId, reason }) => {
         remaining.delete(id)
       }
     }
-    console.log(JSON.stringify({ evt: 'forget', tenant_id: tenantId, target: memoryId, deleted: deleted.length, rebuilds }))
-    return { ok: true, deleted, rebuilds }
+    // round-1 P0：显式删除意图统治重建授权——
+    // (a) 本次删除集合成员自身的 active queue 全部 abandoned（被删对象不许复活）；
+    // (b) 本次删除集合从所有 active queue 的幸存源里原子剪除，剪空的 queue 同样 abandoned
+    //（重建不能引用已死的源）。注意时序：先于本轮新登记？——不，新登记发生在上面且只含
+    // 幸存源；(a) 会把"目标行自己旧有的 queue"清掉，(b) 会把兄弟 queue 里的本批死者剪掉。
+    const revoked = await revokeRebuildAuthorizations(c, tenantId, [memoryId], [...toDelete])
+    console.log(JSON.stringify({ evt: 'forget', tenant_id: tenantId, target: memoryId, deleted: deleted.length, rebuilds, rebuilds_revoked: revoked }))
+    return { ok: true, deleted, rebuilds, rebuilds_revoked: revoked }
   }, 'forget-commit')
 }

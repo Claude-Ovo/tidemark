@@ -148,7 +148,43 @@ try {
     console.log('PASS F8 cross-tenant unreachable')
   }
 
-  console.log('ALL P0-08 FORGET ASSERTIONS PASSED (F1-F8)')
+  // F9 显式 forget 撤销既有重建授权（round-1 P0 复现①）
+  {
+    const s1 = await insMem('f9 s1 ' + suite)
+    const s2 = await insMem('f9 s2 ' + suite)
+    const d = await insMem('f9 d ' + suite, { source: 'derived' })
+    const run = await mkRun()
+    await edge(d, s1, run); await edge(d, s2, run)
+    await forget({ tenant_id: T, memory_id: s1, reason: 'unit' })   // cascade 删 D，queue(D)=[s2] pending
+    const q1 = (await q('SELECT status FROM memory_rebuild_queue WHERE tenant_id=$1 AND deleted_derived_memory_id=$2', [T, d])).rows[0]
+    assert.equal(q1.status, 'pending')
+    const r = await forget({ tenant_id: T, memory_id: d, reason: 'privacy_request' })   // 显式点名删 D
+    assert.equal(r.body.already_forgotten, true)
+    assert.ok(r.body.rebuilds_revoked >= 1, JSON.stringify(r.body))
+    const q2 = (await q('SELECT status, last_error FROM memory_rebuild_queue WHERE tenant_id=$1 AND deleted_derived_memory_id=$2', [T, d])).rows[0]
+    assert.equal(q2.status, 'abandoned', 'explicit forget revokes the resurrection authorization')
+    assert.equal(q2.last_error, 'explicitly_forgotten')
+    console.log('PASS F9 explicit forget of a cascaded derived revokes its rebuild authorization')
+  }
+
+  // F10 删最后幸存源：queue 剪空即 abandoned，不再引用死者（round-1 P0 复现②）
+  {
+    const s1 = await insMem('f10 s1 ' + suite)
+    const s2 = await insMem('f10 s2 ' + suite)
+    const d = await insMem('f10 d ' + suite, { source: 'derived' })
+    const run = await mkRun()
+    await edge(d, s1, run); await edge(d, s2, run)
+    await forget({ tenant_id: T, memory_id: s1, reason: 'unit' })   // queue(D)=[s2]
+    const r = await forget({ tenant_id: T, memory_id: s2, reason: 'unit' })   // 最后幸存源也删
+    assert.equal(r.body.ok, true, JSON.stringify(r.body))
+    const q3 = (await q('SELECT status, remaining_source_memory_ids, last_error FROM memory_rebuild_queue WHERE tenant_id=$1 AND deleted_derived_memory_id=$2', [T, d])).rows[0]
+    assert.equal(q3.status, 'abandoned', 'queue with zero surviving sources abandoned')
+    assert.deepEqual(q3.remaining_source_memory_ids, [], 'no reference to any forgotten source remains')
+    assert.equal(q3.last_error, 'all_sources_forgotten')
+    console.log('PASS F10 forgetting the last surviving source empties and abandons the queue')
+  }
+
+  console.log('ALL P0-08 FORGET ASSERTIONS PASSED (F1-F10)')
 } catch (e) {
   primaryError = e
 } finally {
