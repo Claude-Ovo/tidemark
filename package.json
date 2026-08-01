@@ -20,7 +20,8 @@
     "nightly": "node --env-file=.env src/nightly/orchestrator.mjs",
     "test:nightly": "node --env-file=.env src/test-nightly.mjs",
     "test:dream": "node --env-file=.env src/test-nightly.mjs",
-    "test:reflection": "node --env-file=.env src/test-nightly.mjs"
+    "test:reflection": "node --env-file=.env src/test-nightly.mjs",
+    "test:forget": "node --env-file=.env src/test-forget.mjs"
   },
   "keywords": [],
   "author": "",

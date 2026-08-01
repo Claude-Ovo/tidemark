@@ -9,6 +9,7 @@ import { recallTool } from './tools/recall.mjs'
 import { logEventTool, EVENT_TYPES } from './tools/log-event.mjs'
 import { reportOutcomeTool } from './tools/report-outcome.mjs'
 import { pinTool } from './tools/pin.mjs'
+import { forgetMemory } from './admin/forget.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
 // spike 同款受控 auth 映射；真实认证上下文接入排 P0-09（Secrets/API key）
@@ -37,6 +38,24 @@ const runToolResilient = async (label, fn) => {
 const app = express()
 app.use(express.json({ limit: '1mb' }))
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event', 'report_outcome', 'pin'] }))
+
+// P0-08 forget：owner/admin HTTP 面（非 agent 工具，冻结 §12 五工具不变）。
+// 鉴权 fail-closed：必须配 TIDEMARK_ADMIN_KEY（或显式 TIDEMARK_DEV_INSECURE=1 时收 'dev-admin'）
+app.post('/admin/forget', async (req, res) => {
+  const adminKey = process.env.TIDEMARK_ADMIN_KEY
+    || (process.env.TIDEMARK_DEV_INSECURE === '1' ? 'dev-admin' : null)
+  if (!adminKey || req.headers['x-tidemark-admin'] !== adminKey) {
+    return res.status(403).json({ ok: false, error: 'admin_unauthorized' })
+  }
+  const { tenant_id, memory_id, reason } = req.body ?? {}
+  try {
+    const r = await forgetMemory({ tenantId: tenant_id, memoryId: memory_id, reason })
+    res.status(r.ok ? 200 : 400).json(r)
+  } catch (e) {
+    console.error(JSON.stringify({ evt: 'forget_error', msg: e?.message?.slice(0, 160) }))
+    res.status(500).json({ ok: false, error: 'internal_error' })
+  }
+})
 
 app.post('/mcp', async (req, res) => {
   if (!req.rawHeaders || req.rawHeaders.length === 0) {   // serverless-http shim（本地无害）
