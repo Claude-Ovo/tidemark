@@ -173,6 +173,9 @@ $nightlyArn = & $aws lambda get-function --function-name $nightlyFn --query Conf
 Assert-NativeSuccess "get nightly arn"
 
 # ---- 6. API Gateway HTTP API (quick-create: default route + auto-deploy stage) ----
+$apiCount = & $aws apigatewayv2 get-apis --query "length(Items[?Name=='$apiName'])" --output text
+Assert-NativeSuccess "get-apis count"
+if ([int]$apiCount -gt 1) { throw "found $apiCount APIs named '$apiName' - resolve the duplicates before deploying" }
 $apiId = & $aws apigatewayv2 get-apis --query "Items[?Name=='$apiName'].ApiId | [0]" --output text
 Assert-NativeSuccess "get-apis"
 if ($apiId -eq "None" -or [string]::IsNullOrWhiteSpace($apiId)) {
@@ -180,10 +183,17 @@ if ($apiId -eq "None" -or [string]::IsNullOrWhiteSpace($apiId)) {
   Assert-NativeSuccess "create-api"
   Write-Host "api created: $apiId"
 }
-# Existing API by name is NOT trusted blindly (round-2 P1-4): verify $default integration target.
-$integTarget = & $aws apigatewayv2 get-integrations --api-id $apiId --query "Items[0].IntegrationUri" --output text
-Assert-NativeSuccess "get-integrations"
-if ($integTarget -ne $mcpArn) { throw "api $apiId integration points at '$integTarget', expected $mcpFn ($mcpArn)" }
+# Existing API by name is NOT trusted blindly (round-2 P1-4, tightened round-3 P1-3):
+# follow the $default ROUTE to its integration id, then compare that integration's URI.
+# Items[0] of get-integrations could be an unused leftover while the route points elsewhere.
+$routeTarget = & $aws apigatewayv2 get-routes --api-id $apiId --query "Items[?RouteKey=='`$default'].Target | [0]" --output text
+Assert-NativeSuccess "get-routes"
+if ($routeTarget -eq "None" -or [string]::IsNullOrWhiteSpace($routeTarget)) { throw "api $apiId has no `$default route" }
+if ($routeTarget -notmatch '^integrations/') { throw "api $apiId `$default route target '$routeTarget' is not an integration" }
+$integId = $routeTarget -replace '^integrations/', ''
+$integTarget = & $aws apigatewayv2 get-integration --api-id $apiId --integration-id $integId --query IntegrationUri --output text
+Assert-NativeSuccess "get-integration $integId"
+if ($integTarget -ne $mcpArn) { throw "api $apiId `$default integration points at '$integTarget', expected $mcpFn ($mcpArn)" }
 $acct = & $aws sts get-caller-identity --query Account --output text
 Assert-NativeSuccess "get account"
 Grant-InvokePermission $mcpFn "tidemark-apigw" "apigateway.amazonaws.com" "arn:aws:execute-api:${region}:${acct}:${apiId}/*"

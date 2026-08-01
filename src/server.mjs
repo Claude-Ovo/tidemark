@@ -38,7 +38,13 @@ export const resolveAuthMap = () => {
     throw new Error('TIDEMARK_AGENT_KEYS missing: dev key table is only reachable with TIDEMARK_DEV_INSECURE=1 and no TIDEMARK_SECRET_ARN')
   }
   const parsed = JSON.parse(raw)
+  // round-3 修 P0（数组绕过）：根节点必须是 plain object map——数组经 Object.entries 会产出
+  // 索引键，header 送 "0" 即可认证。JSON.parse 的产物里非 null/array 的 object 即 plain。
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('TIDEMARK_AGENT_KEYS must be a plain object map of api_key -> principal')
+  }
   for (const [k, p] of Object.entries(parsed)) {
+    if (!k) throw new Error('TIDEMARK_AGENT_KEYS must not contain an empty api key')
     if (typeof p?.tenant_id !== 'string' || !p.tenant_id || typeof p?.agent_id !== 'string' || !p.agent_id
         || !Array.isArray(p.capabilities) || p.capabilities.some(c => typeof c !== 'string')) {
       throw new Error(`TIDEMARK_AGENT_KEYS entry invalid for key ${k.slice(0, 4)}***`)

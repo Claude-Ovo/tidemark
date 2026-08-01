@@ -49,6 +49,36 @@ const NONTERMINAL = ['retryable', 'stale', 'lease_held', 'refused_future_evaluat
   console.log(`PASS H3-H5 every nonterminal state rejects across all three jobs (${NONTERMINAL.length}x3)`)
 }
 
+// ===== H5b 未知状态/畸形结果默认 reject（round-3 P1，Codex 两例实跑反例）=====
+{
+  // 反例1：拼写漂移的未知 job 态（黑名单时代会被当 terminal 吞掉）
+  const hU = makeHandler({ runNightly: async () => ok({ dream: { outcome: 'retrying' } }) })
+  await assert.rejects(() => hU(EV), (e) => e.message.includes('dream:retrying'), 'unknown job state must reject')
+  // 反例2：runNightly 返回 {}——top 与三 job 全缺
+  const hE = makeHandler({ runNightly: async () => ({}) })
+  await assert.rejects(() => hE(EV), (e) =>
+    e.message.includes('top:missing') && e.message.includes('dream:missing')
+    && e.message.includes('reflection:missing') && e.message.includes('transition:missing'),
+    'empty result must reject on top + all three jobs')
+  // 未知 top 值
+  const hT = makeHandler({ runNightly: async () => ok({ outcome: 'totally_new_shape' }) })
+  await assert.rejects(() => hT(EV), (e) => e.message.includes('top:totally_new_shape'))
+  console.log('PASS H5b unknown states and malformed results reject by default (terminal allowlist)')
+}
+
+// ===== H5c 拓扑校验：completed 形状缺 job 拒；short_circuited 合法缺席不误伤 =====
+{
+  const noTrans = ok(); delete noTrans.transition
+  const hM = makeHandler({ runNightly: async () => noTrans })
+  await assert.rejects(() => hM(EV), (e) => e.message.includes('transition:missing'), 'completed shape requires all three jobs')
+  // short_circuited：reflection/transition 缺席合法，只对 dream 的非终态报数
+  const hS = makeHandler({ runNightly: async () => ({ outcome: 'short_circuited_at_dream', dream: { outcome: 'lease_held' } }) })
+  await assert.rejects(() => hS(EV), (e) =>
+    e.message.includes('dream:lease_held') && !e.message.includes('reflection:missing') && !e.message.includes('transition:missing'),
+    'short-circuit shape must not false-flag absent downstream jobs')
+  console.log('PASS H5c topology: required jobs enforced, short-circuit absences legal')
+}
+
 // ===== H6 runNightly 异常 -> tenant crashed -> 整次失败 =====
 {
   const h = makeHandler({ runNightly: async () => { throw new Error('boom') } })
@@ -94,4 +124,4 @@ const NONTERMINAL = ['retryable', 'stale', 'lease_held', 'refused_future_evaluat
   console.log('PASS H9 terminal failures return honest degraded success')
 }
 
-console.log('ALL P0-09 NIGHTLY-HANDLER ASSERTIONS PASSED (H1-H9)')
+console.log('ALL P0-09 NIGHTLY-HANDLER ASSERTIONS PASSED (H1-H9 incl. H5b/H5c)')

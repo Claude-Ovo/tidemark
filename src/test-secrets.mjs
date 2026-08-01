@@ -146,6 +146,38 @@ clean()
   console.log('PASS A5/A6 malformed and empty tables fail closed')
 }
 
+// A7 数组绕过（round-3 P0 回归卷，Codex 实跑反例）：合法形状的 entry 装进数组根，
+// Object.entries 会产出索引键 -> header "0" 可认证。根节点必须是 plain object map。
+clean()
+{
+  process.env.TIDEMARK_AGENT_KEYS = JSON.stringify([{ tenant_id: 'victim-tenant', agent_id: 'victim-agent', capabilities: [] }])
+  assert.throws(() => resolveAuthMap(), /plain object map/, 'array root must be rejected outright')
+  // 附带断言攻击面本身：map 永不产出，'0' 无从命中
+  let resolved = null
+  try { resolved = resolveAuthMap() } catch { /* expected */ }
+  assert.equal(resolved, null, 'no map object may ever materialize from an array table')
+  console.log('PASS A7 array root rejected: header "0" can never authenticate')
+}
+
+// A8/A9 其余根形状：null / 标量 string 一律拒
+clean()
+{
+  process.env.TIDEMARK_AGENT_KEYS = 'null'
+  assert.throws(() => resolveAuthMap(), /plain object map/)
+  _resetAuthMapCacheForTest()
+  process.env.TIDEMARK_AGENT_KEYS = '"tk_demo_x"'
+  assert.throws(() => resolveAuthMap(), /plain object map/)
+  console.log('PASS A8/A9 null and scalar roots rejected')
+}
+
+// A10 空字符串 api key：拒
+clean()
+{
+  process.env.TIDEMARK_AGENT_KEYS = JSON.stringify({ '': { tenant_id: 't', agent_id: 'a', capabilities: [] } })
+  assert.throws(() => resolveAuthMap(), /empty api key/)
+  console.log('PASS A10 empty api key rejected')
+}
+
 clean()
 process.env.TIDEMARK_DEV_INSECURE = '1'   // 恢复测试进程基线
-console.log('ALL P0-09 SECRETS/AUTH-MAP ASSERTIONS PASSED (B1-B8 A1-A6)')
+console.log('ALL P0-09 SECRETS/AUTH-MAP ASSERTIONS PASSED (B1-B8 A1-A10)')

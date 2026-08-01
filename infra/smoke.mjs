@@ -206,23 +206,49 @@ await withClient({ 'x-tidemark-auth': DEMO_KEY }, async (c) => {
   } finally { await db.end() }
 }
 
-// S13 异步失败通路控制面验收（round-2 P0-3/P1-5）：两层配置都必须显式存在——
-// 层1 EventBridge target 的 RetryPolicy/DeadLetterConfig（投递失败），
-// 层2 Lambda async event-invoke-config（函数代码失败：2 次重试 -> OnFailure -> DLQ）。
-// 只读断言，不等真实异步重试（那要按小时等）；默认值不算数，必须是显式配置的值。
+// S13 异步失败通路控制面验收（round-2 P0-3/P1-5，round-3 P1-4 加固）：
+// 配置 + 权限一起验，全部 exact equality——后缀比对证明不了同 account/region/queue，
+// 配置在而权限断线时投递照样失败，验收不许假绿。只读断言，不等真实异步重试。
 {
   const cli = (args) => JSON.parse(execFileSync(AWS_CLI, [...args, '--output', 'json'], { encoding: 'utf8' }))
+  // 事实源：DLQ 的真实 QueueArn + 当前 rule ARN + nightly 函数的执行 role
+  const dlqUrl = cli(['sqs', 'get-queue-url', '--queue-name', 'tidemark-nightly-dlq']).QueueUrl
+  const qAttrs = cli(['sqs', 'get-queue-attributes', '--queue-url', dlqUrl, '--attribute-names', 'QueueArn', 'Policy']).Attributes
+  const dlqArn = qAttrs.QueueArn
+  const ruleArn = cli(['events', 'describe-rule', '--name', 'tidemark-nightly']).Arn
+
+  // 层2：Lambda async event-invoke-config，OnFailure 与 DLQ 精确等值
   const eic = cli(['lambda', 'get-function-event-invoke-config', '--function-name', 'tidemark-nightly'])
   assert.equal(eic.MaximumRetryAttempts, 2, 'async retries explicitly 2')
   assert.equal(eic.MaximumEventAgeInSeconds, 21600, 'async max age explicitly 6h')
-  const onFailure = eic.DestinationConfig?.OnFailure?.Destination ?? ''
-  assert.ok(onFailure.endsWith(':tidemark-nightly-dlq'), `OnFailure must target the DLQ, got: ${onFailure}`)
+  assert.equal(eic.DestinationConfig?.OnFailure?.Destination, dlqArn, 'OnFailure destination === QueueArn (exact)')
+
+  // 层1：EventBridge target 配置，DLQ 精确等值
   const targets = cli(['events', 'list-targets-by-rule', '--rule', 'tidemark-nightly']).Targets
   assert.equal(targets.length, 1)
-  assert.ok((targets[0].DeadLetterConfig?.Arn ?? '').endsWith(':tidemark-nightly-dlq'), 'EventBridge delivery DLQ wired')
+  assert.equal(targets[0].DeadLetterConfig?.Arn, dlqArn, 'delivery DLQ === QueueArn (exact)')
   assert.equal(targets[0].RetryPolicy?.MaximumRetryAttempts, 2, 'delivery retry policy explicit')
   assert.equal(targets[0].RetryPolicy?.MaximumEventAgeInSeconds, 3600, 'delivery max age explicit')
-  console.log('PASS S13 two-layer async failure wiring present (delivery DLQ + execution retries/OnFailure)')
+
+  // 层1 权限：queue policy 必须放行 events.amazonaws.com 对本 queue 的 SendMessage，且收窄到当前 rule
+  const asList = (x) => Array.isArray(x) ? x : [x]
+  const qPol = JSON.parse(qAttrs.Policy ?? '{"Statement":[]}')
+  const eventsGrant = asList(qPol.Statement).some(s => s.Effect === 'Allow'
+    && s.Principal?.Service === 'events.amazonaws.com'
+    && asList(s.Action).includes('sqs:SendMessage')
+    && asList(s.Resource).includes(dlqArn)
+    && s.Condition?.ArnEquals?.['aws:SourceArn'] === ruleArn)
+  assert.ok(eventsGrant, `queue policy must grant events.amazonaws.com SendMessage scoped to the rule: ${qAttrs.Policy}`)
+
+  // 层2 权限：nightly 执行 role 对该 exact ARN 有 sqs:SendMessage（OnFailure 投递走函数 role）
+  const roleArn = cli(['lambda', 'get-function', '--function-name', 'tidemark-nightly']).Configuration.Role
+  const roleName = roleArn.split('/').pop()
+  const rolePol = cli(['iam', 'get-role-policy', '--role-name', roleName, '--policy-name', 'tidemark-secrets-bedrock']).PolicyDocument
+  const roleGrant = asList(rolePol.Statement).some(s => s.Effect === 'Allow'
+    && asList(s.Action).includes('sqs:SendMessage')
+    && asList(s.Resource).includes(dlqArn))
+  assert.ok(roleGrant, `execution role ${roleName} must hold sqs:SendMessage on ${dlqArn}`)
+  console.log('PASS S13 two-layer async failure wiring: config AND permissions verified by exact ARN')
 }
 
 console.log(`ALL P0-09 SMOKE ASSERTIONS PASSED (${suite})`)

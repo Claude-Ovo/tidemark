@@ -4,19 +4,22 @@
 // (tenant, job_kind, scheduled_for, pipeline_version)，nightly_runs 唯一键保证只提交一次；
 // 手动测试可传 {"scheduled_for": "<ISO>"} 覆盖。
 //
-// 失败语义（round-2 修 P0-2：非终态不得吞成 Lambda 成功）。冻结分类：
-// - NONTERMINAL（同一 scheduled_for 需要接管收口）：retryable / stale / lease_held /
-//   refused_future_evaluation / crashed——出现在任一 tenant 任一 job（含 orchestrator 包装的
-//   short_circuited_at_dream 里的 dream 态、completed_degraded 里的 reflection 态）都必须让
-//   整次 invoke 失败：Lambda 异步重试携带【同一 event】-> 同 canonical scheduled_for ->
-//   按原 run key takeover。次日是新 run key，吞掉非终态 = 旧 run 永远无人收口。
-// - TERMINAL：completed / no_work / failed / failed_terminal——failed 是诚实终态
-//  （orchestrator 已按 degraded 语义处理），成功返回并在 payload 里如实标注，不触发重试风暴。
+// 失败语义（round-2 修 P0-2，round-3 修 P1：黑名单翻【终态白名单】——未知/畸形默认 reject）。
+// 冻结 allowlist：
+// - TERMINAL（可成功返回）：completed / no_work / already_completed / failed / failed_terminal
+//  ——failed 是诚实终态（orchestrator 已按 degraded 语义处理），如实标注不触发重试风暴。
+// - 其余一切（retryable / stale / lease_held / refused_future_evaluation / crashed、
+//   将来新增的任何状态、拼写漂移、缺失 job、畸形结果）都判 pending -> 整次 invoke 失败：
+//   Lambda 异步重试携带【同一 event】-> 同 canonical scheduled_for -> 按原 run key takeover。
+//   次日是新 run key，吞掉非终态 = 旧 run 永远无人收口；fail-open 的方向必须是 reject。
+// - 拓扑校验：top 必须是三个已知 orchestrator 形状之一；dream 永远必须在场；
+//   非 short_circuited 形状下 reflection/transition 也必须在场（short_circuited 合法缺席）。
 // 所有 tenant 先尽力跑完（不因首个 tenant 非终态放弃其余），最后统一裁决。
 // 意外异常按 crashed 计入该 tenant，同样导致整次失败 -> retry/DLQ 接手（结论 13）。
 import { bootstrapSecrets } from '../lib/secrets.mjs'
 
-const NONTERMINAL = new Set(['retryable', 'stale', 'lease_held', 'refused_future_evaluation', 'crashed'])
+const TERMINAL = new Set(['completed', 'no_work', 'already_completed', 'failed', 'failed_terminal'])
+const KNOWN_TOPS = new Set(['completed', 'completed_degraded', 'short_circuited_at_dream'])
 
 const canonicalScheduledFor = (event) => {
   const raw = event?.scheduled_for ?? event?.time
@@ -27,17 +30,27 @@ const canonicalScheduledFor = (event) => {
   return t.toISOString()
 }
 
-// tenant 级裁决：把 orchestrator 的嵌套结果拍平成 job 终态表 + 是否需要接管
+// tenant 级裁决：把 orchestrator 的嵌套结果拍平成 job 终态表 + 是否需要接管。
+// 终态白名单 + 拓扑校验，一切 unknown/missing 默认 reject（round-3 P1）。
 const classifyTenantRun = (r) => {
+  const top = (r && typeof r === 'object') ? (r.outcome ?? null) : null
   const jobs = {
-    dream: r.dream?.outcome ?? null,
-    reflection: r.reflection?.outcome ?? null,
-    transition: r.transition?.outcome ?? null,
+    dream: r?.dream?.outcome ?? null,
+    reflection: r?.reflection?.outcome ?? null,
+    transition: r?.transition?.outcome ?? null,
   }
-  const pending = Object.entries(jobs)
-    .filter(([, o]) => o !== null && NONTERMINAL.has(o))
-    .map(([job, o]) => `${job}:${o}`)
-  return { top: r.outcome, jobs, pending }
+  const pending = []
+  if (!KNOWN_TOPS.has(top)) pending.push(`top:${top ?? 'missing'}`)
+  const optionalAfterShortCircuit = top === 'short_circuited_at_dream'
+  for (const [job, o] of Object.entries(jobs)) {
+    if (o === null) {
+      // dream 无条件必须在场；reflection/transition 仅在 short_circuited 形状下合法缺席
+      if (job === 'dream' || !optionalAfterShortCircuit) pending.push(`${job}:missing`)
+      continue
+    }
+    if (!TERMINAL.has(o)) pending.push(`${job}:${o}`)
+  }
+  return { top, jobs, pending }
 }
 
 // 依赖注入工厂（Codex round-1 要求的 seam）：单测注入假 runNightly 逐态验证 reject 语义
