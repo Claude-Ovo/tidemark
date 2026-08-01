@@ -15,10 +15,14 @@ import { inSerializableTx } from '../lib/db.mjs'
 const RX_SLUG = /^[a-z0-9_.-]{1,64}$/i
 const RX_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-// 撤销重建授权（round-1 P0）：ids 既作为"被删 derived"撤销其自身 queue，也作为
+// 撤销重建授权（round-1/round-3 P0）：ids 既作为"被删 derived"撤销其自身 queue，也作为
 // "已死源"从其他 active queue 的 remaining_source_memory_ids 中剪除；剪空即 abandoned。
-// P2 worker 启用前须冻结取消/fencing 语义（processing 行在此一并 abandoned——当前无 worker，
-// 无并发提交窗口；worker 上线时其提交必须 CAS status='processing' 才能写，abandoned 即失败）。
+// P2 worker fencing 契约（启用前冻结）：attempt_count 是 generation token——
+//   claim = SET status='processing', attempt_count=attempt_count+1, lease...（记住读到的新值）
+//   commit = CAS WHERE status='processing' AND attempt_count=<claim 时的值>，rowCount 必须=1
+// forget 对【部分剪枝的 processing】行：剪数组 + 回 pending + attempt_count+1 + 清 lease——
+// 旧 claim 的 generation 立即失效（提交 CAS=0），S3 类幸存源的重建资格保留给下一次领取；
+// 这是 round-3 的 ABA 封口：数组剪了而 status 不动 = 旧 worker 带死源提交仍会成功。
 const revokeRebuildAuthorizations = async (c, tenantId, explicitIds, allDeadIds) => {
   // (a) 只有【显式点名】的对象撤销自身授权——级联死者的 queue 是合法登记（F6 语义），
   // 它们的复活权由"源是否幸存"裁决，不因级联本身作废
@@ -26,12 +30,19 @@ const revokeRebuildAuthorizations = async (c, tenantId, explicitIds, allDeadIds)
     `UPDATE memory_rebuild_queue SET status='abandoned', last_error='explicitly_forgotten', updated_at=now()
      WHERE tenant_id=$1 AND deleted_derived_memory_id = ANY($2) AND status IN ('pending','processing')`,
     [tenantId, explicitIds])
-  // (b) 全部死者（显式+级联）从所有 active queue 的幸存源中剪除——死源不可被引用
+  // (b1) 部分剪枝的 processing：剪数组 + 回 pending + generation++（夺走旧 claim 提交资格）
+  await c.query(
+    `UPDATE memory_rebuild_queue
+     SET remaining_source_memory_ids = ARRAY(SELECT x FROM unnest(remaining_source_memory_ids) AS x WHERE x <> ALL($2::UUID[])),
+         status='pending', lease_expires_at=NULL, attempt_count=attempt_count+1, updated_at=now()
+     WHERE tenant_id=$1 AND status='processing' AND remaining_source_memory_ids && $2::UUID[]`,
+    [tenantId, allDeadIds])
+  // (b2) pending 只剪数组（无在途 claim，无 generation 语义）
   await c.query(
     `UPDATE memory_rebuild_queue
      SET remaining_source_memory_ids = ARRAY(SELECT x FROM unnest(remaining_source_memory_ids) AS x WHERE x <> ALL($2::UUID[])),
          updated_at = now()
-     WHERE tenant_id=$1 AND status IN ('pending','processing') AND remaining_source_memory_ids && $2::UUID[]`,
+     WHERE tenant_id=$1 AND status='pending' AND remaining_source_memory_ids && $2::UUID[]`,
     [tenantId, allDeadIds])
   const emptied = await c.query(
     `UPDATE memory_rebuild_queue SET status='abandoned', last_error='all_sources_forgotten', updated_at=now()

@@ -184,7 +184,33 @@ try {
     console.log('PASS F10 forgetting the last surviving source empties and abandons the queue')
   }
 
-  console.log('ALL P0-08 FORGET ASSERTIONS PASSED (F1-F10)')
+  // F11 processing 的 ABA 封口（round-3 P0）：三源 queue 被 worker 领取后遭部分剪枝——
+  // 旧 generation 的提交必须 CAS=0，行回 pending 且幸存源保留
+  {
+    const s2 = await insMem('f11 s2 ' + suite)
+    const s3 = await insMem('f11 s3 ' + suite)
+    const dDead = randomUUID()   // 已死 derived（只需 queue 行，无需真实 memory）
+    await q(
+      `INSERT INTO memory_rebuild_queue (tenant_id, agent_id, deleted_derived_memory_id, remaining_source_memory_ids, status, attempt_count, lease_expires_at)
+       VALUES ($1,$2,$3,$4,'processing',1, now() + INTERVAL '10 minutes')`,
+      [T, A, dDead, [s2, s3]])   // 模拟 worker claim：status=processing, generation=1, 冻结输入含 s2
+    const r = await forget({ tenant_id: T, memory_id: s2, reason: 'unit' })
+    assert.equal(r.body.ok, true, JSON.stringify(r.body))
+    const row = (await q('SELECT status, attempt_count, remaining_source_memory_ids, lease_expires_at FROM memory_rebuild_queue WHERE tenant_id=$1 AND deleted_derived_memory_id=$2', [T, dDead])).rows[0]
+    assert.equal(row.status, 'pending', 'partially pruned processing row returns to pending')
+    assert.equal(Number(row.attempt_count), 2, 'generation bumped -- old claim disqualified')
+    assert.deepEqual(row.remaining_source_memory_ids, [s3], 'survivor kept for the NEXT claim')
+    assert.equal(row.lease_expires_at, null)
+    // 旧 worker 按冻结契约提交：CAS status=processing AND attempt_count=1 -> 必须 0 行
+    const staleCommit = await q(
+      `UPDATE memory_rebuild_queue SET status='completed', completed_at=now()
+       WHERE tenant_id=$1 AND deleted_derived_memory_id=$2 AND status='processing' AND attempt_count=1`,
+      [T, dDead])
+    assert.equal(staleCommit.rowCount, 0, 'stale generation commit fenced out')
+    console.log('PASS F11 partially pruned processing claim loses commit rights (ABA sealed)')
+  }
+
+  console.log('ALL P0-08 FORGET ASSERTIONS PASSED (F1-F11)')
 } catch (e) {
   primaryError = e
 } finally {
