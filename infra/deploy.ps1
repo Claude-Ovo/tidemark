@@ -25,6 +25,18 @@ function Assert-NativeSuccess([string]$step) {
 function Write-NoBom([string]$path, [string]$content) {
   [IO.File]::WriteAllText($path, $content, (New-Object Text.UTF8Encoding($false)))
 }
+# Tolerate add-permission failure ONLY when a matching statement verifiably exists (round-2 P1-4:
+# blanket "already present" swallowed AccessDenied and bad-parameter failures).
+function Grant-InvokePermission([string]$fn, [string]$sid, [string]$principal, [string]$sourceArn) {
+  & $aws lambda add-permission --function-name $fn --statement-id $sid --action lambda:InvokeFunction --principal $principal --source-arn $sourceArn | Out-Null
+  if ($LASTEXITCODE -eq 0) { Write-Host "permission granted: $fn/$sid"; return }
+  $policyText = & $aws lambda get-policy --function-name $fn --query Policy --output text
+  Assert-NativeSuccess "get-policy $fn (add-permission failed and the policy is unreadable)"
+  $pol = $policyText | ConvertFrom-Json
+  $match = $pol.Statement | Where-Object { $_.Sid -eq $sid -and $_.Principal.Service -eq $principal -and $_.Condition.ArnLike.'AWS:SourceArn' -eq $sourceArn }
+  if (-not $match) { throw "add-permission $fn/$sid failed and no matching statement exists (drift or AccessDenied)" }
+  Write-Host "permission already present, verified by Sid/principal/sourceArn: $fn/$sid"
+}
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
@@ -72,12 +84,25 @@ if (-not $roleExists) {
   Write-Host "role created: $roleName (waiting 10s for IAM propagation)"
   Start-Sleep -Seconds 10
 }
-# Inline policy is upserted every run so secret ARN changes and the bedrock grant stay current.
+# ---- 2b. nightly failure DLQ (round-2 P0-3): created before the inline policy needs its ARN ----
+$dlqName = "tidemark-nightly-dlq"
+$dlqUrl = & $aws sqs get-queue-url --queue-name $dlqName --query QueueUrl --output text
+if ($LASTEXITCODE -ne 0) {
+  $dlqUrl = & $aws sqs create-queue --queue-name $dlqName --query QueueUrl --output text
+  Assert-NativeSuccess "create dlq"
+  Write-Host "dlq created: $dlqName"
+}
+$dlqArn = & $aws sqs get-queue-attributes --queue-url $dlqUrl --attribute-names QueueArn --query Attributes.QueueArn --output text
+Assert-NativeSuccess "get dlq arn"
+
+# Inline policy is upserted every run so secret ARN changes and the grants stay current.
 # bedrock:InvokeModel is scoped to the Titan embed model; harmless while EMBED_PROVIDER=stub.
+# sqs:SendMessage lets the nightly function's async OnFailure destination deliver to the DLQ.
 $policy = @"
 {"Version":"2012-10-17","Statement":[
  {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"$secretArn"},
- {"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":"arn:aws:bedrock:${region}::foundation-model/amazon.titan-embed-text-v2:0"}]}
+ {"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":"arn:aws:bedrock:${region}::foundation-model/amazon.titan-embed-text-v2:0"},
+ {"Effect":"Allow","Action":"sqs:SendMessage","Resource":"$dlqArn"}]}
 "@
 $policyFile = Join-Path $PSScriptRoot '.inline-policy.json'
 try {
@@ -155,32 +180,60 @@ if ($apiId -eq "None" -or [string]::IsNullOrWhiteSpace($apiId)) {
   Assert-NativeSuccess "create-api"
   Write-Host "api created: $apiId"
 }
-# add-permission is tolerated-if-exists: a rerun hits ResourceConflictException, which is fine.
+# Existing API by name is NOT trusted blindly (round-2 P1-4): verify $default integration target.
+$integTarget = & $aws apigatewayv2 get-integrations --api-id $apiId --query "Items[0].IntegrationUri" --output text
+Assert-NativeSuccess "get-integrations"
+if ($integTarget -ne $mcpArn) { throw "api $apiId integration points at '$integTarget', expected $mcpFn ($mcpArn)" }
 $acct = & $aws sts get-caller-identity --query Account --output text
 Assert-NativeSuccess "get account"
-& $aws lambda add-permission --function-name $mcpFn --statement-id tidemark-apigw --action lambda:InvokeFunction --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${region}:${acct}:${apiId}/*" | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "apigw permission already present" }
+Grant-InvokePermission $mcpFn "tidemark-apigw" "apigateway.amazonaws.com" "arn:aws:execute-api:${region}:${acct}:${apiId}/*"
 $apiUrl = & $aws apigatewayv2 get-api --api-id $apiId --query ApiEndpoint --output text
 Assert-NativeSuccess "get api endpoint"
 
-# ---- 7. EventBridge nightly rule (03:00 Beijing = 19:00 UTC) ----
+# ---- 7. EventBridge nightly rule (03:00 Beijing = 19:00 UTC) + two-layer failure wiring ----
+# Layer 1 (delivery): EventBridge target RetryPolicy + DeadLetterConfig covers failed DELIVERY to Lambda.
+# Layer 2 (execution): Lambda async event-invoke-config covers function-code failures -- explicit
+# retries then OnFailure -> the same DLQ. The nightly handler intentionally throws on nonterminal
+# job states, so these retries ARE the same-schedule takeover path; exhausted retries land in DLQ.
 & $aws events put-rule --name $ruleName --schedule-expression "cron(0 19 * * ? *)" --state ENABLED --query RuleArn --output text | Out-Null
 Assert-NativeSuccess "put-rule"
-$targetsFile = Join-Path $PSScriptRoot '.targets.json'
-try {
-  Write-NoBom $targetsFile (@{ Rule = $ruleName; Targets = @(@{ Id = "nightly"; Arn = $nightlyArn }) } | ConvertTo-Json -Depth 4)
-  & $aws events put-targets --cli-input-json ("file://" + ($targetsFile -replace '\\','/')) --query FailedEntryCount --output text | Out-Null
-  Assert-NativeSuccess "put-targets"
-} finally { Remove-Item $targetsFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
 $ruleArn = & $aws events describe-rule --name $ruleName --query Arn --output text
 Assert-NativeSuccess "describe-rule"
-& $aws lambda add-permission --function-name $nightlyFn --statement-id tidemark-events --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn $ruleArn | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "events permission already present" }
+
+# DLQ policy: only this rule may SendMessage via the EventBridge service principal.
+$dlqPolicy = '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"events.amazonaws.com"},"Action":"sqs:SendMessage","Resource":"' + $dlqArn + '","Condition":{"ArnEquals":{"aws:SourceArn":"' + $ruleArn + '"}}}]}'
+$attrFile = Join-Path $PSScriptRoot '.dlq-attrs.json'
+try {
+  Write-NoBom $attrFile (@{ Policy = $dlqPolicy } | ConvertTo-Json -Compress)
+  & $aws sqs set-queue-attributes --queue-url $dlqUrl --attributes ("file://" + ($attrFile -replace '\\','/'))
+  Assert-NativeSuccess "set dlq policy"
+} finally { Remove-Item $attrFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
+
+$targetsFile = Join-Path $PSScriptRoot '.targets.json'
+try {
+  Write-NoBom $targetsFile (@{ Rule = $ruleName; Targets = @(@{ Id = "nightly"; Arn = $nightlyArn
+    DeadLetterConfig = @{ Arn = $dlqArn }
+    RetryPolicy = @{ MaximumRetryAttempts = 2; MaximumEventAgeInSeconds = 3600 } }) } | ConvertTo-Json -Depth 5)
+  $failedCount = & $aws events put-targets --cli-input-json ("file://" + ($targetsFile -replace '\\','/')) --query FailedEntryCount --output text
+  Assert-NativeSuccess "put-targets"
+  if ($failedCount -ne "0") { throw "put-targets reported FailedEntryCount=$failedCount (exit 0 does not mean success)" }
+} finally { Remove-Item $targetsFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
+Grant-InvokePermission $nightlyFn "tidemark-events" "events.amazonaws.com" $ruleArn
+
+# Async execution failures: 2 retries, 6h max age, then DLQ. Idempotent upsert by nature.
+$eicFile = Join-Path $PSScriptRoot '.event-invoke.json'
+try {
+  Write-NoBom $eicFile (@{ FunctionName = $nightlyFn; MaximumRetryAttempts = 2; MaximumEventAgeInSeconds = 21600
+    DestinationConfig = @{ OnFailure = @{ Destination = $dlqArn } } } | ConvertTo-Json -Depth 4)
+  & $aws lambda put-function-event-invoke-config --cli-input-json ("file://" + ($eicFile -replace '\\','/')) --query LastModified --output text | Out-Null
+  Assert-NativeSuccess "put-function-event-invoke-config"
+} finally { Remove-Item $eicFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
 
 Write-Host ""
 Write-Host "=== deploy complete ==="
 Write-Host "api url:     $apiUrl"
 Write-Host "secret arn:  $secretArn"
 Write-Host "functions:   $mcpFn (30s), $nightlyFn (600s, cron 19:00 UTC)"
+Write-Host "dlq:         $dlqName (EventBridge delivery + Lambda async OnFailure, retries 2/2)"
 Write-Host "database:    $prodDb"
 Write-Host "next:        node --env-file=.env infra/smoke.mjs $apiUrl"

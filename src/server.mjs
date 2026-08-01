@@ -15,9 +15,12 @@ import { pinTool } from './tools/pin.mjs'
 import { forgetMemory } from './admin/forget.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
-// 认证上下文（P0-09 接真实密钥源）：TIDEMARK_AGENT_KEYS（Secrets Manager 注入的 JSON）
-// 存在时【整表取代】内置 dev 映射——生产环境不保留任何硬编码可猜 key；缺失时回退 dev 表
-// 供本地开发与测试（与既有套件兼容）。表结构冻结：key -> { tenant_id, agent_id, capabilities[] }
+// 认证上下文（P0-09 接真实密钥源，round-2 修 P0-1 的 fail-open）：
+// TIDEMARK_AGENT_KEYS（Secrets Manager 注入的 JSON）存在时【整表取代】内置 dev 映射——
+// 生产环境不保留任何硬编码可猜 key。dev 表的可达条件收紧为【显式本地不安全模式且非生产】：
+// TIDEMARK_DEV_INSECURE=1 且无 TIDEMARK_SECRET_ARN，两者同时成立才回退；其余一切缺表
+// 情形直接抛错（请求得 5xx），配置漂移绝不静默降级。
+// 表结构冻结：key -> { tenant_id, agent_id, capabilities[] }
 // capabilities：pin 是能力位不是默认权力（冻结 §12.3）——second-agent 故意不带，作越权测试对照
 const DEV_AUTH_MAP = {
   'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent', capabilities: ['memory:pin'] },
@@ -26,11 +29,14 @@ const DEV_AUTH_MAP = {
   'spike-third-key':  { tenant_id: 'demo-tenant', agent_id: 'third-agent', capabilities: ['memory:pin'] },
 }
 let authMapCache = null
-const resolveAuthMap = () => {
+export const _resetAuthMapCacheForTest = () => { authMapCache = null }
+export const resolveAuthMap = () => {
   if (authMapCache) return authMapCache
   const raw = process.env.TIDEMARK_AGENT_KEYS
-  if (!raw) return (authMapCache = DEV_AUTH_MAP)
-  // fail-closed：配置了生产密钥表但形状非法 -> 抛出（请求得 5xx），绝不静默回退 dev 表
+  if (!raw) {
+    if (process.env.TIDEMARK_DEV_INSECURE === '1' && !process.env.TIDEMARK_SECRET_ARN) return (authMapCache = DEV_AUTH_MAP)
+    throw new Error('TIDEMARK_AGENT_KEYS missing: dev key table is only reachable with TIDEMARK_DEV_INSECURE=1 and no TIDEMARK_SECRET_ARN')
+  }
   const parsed = JSON.parse(raw)
   for (const [k, p] of Object.entries(parsed)) {
     if (typeof p?.tenant_id !== 'string' || !p.tenant_id || typeof p?.agent_id !== 'string' || !p.agent_id

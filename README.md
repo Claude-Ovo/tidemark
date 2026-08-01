@@ -54,11 +54,12 @@ What it creates (all create-or-update; reruns are safe):
 | Lambda | `tidemark-mcp` | The Memory MCP server (same `src/server.mjs` as local, wrapped by `src/aws/mcp-handler.mjs`). 30s / 512MB / pool max=1. |
 | Lambda | `tidemark-nightly` | Dream -> reflection -> transition orchestrator (`src/aws/nightly-handler.mjs`). 600s. |
 | API Gateway HTTP API | `tidemark-api` | `$default` -> `tidemark-mcp`. |
-| EventBridge rule | `tidemark-nightly` | `cron(0 19 * * ? *)` (03:00 Beijing). Event time is floored to the minute into the canonical `scheduled_for`, so duplicate/retried deliveries land on the same `nightly_runs` key and commit exactly once (proved online by smoke S11). |
+| EventBridge rule | `tidemark-nightly` | `cron(0 19 * * ? *)` (03:00 Beijing). Event time is floored to the minute into the canonical `scheduled_for`, so duplicate/retried deliveries land on the same `nightly_runs` key and commit exactly once (handler-level proof in smoke S11). |
+| SQS DLQ | `tidemark-nightly-dlq` | Two failure layers, both explicit (smoke S13 asserts them): EventBridge target `RetryPolicy` + `DeadLetterConfig` for delivery failures; Lambda async event-invoke-config (2 retries, 6h age, `OnFailure` -> DLQ) for function-code failures. The nightly handler deliberately fails on nonterminal job states (lease held, retryable, stale, crashed), so async retries carry the same event = same canonical schedule = takeover of the same run; exhausted retries land in the DLQ instead of vanishing. |
 
-The prod database (`tidemark_prod`) is migrated + verified from your machine as part of the deploy. Functions receive only `TIDEMARK_SECRET_ARN`; secrets are pulled at cold start (`src/lib/secrets.mjs`, allowlisted keys, fail-closed).
+The prod database (`tidemark_prod`) is migrated + verified from your machine as part of the deploy. Functions receive only `TIDEMARK_SECRET_ARN`; secrets are pulled at cold start (`src/lib/secrets.mjs`, allowlisted keys, fail-closed: with an ARN present, all four production keys must be present after the merge or the cold start fails - configuration drift never falls back to built-in dev keys).
 
-Flipping to real Bedrock after allowlisting: set `EMBED_PROVIDER=bedrock` (and `DREAM_PROVIDER=bedrock` for nightly) in the function env - no code change.
+Bedrock status (honest): `EMBED_PROVIDER=bedrock` flips the embedding path by config only, but it stays unverified until AWS allowlisting clears (P0-01/P0-04 conditional). The nightly model extraction (`DREAM_PROVIDER`) is **stub-only for now** - the Bedrock provider branch is intentionally not wired yet (P0-07 conditional) and throws rather than pretending.
 
 ## Admin surface (owner-only, not an agent tool)
 
