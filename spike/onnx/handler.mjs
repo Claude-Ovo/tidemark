@@ -1,49 +1,67 @@
-// packaging/runtime spike handler（Codex 转身硬边界先行项）：证明 Linux x64 的
-// onnxruntime-node + 量化 MiniLM 能在 Lambda 里冷启动加载并出真语义向量。
-// - 模型只认本地封存（allowRemoteModels=false + localModelPath），缺文件直接 fail-closed
-// - pipeline 是 module 单例 Promise：并发 invoke 共享一次加载
-// - 输出 384 维 mean-pooled + L2 normalized，再零填充到 512（cosine 精确保持）
-// - 返回计时与向量指纹，供 SPIKE-ONNX.md 封存证据
+// packaging/runtime spike handler（round-2：manifest 为部署身份唯一真相源）：
+// - 冷启动先按 manifest.json 逐文件验 SHA256——缺文件/摘要错直接抛，绝不带残缺模型服务
+// - digest 用正式 canonical 算法（toF32 + sha256 over LE bytes，完整 512 维 64-hex），
+//   不再有"前 16 维 JSON 文本"的抽样变体
+// - pipeline 单例 Promise；allowRemoteModels=false + localModelPath，冷启动零出网
+// - event.return_vectors=true 时附全量向量，供对端计算 max_abs_diff（跨平台一致性证据）
 import { pipeline, env } from '@huggingface/transformers'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { toF32, canonicalDigest } from './vector-canonical.mjs'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const MANIFEST = JSON.parse(readFileSync(join(HERE, 'manifest.json'), 'utf8'))
+
+// fail-closed 模型完整性闸：manifest 每一项都必须在场且摘要一致
+const verifyModelArtifacts = () => {
+  const base = join(HERE, 'models', MANIFEST.model_repo)
+  for (const [rel, expected] of Object.entries(MANIFEST.files)) {
+    let buf
+    try { buf = readFileSync(join(base, rel)) }
+    catch { throw new Error(`model artifact missing: ${rel} (fail-closed)`) }
+    const actual = createHash('sha256').update(buf).digest('hex')
+    if (actual !== expected) throw new Error(`model artifact SHA mismatch: ${rel} expected ${expected} got ${actual}`)
+  }
+}
 
 env.allowRemoteModels = false
-env.localModelPath = join(dirname(fileURLToPath(import.meta.url)), 'models')
+env.localModelPath = join(HERE, 'models')
 
-const MODEL_ID = 'Xenova/all-MiniLM-L6-v2'
 let loadMs = null
 const t0 = Date.now()
-const extractorP = pipeline('feature-extraction', MODEL_ID, { dtype: 'q8' })
+verifyModelArtifacts()
+const extractorP = pipeline('feature-extraction', MANIFEST.model_repo, { dtype: MANIFEST.output.dtype })
   .then((p) => { loadMs = Date.now() - t0; return p })
 
 const embed512 = async (text) => {
   const extractor = await extractorP
-  const out = await extractor(text, { pooling: 'mean', normalize: true })
-  const v384 = Array.from(out.data)
-  if (v384.length !== 384) throw new Error(`expected 384 dims, got ${v384.length}`)
-  return [...v384, ...new Array(128).fill(0)]
+  const out = await extractor(text, { pooling: MANIFEST.output.pooling, normalize: MANIFEST.output.normalize })
+  const v = Array.from(out.data)
+  if (v.length !== MANIFEST.output.native_dims) throw new Error(`expected ${MANIFEST.output.native_dims} dims, got ${v.length}`)
+  return [...v, ...new Array(MANIFEST.output.pad_to - MANIFEST.output.native_dims).fill(0)]
 }
 
 export const handler = async (event) => {
   const texts = event?.texts ?? ['the tide leaves a mark on the shore']
-  const timings = []
-  const vectors = []
+  const timings = [], vectors = [], digests = []
   for (const t of texts) {
     const s = Date.now()
-    vectors.push(await embed512(t))
+    const v = await embed512(t)
     timings.push(Date.now() - s)
+    vectors.push(v)
+    digests.push(canonicalDigest(toF32(v)))   // 完整 512 维、正式算法、64-hex
   }
-  // 语义 sanity（真向量 vs 哈希向量的分水岭）：paraphrase 必须比 unrelated 更近
   const cos = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0)
-  let semantic = null
-  if (vectors.length >= 3) {
-    semantic = { paraphrase: cos(vectors[0], vectors[1]), unrelated: cos(vectors[0], vectors[2]) }
-  }
+  const semantic = vectors.length >= 3
+    ? { paraphrase: cos(vectors[0], vectors[1]), unrelated: cos(vectors[0], vectors[2]) }
+    : null
   return {
-    model: MODEL_ID, dims: vectors[0].length, load_ms: loadMs, infer_ms: timings,
-    semantic, vec_digest: createHash('sha256').update(JSON.stringify(vectors[0].slice(0, 16))).digest('hex').slice(0, 16),
+    embedding_model_id: MANIFEST.embedding_model_id,
+    inputs: texts, dims: vectors[0].length, load_ms: loadMs, infer_ms: timings,
+    semantic, canonical_digests: digests,
+    ...(event?.return_vectors ? { vectors } : {}),
     node: process.version, memory_mb: Number(process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE ?? 0),
   }
 }
