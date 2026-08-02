@@ -42,6 +42,10 @@ const classifyTenantRun = (r) => {
   const pending = []
   if (!KNOWN_TOPS.has(top)) pending.push(`top:${top ?? 'missing'}`)
   const optionalAfterShortCircuit = top === 'short_circuited_at_dream'
+  // round-4 P1：short_circuited 本质就是【未完成之夜】——reflection/transition 根本没跑，
+  // 无条件判需接管；不依赖 dream 恰好是非终态（terminal dream + short top 是契约损坏，
+  // 真实 orchestrator 只因四个非终态短路，那种形状同样不得当成功吞掉）
+  if (optionalAfterShortCircuit) pending.push('top:short_circuited_incomplete')
   for (const [job, o] of Object.entries(jobs)) {
     if (o === null) {
       // dream 无条件必须在场；reflection/transition 仅在 short_circuited 形状下合法缺席
@@ -56,8 +60,12 @@ const classifyTenantRun = (r) => {
 // 依赖注入工厂（Codex round-1 要求的 seam）：单测注入假 runNightly 逐态验证 reject 语义
 export const makeHandler = ({ runNightly }) => async (event) => {
   const scheduledFor = canonicalScheduledFor(event)
-  const tenants = (process.env.TIDEMARK_NIGHTLY_TENANTS || 'demo-tenant')
-    .split(',').map(s => s.trim()).filter(Boolean)
+  // round-4 P1：默认值只救【未定义】；显式配置解析后必须至少一个 tenant——
+  // ',' 之类的漂移把核心 lifecycle 静默停摆且不进 DLQ，必须炸给监控看。顺手去重。
+  const rawTenants = process.env.TIDEMARK_NIGHTLY_TENANTS
+  const tenants = [...new Set((rawTenants === undefined ? 'demo-tenant' : rawTenants)
+    .split(',').map(s => s.trim()).filter(Boolean))]
+  if (tenants.length === 0) throw new Error('TIDEMARK_NIGHTLY_TENANTS is explicitly set but parses to zero tenants')
   const results = []
   for (const tenantId of tenants) {
     // 串行执行：pool max=1；单 tenant 非终态/异常不中断其余 tenant，先尽力完成再统一裁决

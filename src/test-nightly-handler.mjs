@@ -71,12 +71,25 @@ const NONTERMINAL = ['retryable', 'stale', 'lease_held', 'refused_future_evaluat
   const noTrans = ok(); delete noTrans.transition
   const hM = makeHandler({ runNightly: async () => noTrans })
   await assert.rejects(() => hM(EV), (e) => e.message.includes('transition:missing'), 'completed shape requires all three jobs')
-  // short_circuited：reflection/transition 缺席合法，只对 dream 的非终态报数
+  // short_circuited：reflection/transition 缺席不误报 missing，但整夜无条件判未完成
   const hS = makeHandler({ runNightly: async () => ({ outcome: 'short_circuited_at_dream', dream: { outcome: 'lease_held' } }) })
   await assert.rejects(() => hS(EV), (e) =>
-    e.message.includes('dream:lease_held') && !e.message.includes('reflection:missing') && !e.message.includes('transition:missing'),
+    e.message.includes('dream:lease_held') && e.message.includes('top:short_circuited_incomplete')
+    && !e.message.includes('reflection:missing') && !e.message.includes('transition:missing'),
     'short-circuit shape must not false-flag absent downstream jobs')
   console.log('PASS H5c topology: required jobs enforced, short-circuit absences legal')
+}
+
+// ===== H5d short_circuited 无条件未完成（round-4 P1，Codex 实跑反例）：terminal dream
+// 也救不了 short top——那形状是契约损坏（真实 orchestrator 只因非终态短路），
+// 两个没跑的 job 不得被吞成整夜成功 =====
+{
+  for (const o of ['completed', 'no_work', 'already_completed', 'failed', 'failed_terminal']) {
+    const h = makeHandler({ runNightly: async () => ({ outcome: 'short_circuited_at_dream', dream: { outcome: o } }) })
+    await assert.rejects(() => h(EV), (e) => e.message.includes('top:short_circuited_incomplete'),
+      `short top with terminal dream ${o} must still reject`)
+  }
+  console.log('PASS H5d short-circuit night is unconditionally incomplete (5 terminal-dream shapes reject)')
 }
 
 // ===== H6 runNightly 异常 -> tenant crashed -> 整次失败 =====
@@ -95,7 +108,7 @@ const NONTERMINAL = ['retryable', 'stale', 'lease_held', 'refused_future_evaluat
     if (tenantId === 't-a') return { outcome: 'short_circuited_at_dream', dream: { outcome: 'lease_held' } }
     return ok()
   } })
-  await assert.rejects(() => h(EV), (e) => e.message.includes('t-a[dream:lease_held]') && !e.message.includes('t-b['))
+  await assert.rejects(() => h(EV), (e) => e.message.includes('t-a[') && e.message.includes('dream:lease_held') && !e.message.includes('t-b['))
   assert.deepEqual(ran, ['t-a', 't-b'], 'both tenants ran before the verdict')
   delete process.env.TIDEMARK_NIGHTLY_TENANTS
   console.log('PASS H7 best-effort across tenants, single honest verdict')
@@ -124,4 +137,24 @@ const NONTERMINAL = ['retryable', 'stale', 'lease_held', 'refused_future_evaluat
   console.log('PASS H9 terminal failures return honest degraded success')
 }
 
-console.log('ALL P0-09 NIGHTLY-HANDLER ASSERTIONS PASSED (H1-H9 incl. H5b/H5c)')
+// ===== H10 零租户 fail-closed（round-4 P1）：显式配置解析为空必须炸，默认只救未定义 =====
+{
+  let calls = 0
+  const h = makeHandler({ runNightly: async ({ tenantId }) => { calls++; return ok() } })
+  for (const bad of [',', ' ,  , ', '']) {
+    process.env.TIDEMARK_NIGHTLY_TENANTS = bad
+    await assert.rejects(() => h(EV), /parses to zero tenants/, `explicit "${bad}" must fail closed`)
+  }
+  assert.equal(calls, 0, 'no tenant may run under zero-tenant config')
+  delete process.env.TIDEMARK_NIGHTLY_TENANTS
+  const r = await h(EV)
+  assert.equal(r.results[0].tenant_id, 'demo-tenant', 'undefined env falls back to demo-tenant')
+  process.env.TIDEMARK_NIGHTLY_TENANTS = 't-x, t-x ,t-x'
+  calls = 0
+  await h(EV)
+  assert.equal(calls, 1, 'duplicate tenants deduplicated to one run')
+  delete process.env.TIDEMARK_NIGHTLY_TENANTS
+  console.log('PASS H10 zero-tenant config fails closed, default only rescues undefined, dedup works')
+}
+
+console.log('ALL P0-09 NIGHTLY-HANDLER ASSERTIONS PASSED (H1-H10)')

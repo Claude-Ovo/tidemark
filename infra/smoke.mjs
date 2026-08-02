@@ -1,5 +1,7 @@
 // P0-09 线上 smoke（验收：完整线上闭环 + 重复 EventBridge 触发只提交一次 + 仓库无 secret）
 // 用法: node --env-file=.env infra/smoke.mjs <api-base-url>
+// 直连 AWS 线路毛躁（跨国 ECONNRESET）时加 NODE_USE_ENV_PROXY=1 让 fetch 走 HTTPS_PROXY；
+// DB 断言段自带 3 次重连重查（只读安全）。
 // 凭据来源：agent/admin key 从 Secrets Manager 现取（本地 aws 凭据），不落盘不进 argv；
 // DB 断言直连 CRDB tidemark_prod（.env 的集群 URL）。S1-S10 走公网 API Gateway，
 // S11 用 aws cli 以同一 canonical scheduled_for 连续 invoke 夜间函数两次，再到
@@ -178,19 +180,32 @@ await withClient({ 'x-tidemark-auth': DEMO_KEY }, async (c) => {
   assert.ok(['completed', 'completed_degraded'].includes(second.results[0].top), JSON.stringify(second))
 
   // serverless 集群冷唤醒会连环 ECONNRESET——用迁移器同款带重试的连接
-  const db = await connectWithRetry(withDatabase(process.env.COCKROACH_DATABASE_URL, PROD_DB), { label: 'smoke-db' })
-  try {
-    const rows = (await db.query(
-      `SELECT job_kind, count(*)::INT AS n, count(*) FILTER (WHERE status = 'completed')::INT AS done
-       FROM nightly_runs WHERE tenant_id = 'demo-tenant' AND scheduled_for = $1 GROUP BY job_kind ORDER BY job_kind`,
-      [scheduledFor])).rows
+  // 只读断言查询：连接或查询中途 ECONNRESET（跨国线路 + serverless 冷唤醒双重毛躁）就
+  // 整段重连重查，最多 3 次——查询无副作用，重试安全
+  const dbQuery = async (fn) => {
+    for (let attempt = 1; ; attempt++) {
+      const db = await connectWithRetry(withDatabase(process.env.COCKROACH_DATABASE_URL, PROD_DB), { label: 'smoke-db' })
+      try { return await fn(db) }
+      catch (e) {
+        if (attempt >= 3) throw e
+        console.error(`[retry] smoke db attempt ${attempt} failed (${e.code ?? e.message}); reconnecting`)
+      } finally { await db.end().catch(() => {}) }
+    }
+  }
+  {
+    const { rows, pair } = await dbQuery(async (db) => ({
+      rows: (await db.query(
+        `SELECT job_kind, count(*)::INT AS n, count(*) FILTER (WHERE status = 'completed')::INT AS done
+         FROM nightly_runs WHERE tenant_id = 'demo-tenant' AND scheduled_for = $1 GROUP BY job_kind ORDER BY job_kind`,
+        [scheduledFor])).rows,
+      pair: (await db.query(
+        `SELECT experience_id FROM reflection_pairs WHERE tenant_id = 'demo-tenant' AND failure_attempt_id = $1 AND success_attempt_id = $2`,
+        [attF, attS])).rows,
+    }))
     const refl = rows.find(r => r.job_kind === 'reflection')
     assert.ok(refl, `reflection run must have claimed (pair was due): ${JSON.stringify(rows)}`)
     assert.equal(Number(refl.done), 1, `reflection run completed: ${JSON.stringify(rows)}`)
     for (const r of rows) assert.equal(Number(r.n), 1, `duplicate trigger must not double-commit ${r.job_kind}: ${JSON.stringify(rows)}`)
-    const pair = (await db.query(
-      `SELECT experience_id FROM reflection_pairs WHERE tenant_id = 'demo-tenant' AND failure_attempt_id = $1 AND success_attempt_id = $2`,
-      [attF, attS])).rows
     assert.equal(pair.length, 1, `exactly-once pair ledger row: ${JSON.stringify(pair)}`)
     // 措辞诚实（round-2 P1-5）：这是同步双 invoke 证明 handler 对同一 canonical schedule 的
     // run-key 幂等；真实 EventBridge 异步重投/DLQ 由 S13 的控制面断言覆盖，不在此冒充。
@@ -203,7 +218,7 @@ await withClient({ 'x-tidemark-auth': DEMO_KEY }, async (c) => {
       body: JSON.stringify({ tenant_id: 'demo-tenant', memory_id: expId, reason: 'smoke_cleanup' }) })).json()
     assert.equal(f.ok, true, `experience cleanup: ${JSON.stringify(f)}`)
     console.log('PASS S12 smoke experience forgotten via admin surface')
-  } finally { await db.end() }
+  }
 }
 
 // S13 异步失败通路控制面验收（round-2 P0-3/P1-5，round-3 P1-4 加固）：
