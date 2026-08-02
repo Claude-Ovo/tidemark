@@ -1,0 +1,9 @@
+{
+  "name": "tidemark-onnx-spike",
+  "version": "0.0.1",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0"
+  }
+}
