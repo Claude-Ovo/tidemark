@@ -5,9 +5,12 @@
 ## 单一真相源：`spike/onnx/manifest.json`
 
 模型仓库/commit、四件套 SHA256、license、输出契约（384 mean+L2 -> pad 512）、
-`embedding_model_id = Xenova/all-MiniLM-L6-v2@751bff37:q8:mean:l2:pad512` 全部只写在 manifest；
-fetch 脚本按它下载校验，**Lambda 冷启动按它逐文件复验（mismatch/缺文件直接拒启，fail-closed）**，
-provider 的 `embedding_model_id` 与 pipeline version 未来从它导出——三套字符串不会各自漂移。
+全部只写在 manifest；fetch 脚本按它下载校验，**Lambda 冷启动按它逐文件复验（mismatch/缺文件直接拒启，
+fail-closed）**。`embedding_model_id` **不是手写串而是派生值**（`identity.mjs`）：
+可读前缀 + canonical digest，digest 覆盖 full commit、四件套 SHA、dtype/pooling/normalize/dims 与
+transformers/onnxruntime **实际安装版本**（与 manifest 对账，漂移即抛）——任何影响向量空间的
+字段变化都会改变身份。当前值 `Xenova/all-MiniLM-L6-v2@751bff37:q8:mean:l2:pad512#4e3950290681`，
+staging 推导、Lambda 冷启动、本地三处一致。
 attribution 见 `spike/onnx/NOTICE.md`（Apache-2.0）。
 
 ## 可复现构建（全部入库，reviewer 可独立重建）
@@ -22,7 +25,10 @@ attribution 见 `spike/onnx/NOTICE.md`（Apache-2.0）。
   -> zip -> 产出 `artifact-manifest.json`（模型四件套、npm lock SHA、平台、裁剪规则、zip SHA256/尺寸）
   -> `-Deploy` 时 S3 上传同一 zip、部署、**冷启动实调验收**（dims=512 才算过）。
 - `spike/onnx/verify.mjs`：本地与 Lambda 对同一组文本比较**完整 512 维 canonical digest（64-hex）**
-  并计算 `max_abs_diff`。
+  并计算 `max_abs_diff`；结构非法或 digest 不等**以非零退出**（可作 CI 验收门），
+  `--self-test-mismatch` 反例由 `test-verify.mjs` 断言"检出必红"。
+- 部署验真：build 以 Lambda `CodeSha256` 对本地 zip SHA256（base64）**精确对表**，再冷启动实调
+  断言 dims=512 + **exact 派生身份** + 64-hex digest——证明线上跑的就是这一个 zip。
 
 ## 实测数字（Lambda nodejs22.x / x86_64 / 1024MB / us-east-1）
 
@@ -32,7 +38,7 @@ attribution 见 `spike/onnx/NOTICE.md`（Apache-2.0）。
 | 冷启动首推理 | 约 1.1s（合计约 2.2s，30s API 预算内） |
 | warm 推理 | 4-34ms/条 |
 | zip | 32.3MB，sha256 见 artifact-manifest（50MB 直传线内；实走 S3——直传 41MB 曾被跨国线路掐断） |
-| 解压 | 70.7MB + 模型（250MB 上限的四成） |
+| 解压 | 70.7MB（已含 22.6MB 模型；250MB 上限的三成） |
 | 语义分辨 | paraphrase cos 0.4615 vs unrelated cos -0.0028 |
 
 ## 跨平台确定性（round-2 起为完整证据，非抽样）

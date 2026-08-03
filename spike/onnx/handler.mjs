@@ -10,9 +10,13 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { toF32, canonicalDigest } from './vector-canonical.mjs'
+import { deriveEmbeddingModelId } from './identity.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const MANIFEST = JSON.parse(readFileSync(join(HERE, 'manifest.json'), 'utf8'))
+// 身份在冷启动【派生】而非读手写串：任何影响向量空间的字段（commit/SHA/output/运行时版本）
+// 变化都会改变它；transformers 版本漂移在这里直接抛（round-3 P1-2）
+const { embedding_model_id: EMBEDDING_MODEL_ID } = deriveEmbeddingModelId(HERE)
 
 // fail-closed 模型完整性闸：manifest 每一项都必须在场且摘要一致
 const verifyModelArtifacts = () => {
@@ -58,7 +62,7 @@ export const handler = async (event) => {
     ? { paraphrase: cos(vectors[0], vectors[1]), unrelated: cos(vectors[0], vectors[2]) }
     : null
   return {
-    embedding_model_id: MANIFEST.embedding_model_id,
+    embedding_model_id: EMBEDDING_MODEL_ID,
     inputs: texts, dims: vectors[0].length, load_ms: loadMs, infer_ms: timings,
     semantic, canonical_digests: digests,
     ...(event?.return_vectors ? { vectors } : {}),

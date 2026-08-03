@@ -50,10 +50,12 @@ Remove-Item node_modules/sharp -Recurse -Force -Confirm:$false
 New-Item -ItemType Directory node_modules/sharp | Out-Null
 Copy-Item ..\sharp-stub\package.json,..\sharp-stub\index.js node_modules/sharp/
 
-# 3. payload: handler + REAL canonical implementation + manifest + sealed models
+# 3. payload: handler + identity + REAL canonical implementation + manifest + NOTICE + models
 Copy-Item ..\handler.mjs .
+Copy-Item ..\identity.mjs .
 Copy-Item (Join-Path $repo 'src\lib\vector-canonical.mjs') .\vector-canonical.mjs
 Copy-Item ..\manifest.json .
+Copy-Item ..\NOTICE.md .
 Copy-Item ..\models . -Recurse
 
 # 4. content verification gates (fail the build, not the reviewer)
@@ -62,10 +64,18 @@ if (Test-Path node_modules/onnxruntime-node/bin/napi-v6/win32) { throw "win32 bi
 if (Test-Path node_modules/onnxruntime-web) { throw "onnxruntime-web survived pruning" }
 if (-not (Select-String -Path node_modules/sharp/index.js -Pattern "TIDEMARK_SHARP_STUB" -Quiet)) { throw "sharp is not the stub" }
 if (-not (Select-String -Path .\vector-canonical.mjs -Pattern "canonicalDigest" -Quiet)) { throw "canonical implementation missing" }
+if (-not (Test-Path .\identity.mjs)) { throw "identity module missing from payload" }
+if (-not (Test-Path .\NOTICE.md)) { throw "NOTICE missing from payload" }
+# derived identity must be computable against the STAGED tree (also reconciles lockfile
+# transformers/ORT versions with the manifest -- drift throws here, not in prod)
+$idJson = node ..\identity.mjs --print .
+Assert-NativeSuccess "identity derivation against staging"
+$expectedId = ($idJson | ConvertFrom-Json).embedding_model_id
+Write-Host "derived embedding_model_id: $expectedId"
 
 # 5. zip + artifact manifest
 if (Test-Path spike-onnx.zip) { Remove-Item spike-onnx.zip -Force -Confirm:$false }
-& "$env:SystemRoot\System32\tar.exe" -a -c -f spike-onnx.zip handler.mjs vector-canonical.mjs manifest.json models node_modules package.json
+& "$env:SystemRoot\System32\tar.exe" -a -c -f spike-onnx.zip handler.mjs identity.mjs vector-canonical.mjs manifest.json NOTICE.md models node_modules package.json
 Assert-NativeSuccess "zip"
 $zipInfo = Get-Item spike-onnx.zip
 $zipSha = (Get-FileHash spike-onnx.zip -Algorithm SHA256).Hash.ToLower()
@@ -73,7 +83,7 @@ $unpacked = [long]((Get-ChildItem handler.mjs,vector-canonical.mjs,manifest.json
 $lockSha = (Get-FileHash ..\package-lock.json -Algorithm SHA256).Hash.ToLower()
 $modelManifest = Get-Content ..\manifest.json -Raw | ConvertFrom-Json
 $artifact = [ordered]@{
-  embedding_model_id = $modelManifest.embedding_model_id
+  embedding_model_id = $expectedId
   model_files = $modelManifest.files
   npm_lock_sha256 = $lockSha
   target = "nodejs22.x linux x64"
@@ -106,7 +116,16 @@ Assert-NativeSuccess "wait active"
 & $aws lambda wait function-updated-v2 --function-name $FunctionName
 Assert-NativeSuccess "wait updated"
 
-# cold-start verification of the deployed artifact (text pipeline + manifest gate live)
+# deployed-artifact identity proof (round-3 P2): CodeSha256 must equal our zip's sha256
+# in base64 -- proves the function runs THIS zip, not merely "some zip that answers"
+$hexBytes = [byte[]]::new(32)
+for ($i = 0; $i -lt 32; $i++) { $hexBytes[$i] = [Convert]::ToByte($zipSha.Substring($i * 2, 2), 16) }
+$zipShaB64 = [Convert]::ToBase64String($hexBytes)
+$deployedSha = & $aws lambda get-function --function-name $FunctionName --query Configuration.CodeSha256 --output text
+Assert-NativeSuccess "get CodeSha256"
+if ($deployedSha -ne $zipShaB64) { throw "deployed CodeSha256 $deployedSha != local zip sha256 (b64) $zipShaB64" }
+
+# cold-start verification of the deployed artifact: dims + EXACT derived identity + 64-hex digest
 $pf = Join-Path $env:TEMP 'spike-verify-payload.json'
 [IO.File]::WriteAllText($pf, '{"texts":["cold start verification probe"]}', (New-Object Text.UTF8Encoding($false)))
 $out = Join-Path $env:TEMP 'spike-verify-out.json'
@@ -114,4 +133,7 @@ $out = Join-Path $env:TEMP 'spike-verify-out.json'
 Assert-NativeSuccess "verify invoke"
 $resp = Get-Content $out -Raw | ConvertFrom-Json
 if ($resp.dims -ne 512) { throw "deployed artifact failed cold-start verification: $(Get-Content $out -Raw)" }
-Write-Host ("deployed + cold-start verified: dims={0} load_ms={1} model={2}" -f $resp.dims, $resp.load_ms, $resp.embedding_model_id)
+if ($resp.embedding_model_id -ne $expectedId) { throw "deployed identity '$($resp.embedding_model_id)' != derived '$expectedId'" }
+if ($resp.canonical_digests[0] -notmatch '^[0-9a-f]{64}$') { throw "deployed digest is not 64-hex canonical" }
+Write-Host ("deployed + verified: CodeSha256 match, dims={0} load_ms={1}" -f $resp.dims, $resp.load_ms)
+Write-Host ("identity: {0}" -f $resp.embedding_model_id)

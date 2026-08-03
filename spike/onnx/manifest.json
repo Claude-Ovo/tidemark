@@ -11,5 +11,5 @@
     "onnx/model_quantized.onnx": "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1"
   },
   "output": { "native_dims": 384, "pooling": "mean", "normalize": true, "pad_to": 512, "dtype": "q8" },
-  "embedding_model_id": "Xenova/all-MiniLM-L6-v2@751bff37:q8:mean:l2:pad512"
+  "notice_file": "NOTICE.md"
 }
