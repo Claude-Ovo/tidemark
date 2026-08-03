@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const SELF_TEST = process.argv[2] === '--self-test-mismatch'
-const FN = (!SELF_TEST && process.argv[2]) || 'tidemark-embed-spike'
+const SELF_TEST_STALE = process.argv[2] === '--self-test-stale-digest'
+const FN = (!SELF_TEST && !SELF_TEST_STALE && process.argv[2]) || 'tidemark-embed-spike'
 const AWS_CLI = process.env.AWS_CLI_PATH || 'C:\\Program Files\\Amazon\\AWSCLIV2\\aws.exe'
 const TEXTS = [
   'the deployment failed because the API key was invalid',
@@ -20,31 +21,44 @@ const TEXTS = [
 ]
 const RX_HEX64 = /^[0-9a-f]{64}$/
 
-// 结构校验：数量、512 维、全有限值、64-hex digest——先于任何比较（round-3 P1-1）
+// 结构校验 + 自报不信任（round-4 P1-1）：数量、512 维、全有限值、64-hex 形状，然后
+// 用正式 canonical 算法从【返回的 vectors】重算 digest 并与声明值比对——远端缓存/回归
+// 送来"旧 digest 配新向量"在这里直接爆，比较阶段只用重算值。
+import { toF32, canonicalDigest } from './vector-canonical.mjs'
 const validateSide = (label, r) => {
   assert.ok(Array.isArray(r.vectors) && r.vectors.length === TEXTS.length, `${label}: vectors missing or wrong count`)
   assert.ok(Array.isArray(r.canonical_digests) && r.canonical_digests.length === TEXTS.length, `${label}: digests wrong count`)
+  const recomputed = []
   for (let i = 0; i < TEXTS.length; i++) {
     assert.equal(r.vectors[i].length, 512, `${label}: text${i} must be 512 dims`)
     assert.ok(r.vectors[i].every(Number.isFinite), `${label}: text${i} has non-finite components`)
     assert.ok(RX_HEX64.test(r.canonical_digests[i]), `${label}: text${i} digest is not 64-hex`)
+    const rc = canonicalDigest(toF32(r.vectors[i]))
+    assert.equal(rc, r.canonical_digests[i], `${label}: text${i} DECLARED digest does not match vector recompute (self-report distrusted)`)
+    recomputed.push(rc)
   }
+  return recomputed
 }
 
 console.log('[1/3] local (this platform) ...')
 const { handler } = await import('./handler.mjs')
 const local = await handler({ texts: TEXTS, return_vectors: true })
-validateSide('local', local)
-console.log(`      node=${local.node} load=${local.load_ms}ms id=${local.embedding_model_id}`)
+const localRecomputed = validateSide('local', local)
+console.log(`      node=${local.node} load=${local.load_ms}ms id=${local.embedding_model_id.slice(0, 60)}...`)
 
 let remote
 if (SELF_TEST) {
-  // 伪造远端：抄本地结果但扰动 text1 的一维——本脚本必须以非零退出收场
+  // 伪造远端 A：扰动一维【并同步重算声明 digest】——须在重算比较阶段爆（digest 不等）
   console.log('[2/3] fake remote (self-test mismatch) ...')
   remote = JSON.parse(JSON.stringify(local))
   remote.vectors[1][7] += 1e-3
-  const { toF32, canonicalDigest } = await import('./vector-canonical.mjs')
   remote.canonical_digests[1] = canonicalDigest(toF32(remote.vectors[1]))
+} else if (SELF_TEST_STALE) {
+  // 伪造远端 B（round-4 反例）：扰动一维【但声明 digest 保持旧值】——自报不可信，
+  // 须在 validateSide 的重算对账处爆
+  console.log('[2/3] fake remote (self-test stale declared digest) ...')
+  remote = JSON.parse(JSON.stringify(local))
+  remote.vectors[1][7] += 1e-3
 } else {
   console.log(`[2/3] lambda ${FN} ...`)
   const tmp = mkdtempSync(join(tmpdir(), 'onnx-verify-'))
@@ -58,22 +72,22 @@ if (SELF_TEST) {
     remote = JSON.parse(readFileSync(out, 'utf8'))
   } finally { rmSync(tmp, { recursive: true, force: true }) }
 }
-validateSide('remote', remote)
-console.log(`      node=${remote.node} load=${remote.load_ms}ms id=${remote.embedding_model_id}`)
+const remoteRecomputed = validateSide('remote', remote)
+console.log(`      node=${remote.node} load=${remote.load_ms}ms id=${remote.embedding_model_id.slice(0, 60)}...`)
 
-console.log('[3/3] compare ...')
+console.log('[3/3] compare (recomputed digests only, self-reports already reconciled) ...')
 assert.equal(local.embedding_model_id, remote.embedding_model_id, 'model identity must match')
 let allEqual = true, maxAbsDiff = 0
 for (let i = 0; i < TEXTS.length; i++) {
-  const eq = local.canonical_digests[i] === remote.canonical_digests[i]
+  const eq = localRecomputed[i] === remoteRecomputed[i]
   allEqual &&= eq
   let diff = 0
   for (let j = 0; j < 512; j++) diff = Math.max(diff, Math.abs(local.vectors[i][j] - remote.vectors[i][j]))
   maxAbsDiff = Math.max(maxAbsDiff, diff)
-  console.log(`      text${i}: digest ${eq ? 'EQUAL' : 'DIFFERENT'} (${local.canonical_digests[i].slice(0, 16)} vs ${remote.canonical_digests[i].slice(0, 16)}), max_abs_diff=${diff}`)
+  console.log(`      text${i}: recomputed digest ${eq ? 'EQUAL' : 'DIFFERENT'} (${localRecomputed[i].slice(0, 16)} vs ${remoteRecomputed[i].slice(0, 16)}), max_abs_diff=${diff}`)
 }
-if (!allEqual) {
-  // 失败必须红：打印结论后以异常收场，调用方/CI 拿到非零退出码
-  throw new Error(`NOT bit-exact across platforms (max_abs_diff=${maxAbsDiff}); claims must say approximate`)
+// bit-exact = 重算 digest 全等【且】数值零差——单靠任何一边都不算（round-4 P1-1）
+if (!allEqual || maxAbsDiff !== 0) {
+  throw new Error(`NOT bit-exact across platforms (digests_equal=${allEqual}, max_abs_diff=${maxAbsDiff}); claims must say approximate`)
 }
-console.log(`VERDICT: full-512 canonical digests identical across platforms (bit-exact), max_abs_diff=${maxAbsDiff}`)
+console.log(`VERDICT: full-512 recomputed canonical digests identical across platforms (bit-exact), max_abs_diff=${maxAbsDiff}`)

@@ -41,7 +41,13 @@ export const deriveEmbeddingModelId = (baseDir) => {
   const digest = createHash('sha256').update(canonical).digest('hex')
   const o = manifest.output
   const prefix = `${manifest.model_repo}@${manifest.model_commit.slice(0, 8)}:${o.dtype}:${o.pooling}:${o.normalize ? 'l2' : 'raw'}:pad${o.pad_to}`
-  return { embedding_model_id: `${prefix}#${digest.slice(0, 12)}`, identity_digest: digest, manifest }
+  return {
+    // round-4 P1-2：DB/pipeline 使用【完整 64-hex】digest——短摘要能"随字段变化"
+    // 但不能"精确标识变化"，碰撞即隔离失效且此处无 Git 式碰撞检测。多 52 字节无成本。
+    embedding_model_id: `${prefix}#${digest}`,
+    display_id: `${prefix}#${digest.slice(0, 12)}`,   // 仅展示用，禁止落库
+    identity_digest: digest, manifest,
+  }
 }
 
 if (process.argv[2] === '--print') {

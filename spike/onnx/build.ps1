@@ -79,7 +79,7 @@ if (Test-Path spike-onnx.zip) { Remove-Item spike-onnx.zip -Force -Confirm:$fals
 Assert-NativeSuccess "zip"
 $zipInfo = Get-Item spike-onnx.zip
 $zipSha = (Get-FileHash spike-onnx.zip -Algorithm SHA256).Hash.ToLower()
-$unpacked = [long]((Get-ChildItem handler.mjs,vector-canonical.mjs,manifest.json,models,node_modules,package.json -Recurse -File | Measure-Object Length -Sum).Sum)
+$unpacked = [long]((Get-ChildItem handler.mjs,identity.mjs,vector-canonical.mjs,manifest.json,NOTICE.md,models,node_modules,package.json -Recurse -File | Measure-Object Length -Sum).Sum)
 $lockSha = (Get-FileHash ..\package-lock.json -Algorithm SHA256).Hash.ToLower()
 $modelManifest = Get-Content ..\manifest.json -Raw | ConvertFrom-Json
 $artifact = [ordered]@{
@@ -125,15 +125,17 @@ $deployedSha = & $aws lambda get-function --function-name $FunctionName --query 
 Assert-NativeSuccess "get CodeSha256"
 if ($deployedSha -ne $zipShaB64) { throw "deployed CodeSha256 $deployedSha != local zip sha256 (b64) $zipShaB64" }
 
-# cold-start verification of the deployed artifact: dims + EXACT derived identity + 64-hex digest
+# cold-start verification: dims + EXACT derived identity + digest RECOMPUTED from the
+# returned vector (round-4 P2: the probe does not trust self-reported digests either)
 $pf = Join-Path $env:TEMP 'spike-verify-payload.json'
-[IO.File]::WriteAllText($pf, '{"texts":["cold start verification probe"]}', (New-Object Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText($pf, '{"texts":["cold start verification probe"],"return_vectors":true}', (New-Object Text.UTF8Encoding($false)))
 $out = Join-Path $env:TEMP 'spike-verify-out.json'
 & $aws lambda invoke --function-name $FunctionName --cli-binary-format raw-in-base64-out --payload ("file://" + ($pf -replace '\\','/')) $out --query "[StatusCode,FunctionError]" --output text
 Assert-NativeSuccess "verify invoke"
 $resp = Get-Content $out -Raw | ConvertFrom-Json
 if ($resp.dims -ne 512) { throw "deployed artifact failed cold-start verification: $(Get-Content $out -Raw)" }
 if ($resp.embedding_model_id -ne $expectedId) { throw "deployed identity '$($resp.embedding_model_id)' != derived '$expectedId'" }
-if ($resp.canonical_digests[0] -notmatch '^[0-9a-f]{64}$') { throw "deployed digest is not 64-hex canonical" }
+node ..\probe-check.mjs $out .
+Assert-NativeSuccess "probe digest recompute"
 Write-Host ("deployed + verified: CodeSha256 match, dims={0} load_ms={1}" -f $resp.dims, $resp.load_ms)
 Write-Host ("identity: {0}" -f $resp.embedding_model_id)
