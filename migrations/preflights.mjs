@@ -17,6 +17,28 @@ const LEGACY_OUTCOMES_SQL =
   'SELECT count(*)::INT4 AS n FROM public.outcomes WHERE payload_hmac IS NULL OR response_json IS NULL'
 
 export const PREFLIGHTS = {
+  // 035 freezes "embedding present -> identity present" (conclusion 55). CockroachDB
+  // validates existing rows on ADD CONSTRAINT, so a legacy stub-vector database would die
+  // mid-migrate with 23514. Refuse BEFORE the constraint with executable recovery, and
+  // note the writer race: identity-stamping writers (the local-onnx code) must already be
+  // deployed, otherwise fresh NULL-identity rows reappear between backfill and re-run.
+  // The CHECK itself is the last fail-closed line if a racer still sneaks one in.
+  35: async (client) => {
+    const n = (await client.query(
+      'SELECT count(*)::INT4 AS n FROM public.memories WHERE embedding IS NOT NULL AND embedding_model_id IS NULL',
+    )).rows[0].n
+    if (n > 0) {
+      throw new Error(
+        `PREFLIGHT 035 REFUSED: ${n} embedded row(s) lack embedding_model_id and the constraint would ` +
+        'fail validation (23514). Recover by re-embedding into the CURRENT space: deploy identity-stamping ' +
+        'writers first (old writers keep producing NULL-identity rows), then run ' +
+        'EMBED_PROVIDER=local-onnx node migrations/backfill-embeddings.mjs --database <db> ' +
+        'until it reports residual 0, then re-run migrate. Never hand-write embedding_model_id: the value ' +
+        'must come from the derived identity that actually produced the vector.',
+      )
+    }
+  },
+
   // Refuse BEFORE deleting tool_requests copies while any outcome still lacks
   // its evidence. At this point the evidence exists -- recovery is backfill.
   14: async (client) => {

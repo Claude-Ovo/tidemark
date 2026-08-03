@@ -316,7 +316,7 @@ try {
   // 13. EXPLAIN 断言（仓库内可复现）：第一路必须命中 vector search 节点
   {
     const vec = '[' + Array(512).fill('0.01').join(',') + ']'
-    const plan = (await q(`EXPLAIN SELECT memory_id FROM memories@mem_vec_idx WHERE tenant_id=$1 AND agent_id=$2 ORDER BY embedding <=> $3 LIMIT 50`,
+    const plan = (await q(`EXPLAIN SELECT memory_id FROM memories@mem_vec_id_idx WHERE tenant_id=$1 AND agent_id=$2 AND embedding_model_id='stub-sha256-512' ORDER BY embedding <=> $3 LIMIT 50`,
       [TENANT, AGENT, vec])).rows.map(r => Object.values(r)[0]).join('\n')
     assert.ok(/vector search/i.test(plan), `path A must use vector index:\n${plan}`)
     console.log('PASS 13 EXPLAIN: path A hits vector search node')

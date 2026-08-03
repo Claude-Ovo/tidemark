@@ -9,7 +9,7 @@
   "scripts": {
     "migrate": "node --env-file=.env migrations/apply.mjs",
     "verify:migrations": "node --env-file=.env migrations/verify.mjs",
-    "test": "node --check migrations/apply.mjs && node --check migrations/verify.mjs && node --check src/server.mjs && node --check src/tools/remember.mjs && node src/test-admission.mjs && node src/test-db-release.mjs && node src/test-config.mjs && node src/test-preflight.mjs && node src/test-disposable-db.mjs && node src/test-secrets.mjs && node src/test-nightly-handler.mjs",
+    "test": "node --check migrations/apply.mjs && node --check migrations/verify.mjs && node --check src/server.mjs && node --check src/tools/remember.mjs && node src/test-admission.mjs && node src/test-db-release.mjs && node src/test-config.mjs && node src/test-preflight.mjs && node src/test-disposable-db.mjs && node src/test-secrets.mjs && node src/test-nightly-handler.mjs && node src/test-embed-onnx.mjs",
     "test:remember": "node --env-file=.env src/test-remember.mjs",
     "test:recall": "node --env-file=.env src/test-recall.mjs",
     "test:log-event": "node --env-file=.env src/test-log-event.mjs",

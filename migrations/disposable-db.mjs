@@ -14,7 +14,7 @@ export const withDisposableDb = async ({ base, mkName, connect, fn, log = consol
       created = true
     } finally { await admin.end().catch(() => {}) }
     client = await connect(withDatabase(base, DB), { label: DB })
-    return await fn(client)
+    return await fn(client, DB)   // 库名作第二参（可选消费）：子进程类步骤（如 backfill）需要它
   } finally {
     await client?.end().catch(() => {})
     if (created) {

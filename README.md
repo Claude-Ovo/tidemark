@@ -54,8 +54,9 @@ request path at all. Details that matter:
   runtime versions (readable prefix + full 64-hex digest, `src/lib/embed-identity.mjs`).
   Every embedded row stores it; recall only searches the CURRENT identity (the vector index
   prefix includes it), so vector spaces can never mix. `GET /health` exposes the live value.
-- **Truncation contract**: inputs beyond the tokenizer cap (512 wordpieces; the model's
-  trained length is 256) are deterministically truncated and observably flagged
+- **Truncation contract**: inputs beyond the frozen 256-wordpiece boundary (the model's
+  trained length; policy lives in the manifest and is part of the identity) are
+  deterministically truncated (head-token-decode) and observably flagged
   (`embed_truncated` log + `truncated` in the embed result) - never silently passed off
   as fully embedded.
 - **Numbers** (see docs/SPIKE-ONNX.md): cold start ~2.2s at 1024MB, warm 4-34ms per text,
@@ -80,8 +81,8 @@ What it creates (all create-or-update; reruns are safe):
 |---|---|---|
 | Secrets Manager secret | `tidemark/prod` | DB URL, HMAC key, admin key, agent API keys. Generated once by `infra/gen-secret.mjs`; values are preserved on redeploy (`-RotateSecrets` regenerates). Credentials never enter argv, function config, or the repo. |
 | IAM role | `tidemark-prod-role` | Basic execution + `GetSecretValue` on the one secret + `bedrock:InvokeModel` on the Titan embed model. |
-| Lambda | `tidemark-mcp` | The Memory MCP server (same `src/server.mjs` as local, wrapped by `src/aws/mcp-handler.mjs`). 30s / 512MB / pool max=1. |
-| Lambda | `tidemark-nightly` | Dream -> reflection -> transition orchestrator (`src/aws/nightly-handler.mjs`). 600s. |
+| Lambda | `tidemark-mcp` | The Memory MCP server (same `src/server.mjs` as local, wrapped by `src/aws/mcp-handler.mjs`). 30s / 1024MB / pool max=1 (in-process embedding needs the headroom). |
+| Lambda | `tidemark-nightly` | Dream -> reflection -> transition orchestrator (`src/aws/nightly-handler.mjs`). 600s / 1024MB. |
 | API Gateway HTTP API | `tidemark-api` | `$default` -> `tidemark-mcp`. |
 | EventBridge rule | `tidemark-nightly` | `cron(0 19 * * ? *)` (03:00 Beijing). Event time is floored to the minute into the canonical `scheduled_for`, so duplicate/retried deliveries land on the same `nightly_runs` key and commit exactly once (handler-level proof in smoke S11). |
 | SQS DLQ | `tidemark-nightly-dlq` | Two failure layers, both explicit (smoke S13 asserts them): EventBridge target `RetryPolicy` + `DeadLetterConfig` for delivery failures; Lambda async event-invoke-config (2 retries, 6h age, `OnFailure` -> DLQ) for function-code failures. The nightly handler deliberately fails on nonterminal job states (lease held, retryable, stale, crashed), so async retries carry the same event = same canonical schedule = takeover of the same run; exhausted retries land in the DLQ instead of vanishing. |

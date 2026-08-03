@@ -413,9 +413,20 @@ const auditSchema = async (client) => {
     WHERE table_schema = current_schema() AND table_name = 'memories'
   `)
   const actualIndexes = new Set(memoryIndexes.rows.map(row => row.index_name))
-  for (const index of ['mem_vec_idx', 'mem_due_idx', 'mem_pin_idx', 'memories_tenant_memory_uq']) {
+  for (const index of ['mem_vec_id_idx', 'mem_due_idx', 'mem_pin_idx', 'memories_tenant_memory_uq']) {
     assert.ok(actualIndexes.has(index), `missing memories index ${index}`)
   }
+  // 037 dropped the legacy (tenant, agent) prefix vector index. Its presence after full
+  // migration means the identity-prefixed rebuild did not complete -- fail visibly.
+  assert.ok(!actualIndexes.has('mem_vec_idx'), 'legacy mem_vec_idx must be gone after 037')
+  // identity must be part of the vector index prefix (conclusion 55 space isolation)
+  const vecCols = (await client.query(`
+    SELECT column_name FROM information_schema.statistics
+    WHERE table_schema = current_schema() AND table_name = 'memories' AND index_name = 'mem_vec_id_idx'
+    ORDER BY seq_in_index
+  `)).rows.map(r => r.column_name)
+  assert.deepStrictEqual(vecCols.slice(0, 3), ['tenant_id', 'agent_id', 'embedding_model_id'],
+    `mem_vec_id_idx prefix must be (tenant_id, agent_id, embedding_model_id), got ${JSON.stringify(vecCols)}`)
 
   console.log(`PASS schema audit (${DOMAIN_TABLES.length} tenant-scoped PKs, ${foreignKeys.size} tenant-scoped FKs, ${testedChecks.size} explicit CHECKs, 4 memory indexes)`)
 }

@@ -10,6 +10,6 @@
     "tokenizer_config.json": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3",
     "onnx/model_quantized.onnx": "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1"
   },
-  "output": { "native_dims": 384, "pooling": "mean", "normalize": true, "pad_to": 512, "dtype": "q8" },
+  "output": { "native_dims": 384, "pooling": "mean", "normalize": true, "pad_to": 512, "dtype": "q8", "max_tokens": 256, "truncation": "head-token-decode" },
   "notice_file": "NOTICE.md"
 }

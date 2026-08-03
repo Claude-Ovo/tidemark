@@ -54,17 +54,31 @@ const cos = (a, b, n) => { let s = 0; for (let i = 0; i < n; i++) s += a[i] * b[
   console.log('PASS E2 deterministic embedding')
 }
 
-// E5 截断契约：admission 上限量级的长文（约 9000 字符）不炸、可观测、确定性
+// E5 截断契约（冻结 max_tokens=256）：长文不炸、可观测、确定性
 {
   const long = 'deployment retry with exponential backoff '.repeat(220)
   const a = await embedLocalOnnx(long)
   assert.equal(a.truncated, true, 'E5 long input must be flagged truncated')
-  assert.ok(a.token_count > 512, `E5 token_count ${a.token_count} must exceed the cap`)
+  assert.ok(a.token_count > 256, `E5 token_count ${a.token_count} must exceed the frozen cap`)
   const b = await embedLocalOnnx(long)
   assert.equal(canonicalDigest(toF32(a.vector)), canonicalDigest(toF32(b.vector)), 'E5 truncation is deterministic')
   const short = await embedLocalOnnx(TEXTS[0])
   assert.equal(short.truncated, false, 'E5 short input must not be flagged')
   console.log(`PASS E5 truncation contract (observable flag, tokens=${a.token_count}, deterministic)`)
+}
+
+// E5b 256 边界判别力（Codex round-2 红门）：前 256 token 完全相同、尾部不同的两段文本
+// 必须产出【完全相同】的向量且都被标记 truncated——证明 257+ 的内容真的没被消费
+{
+  const prefix = 'memory '.repeat(300)          // 约 300+ tokens，远超 256
+  const a = await embedLocalOnnx(prefix + 'cat')
+  const b = await embedLocalOnnx(prefix + 'database entirely different tail content here')
+  assert.equal(a.truncated, true, 'E5b variant A flagged')
+  assert.equal(b.truncated, true, 'E5b variant B flagged')
+  assert.equal(canonicalDigest(toF32(a.vector)), canonicalDigest(toF32(b.vector)),
+    'E5b identical first-256-token prefix must yield IDENTICAL vectors (tail is provably not consumed)')
+  assert.notEqual(a.token_count, b.token_count, 'E5b full-text counts still observable and distinct')
+  console.log('PASS E5b frozen 256 boundary: identical prefix -> identical vector, tails not consumed')
 }
 
 // E6 缺模型 fail-closed（子进程：单例缓存使同进程无法复测坏目录）

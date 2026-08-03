@@ -18,17 +18,25 @@ const migrationsDir = path.dirname(fileURLToPath(import.meta.url))
 const parseArgs = (argv) => {
   let database
   let createDatabase = false
+  let through = null
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--database') {
       database = validateDatabaseName(argv[++i] ?? '')
     } else if (argv[i] === '--create-database') {
       createDatabase = true
+    } else if (argv[i] === '--through') {
+      // maintenance cutover support (conclusion 55 / local-onnx round-2 P0): apply only
+      // migrations with version <= N, so operators can sequence 034 -> deploy new
+      // writers -> backfill -> rest. Format: three digits, must match an existing file.
+      const v = argv[++i] ?? ''
+      if (!/^\d{3}$/.test(v)) throw new Error(`--through expects a three-digit version, got "${v}"`)
+      through = Number(v)
     } else {
       throw new Error(`unknown argument: ${argv[i]}`)
     }
   }
   if (createDatabase && !database) throw new Error('--create-database requires --database <name>')
-  return { database, createDatabase }
+  return { database, createDatabase, through }
 }
 
 const normalizeSql = (sql) => sql.replaceAll('\r\n', '\n').trim()
@@ -137,7 +145,14 @@ const main = async () => {
   }
 
   const targetConnectionString = database ? withDatabase(baseConnectionString, database) : baseConnectionString
-  const migrations = await loadMigrations()
+  let migrations = await loadMigrations()
+  if (parsed.through !== null) {
+    if (!migrations.some(m => m.version === parsed.through)) {
+      throw new Error(`--through ${String(parsed.through).padStart(3, '0')} does not match any migration file`)
+    }
+    migrations = migrations.filter(m => m.version <= parsed.through)
+    console.log(`applying through ${String(parsed.through).padStart(3, '0')} (${migrations.length} files considered)`)
+  }
   let client = await connectWithRetry(targetConnectionString, { label: database ?? 'configured database' })
 
   const reconnect = async () => {

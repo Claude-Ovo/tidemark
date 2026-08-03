@@ -113,12 +113,15 @@ try {
 $roleArn = & $aws iam get-role --role-name $roleName --query Role.Arn --output text
 Assert-NativeSuccess "get-role"
 
-# ---- 3. migrate prod database (empty-db one-shot per P0-02 acceptance) ----
+# ---- 3. maintenance cutover phase A (local-onnx round-2 P0): apply THROUGH 034 only ----
+# The 034 -> backfill -> 035 sequence is executable, not documentation: 035 validates
+# existing rows, so identity-stamping writers must be live and the backfill must reach
+# residual 0 BEFORE 035 applies. Phase B (rest of migrations + verify) runs after the
+# functions are deployed and the backfill has swept legacy rows. PREFLIGHT 035 plus the
+# CHECK itself keep every failure mode fail-closed if this ordering is ever violated.
 if (-not $SkipMigrate) {
-  node --env-file=$envFile migrations/apply.mjs --database $prodDb --create-database
-  Assert-NativeSuccess "migrate $prodDb"
-  node --env-file=$envFile migrations/verify.mjs --database $prodDb
-  Assert-NativeSuccess "verify $prodDb"
+  node --env-file=$envFile migrations/apply.mjs --database $prodDb --create-database --through 034
+  Assert-NativeSuccess "migrate $prodDb through 034"
 }
 
 # ---- 4. package: staged linux/x64 build (conclusion 55 - the artifact carries the model) ----
@@ -228,6 +231,17 @@ $nightlyEnv = $mcpEnv.Clone()
 $nightlyEnv.TIDEMARK_NIGHTLY_TENANTS = "demo-tenant"
 Deploy-Function $mcpFn "src/aws/mcp-handler.handler" 30 $mcpEnv
 Deploy-Function $nightlyFn "src/aws/nightly-handler.handler" 600 $nightlyEnv
+
+# ---- 5b. cutover phase B: backfill into the current space, then the remaining migrations ----
+if (-not $SkipMigrate) {
+  $env:EMBED_PROVIDER = "local-onnx"
+  node --env-file=$envFile migrations/backfill-embeddings.mjs --database $prodDb
+  Assert-NativeSuccess "backfill embeddings $prodDb (residual must be zero)"
+  node --env-file=$envFile migrations/apply.mjs --database $prodDb
+  Assert-NativeSuccess "migrate $prodDb (035+)"
+  node --env-file=$envFile migrations/verify.mjs --database $prodDb
+  Assert-NativeSuccess "verify $prodDb"
+}
 
 $mcpArn = & $aws lambda get-function --function-name $mcpFn --query Configuration.FunctionArn --output text
 Assert-NativeSuccess "get mcp arn"

@@ -124,9 +124,9 @@ await withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn: 
   const EMB = '[' + Array(512).fill('0.01').join(',') + ']'
   const badId = randomUUID(), goodId = randomUUID()
   const insRow = (id, anchorOffset) => client.query(
-    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source, admission,
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
        state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
-     VALUES ($1,$2,$3,'event','ep','x',$4,'stub-sha256-512','agent_inferred','accepted','fresh',false,0.5,0.8, now()+($5::FLOAT8||' hours')::INTERVAL, now(), 108)`,
+     VALUES ($1,$2,$3,'event','ep','x',$4,'agent_inferred','accepted','fresh',false,0.5,0.8, now()+($5::FLOAT8||' hours')::INTERVAL, now(), 108)`,
     [T, A, id, EMB, anchorOffset])
   await insRow(badId, 48)     // future anchor：022 必须拒
   await insRow(goodId, -10)
@@ -139,7 +139,9 @@ await withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn: 
   console.log('PASS 5 022 preflight refuses future anchors on the real migration path')
   // 显式人工修复（审计过的 re-anchor，非 clamp），重跑全通、回填成立
   await client.query('UPDATE memories SET strength_anchor_at = now() - INTERVAL \'1 hour\' WHERE tenant_id=$1 AND memory_id=$2', [T, badId])
-  for (const m of migrations.filter(m => m.version >= 22)) {
+  // 只推进到 034：本幕主题是 022/023 回填；035 的 identity cutover 由 Act 4 以真实 backfill 覆盖
+  //（本幕的行无 identity，直闯 035 会且应该被 preflight 拒——那正是 Act 4 验的东西）
+  for (const m of migrations.filter(m => m.version >= 22 && m.version <= 34)) {
     assert.equal(await applyOne(client, m), 'applied', m.filename)
   }
   for (const id of [badId, goodId]) {
@@ -148,5 +150,52 @@ await withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn: 
   }
   console.log('PASS 6 repaired rows backfilled by 022, 023 applied')
 } })
+
+// ===== Act 4（local-onnx round-2 P0 红门）：真实 legacy 向量行走完整 034->backfill->035 升级 =====
+// 001-034 -> 植入 embedding!=NULL 且 identity=NULL 的 stub 时代行 -> 标准续跑必须在 035
+// preflight 前拒（否则 CRDB 23514 在约束验证时爆） -> 真实 backfill（local-onnx 子进程，
+// 事务外模型调用 + revision CAS） -> 035-037 全通 -> 行进入当前空间、revision+1、
+// 旧 mem_vec_idx 已死、新索引前缀含身份。
+await disposable(async (client, dbName) => {
+  const migrations = await loadMigrations()
+  await ensureMigrationLedger(client)
+  for (const m of migrations.filter(m => m.version <= 34)) {
+    assert.equal(await applyOne(client, m), 'applied', m.filename)
+  }
+
+  const MID = randomUUID()
+  const EMB = '[' + Array.from({ length: 512 }, (_, i) => (i % 7) / 10).join(',') + ']'
+  await client.query(
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+       state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+     VALUES ($1,$2,$3,'event','ep','legacy stub era row',$4,'agent_inferred','accepted','fresh',false,0.5,1.0,now(),now(),108)`,
+    [T, A, MID, EMB])
+
+  await assert.rejects(
+    async () => { for (const m of migrations.filter(m => m.version >= 35)) await applyOne(client, m) },
+    (e) => e.message.includes('PREFLIGHT 035 REFUSED') && e.message.includes('backfill-embeddings'),
+    'standard migrate must refuse at 035 while legacy vectors lack identity')
+
+  // 真实 backfill：子进程带 local-onnx（模型已封存在仓库 models/；本套件进程不碰 provider 锁）
+  const { spawnSync } = await import('node:child_process')
+  const bf = spawnSync(process.execPath, ['--env-file=.env', 'migrations/backfill-embeddings.mjs', '--database', dbName],
+    { encoding: 'utf8', env: { ...process.env, EMBED_PROVIDER: 'local-onnx' }, cwd: process.cwd() })
+  assert.equal(bf.status, 0, `backfill must exit 0: ${bf.stdout}${bf.stderr}`)
+  assert.ok(bf.stdout.includes('residual=0') || bf.stdout.includes('residual 0') || bf.stdout.includes('migrated=1'),
+    `backfill must report the migrated row: ${bf.stdout}`)
+
+  for (const m of migrations.filter(m => m.version >= 35)) {
+    assert.equal(await applyOne(client, m), 'applied', m.filename)
+  }
+  const row = (await client.query(
+    'SELECT embedding_model_id, revision FROM memories WHERE tenant_id=$1 AND memory_id=$2', [T, MID])).rows[0]
+  assert.match(row.embedding_model_id ?? '', /#[0-9a-f]{64}$/, 'row migrated into the derived-identity space')
+  assert.equal(Number(row.revision), 1, 'backfill bumped revision (eligibility semantics, conclusion 16)')
+  const idx = (await client.query(
+    `SELECT DISTINCT index_name FROM information_schema.statistics WHERE table_schema = current_schema() AND table_name = 'memories'`)).rows.map(r => r.index_name)
+  assert.ok(!idx.includes('mem_vec_idx'), 'legacy vector index dropped by 037')
+  assert.ok(idx.includes('mem_vec_id_idx'), 'identity-prefixed vector index present')
+  console.log('PASS 7 (Act 4): real legacy vector row survives the full 034->backfill->035-037 cutover')
+})
 
 console.log('ALL MIGRATE INTEGRATION TESTS PASSED')
