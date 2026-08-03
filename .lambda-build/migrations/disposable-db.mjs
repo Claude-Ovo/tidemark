@@ -14,26 +14,7 @@ export const withDisposableDb = async ({ base, mkName, connect, fn, log = consol
       created = true
     } finally { await admin.end().catch(() => {}) }
     client = await connect(withDatabase(base, DB), { label: DB })
-    // act 内查询的断线重连壳（跨国线路会随机掐已建连接）：首连保持即时（unit 契约不变），
-    // 后续 query 撞瞬断则换新连接重试该条——act 语句无显式事务，单句重试安全
-    const TRANSIENT = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE', '57P01', '08006', '08001'])
-    const resilient = {
-      query: async (text, values) => {
-        for (let i = 1; ; i++) {
-          try { return await client.query(text, values) }
-          catch (e) {
-            const transient = TRANSIENT.has(e.code) || /Connection terminated|read ECONNRESET/.test(e.message ?? '')
-            if (!transient || i >= 5) throw e
-            log.error?.(`[retry] disposable query ${i}/5 (${e.code ?? 'conn'}); reconnecting`)
-            try { await client.end() } catch {}
-            await new Promise(r => setTimeout(r, 500 * i))
-            client = await connect(withDatabase(base, DB), { label: DB })
-          }
-        }
-      },
-      end: () => client.end(),
-    }
-    return await fn(resilient, DB)   // 库名作第二参（可选消费）：子进程类步骤（如 backfill）需要它
+    return await fn(client, DB)   // 库名作第二参（可选消费）：子进程类步骤（如 backfill）需要它
   } finally {
     await client?.end().catch(() => {})
     if (created) {

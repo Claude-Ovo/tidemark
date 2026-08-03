@@ -67,18 +67,35 @@ const cos = (a, b, n) => { let s = 0; for (let i = 0; i < n; i++) s += a[i] * b[
   console.log(`PASS E5 truncation contract (observable flag, tokens=${a.token_count}, deterministic)`)
 }
 
-// E5b 256 边界判别力（Codex round-2 红门）：前 256 token 完全相同、尾部不同的两段文本
-// 必须产出【完全相同】的向量且都被标记 truncated——证明 257+ 的内容真的没被消费
+// E5b/E5c 256 边界判别力（round-3 P1-2 加严：判别子必须紧贴边界）。
+// 内容预算 = 256 - 2 特殊符 = 254 个内容 token：
+//   E5b：两文本在【第 255 个内容 token（首个被排除位）】处不同 -> 向量必须全等
+//   E5c：两文本在【第 254 个内容 token（最后被包含位）】处不同 -> 向量必须不同
+//   且每次截断的最终模型输入（重编码含特殊符）都被硬断言 <= 256（实测恰 256）
 {
-  const prefix = 'memory '.repeat(300)          // 约 300+ tokens，远超 256
-  const a = await embedLocalOnnx(prefix + 'cat')
-  const b = await embedLocalOnnx(prefix + 'database entirely different tail content here')
-  assert.equal(a.truncated, true, 'E5b variant A flagged')
-  assert.equal(b.truncated, true, 'E5b variant B flagged')
+  // 填充词与判别词全用 BERT 词表内单 token 词（'memory'/'cat'/'dog' 已实证 1 content token each）
+  const f = 'memory'
+  const mk = (arr) => arr.join(' ')
+  const base = Array(253).fill(f)                 // 前 253 个 content token 相同
+  const tail = Array(60).fill(f)                  // 尾巴确保总量远超 256
+
+  // E5b：位置 254 相同（'sun'），位置 255（首个被排除）cat vs dog
+  const a = await embedLocalOnnx(mk([...base, 'sun', 'cat', ...tail]))
+  const b = await embedLocalOnnx(mk([...base, 'sun', 'dog', ...tail]))
+  assert.equal(a.truncated, true, 'E5b A flagged')
+  assert.equal(b.truncated, true, 'E5b B flagged')
+  assert.ok(a.model_input_tokens <= 256 && b.model_input_tokens <= 256,
+    `E5b hard cap holds (${a.model_input_tokens}/${b.model_input_tokens})`)
   assert.equal(canonicalDigest(toF32(a.vector)), canonicalDigest(toF32(b.vector)),
-    'E5b identical first-256-token prefix must yield IDENTICAL vectors (tail is provably not consumed)')
-  assert.notEqual(a.token_count, b.token_count, 'E5b full-text counts still observable and distinct')
-  console.log('PASS E5b frozen 256 boundary: identical prefix -> identical vector, tails not consumed')
+    'E5b first EXCLUDED content token differs -> vectors must be IDENTICAL')
+
+  // E5c：位置 254（最后被包含）cat vs dog -> 向量必须不同
+  const c = await embedLocalOnnx(mk([...base, 'cat', 'sun', ...tail]))
+  const d = await embedLocalOnnx(mk([...base, 'dog', 'sun', ...tail]))
+  assert.notEqual(canonicalDigest(toF32(c.vector)), canonicalDigest(toF32(d.vector)),
+    'E5c LAST INCLUDED content token differs -> vectors must DIFFER (boundary is exactly 254 content tokens)')
+  assert.equal(c.model_input_tokens, 256, 'E5c truncated model input is exactly 256 with specials')
+  console.log(`PASS E5b/E5c frozen boundary discriminators (input=${c.model_input_tokens} incl specials, excluded tail provably unconsumed)`)
 }
 
 // E6 缺模型 fail-closed（子进程：单例缓存使同进程无法复测坏目录）

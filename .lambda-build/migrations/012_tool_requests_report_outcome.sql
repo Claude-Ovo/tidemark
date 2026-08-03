@@ -1,0 +1,1 @@
+ALTER TABLE public.tool_requests DROP CONSTRAINT IF EXISTS tool_requests_tool_name_ck, ADD CONSTRAINT tool_requests_tool_name_ck CHECK (tool_name IN ('remember', 'pin', 'log_event', 'report_outcome'))

@@ -7,7 +7,7 @@
 # NOTE: ASCII-only comments (PS5.1 reads BOM-less scripts as ANSI). Existence probes do NOT
 # redirect stderr: under ErrorActionPreference=Stop, redirected native stderr becomes
 # terminating NativeCommandError in PS5.1. Expect aws NotFound noise on first run; harmless.
-param([switch]$RotateSecrets, [switch]$SkipMigrate, [switch]$SkipPackage)
+param([switch]$RotateSecrets, [switch]$SkipMigrate, [switch]$SkipPackage, [switch]$Rollback)
 $ErrorActionPreference = "Stop"
 $aws = "C:\Program Files\Amazon\AWSCLIV2\aws.exe"
 $region = "us-east-1"
@@ -42,6 +42,24 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 $envFile = Join-Path $repo '.env'
 if (-not (Test-Path $envFile)) { throw ".env not found at $envFile" }
+
+# ---- rollback mode (round-3 P1-1): restore previous artifact and lift the gate, nothing else ----
+if ($Rollback) {
+  $acctR = & $aws sts get-caller-identity --query Account --output text
+  Assert-NativeSuccess "get account"
+  $bucketR = "tidemark-artifacts-$acctR"
+  foreach ($fn in @($mcpFn, $nightlyFn)) {
+    & $aws lambda update-function-code --function-name $fn --s3-bucket $bucketR --s3-key tidemark-prev.zip --query LastUpdateStatus --output text | Out-Null
+    Assert-NativeSuccess "rollback code $fn"
+    & $aws lambda wait function-updated-v2 --function-name $fn
+    Assert-NativeSuccess "rollback wait $fn"
+    & $aws lambda delete-function-concurrency --function-name $fn
+    Write-Host "rolled back + ungated: $fn"
+  }
+  & $aws events enable-rule --name $ruleName
+  Write-Host "rollback complete (functions on tidemark-prev.zip, gate lifted, nightly rule enabled)"
+  exit 0
+}
 
 # ---- 1. secret upsert (create once; values preserved on redeploy unless -RotateSecrets) ----
 & $aws secretsmanager describe-secret --secret-id $secretName --query ARN --output text | Out-Null
@@ -188,8 +206,40 @@ if ($LASTEXITCODE -ne 0) {
   & $aws s3api create-bucket --bucket $bucket --query Location --output text | Out-Null
   Assert-NativeSuccess "create artifacts bucket"
 }
+# keep the previous artifact for -Rollback before overwriting the key
+& $aws s3api head-object --bucket $bucket --key tidemark.zip | Out-Null
+if ($LASTEXITCODE -eq 0) {
+  & $aws s3 cp "s3://$bucket/tidemark.zip" "s3://$bucket/tidemark-prev.zip" --only-show-errors
+  Assert-NativeSuccess "backup previous artifact"
+}
 & $aws s3 cp $zip "s3://$bucket/tidemark.zip" --only-show-errors
 Assert-NativeSuccess "s3 upload artifact"
+
+# ---- 4c. maintenance gate (round-3 P1-1): no traffic may reach schema-incompatible code ----
+# reserved-concurrency 0 throttles BOTH the API path and EventBridge invokes at the Lambda
+# itself (probed live on this account: reserved=0 is accepted, unreserved stays >= 10).
+# The gate goes up BEFORE the code swap and comes down only after backfill + 035-037 + verify.
+# If the script dies in between, the service sits in EXPLICIT maintenance (throttled), never
+# in silent wrong-answer state. Recovery: rerun deploy, or infra\deploy.ps1 -Rollback.
+& $aws events disable-rule --name $ruleName
+if ($LASTEXITCODE -ne 0) { Write-Host "nightly rule absent (first deploy), nothing to disable" }
+$gated = @()
+foreach ($fn in @($mcpFn, $nightlyFn)) {
+  & $aws lambda get-function --function-name $fn --query Configuration.FunctionArn --output text | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    & $aws lambda put-function-concurrency --function-name $fn --reserved-concurrent-executions 0 --output text | Out-Null
+    Assert-NativeSuccess "gate $fn"
+    $gated += $fn
+  }
+}
+if ($gated.Count -gt 0) {
+  # runtime proof the gate is real: an invoke MUST be throttled before we touch the code
+  $probeOut = Join-Path $env:TEMP 'gate-probe.json'
+  & $aws lambda invoke --function-name $mcpFn --cli-binary-format raw-in-base64-out --payload '{}' $probeOut --output text | Out-Null
+  if ($LASTEXITCODE -eq 0) { throw "maintenance gate FAILED: $mcpFn still invocable with reserved-concurrency 0" }
+  Remove-Item $probeOut -Force -Confirm:$false -ErrorAction SilentlyContinue
+  Write-Host ("maintenance gate up + proven (invoke throttled): " + ($gated -join ', '))
+}
 
 # ---- 5. Lambda functions (create-or-update) ----
 function Deploy-Function([string]$name, [string]$handler, [int]$timeout, [hashtable]$envVars) {
@@ -242,6 +292,14 @@ if (-not $SkipMigrate) {
   node --env-file=$envFile migrations/verify.mjs --database $prodDb
   Assert-NativeSuccess "verify $prodDb"
 }
+
+# ---- 5c. lift the maintenance gate: schema and code are now consistent ----
+foreach ($fn in @($mcpFn, $nightlyFn)) {
+  & $aws lambda delete-function-concurrency --function-name $fn
+  if ($LASTEXITCODE -ne 0) { Write-Host "no concurrency setting to remove on $fn" }
+}
+Write-Host "maintenance gate lifted"
+
 
 $mcpArn = & $aws lambda get-function --function-name $mcpFn --query Configuration.FunctionArn --output text
 Assert-NativeSuccess "get mcp arn"

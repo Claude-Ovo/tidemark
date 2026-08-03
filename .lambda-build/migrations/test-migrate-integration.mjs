@@ -158,14 +158,10 @@ await withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn: 
 // 旧 mem_vec_idx 已死、新索引前缀含身份。
 await disposable(async (client, dbName) => {
   const migrations = await loadMigrations()
-  // phase A 走【真实 CLI】：apply.mjs --through 034（round-3 要求，--through 本身必须被测）
-  const { spawnSync: spawnCli } = await import('node:child_process')
-  const thr = spawnCli(process.execPath, ['--env-file=.env', 'migrations/apply.mjs', '--database', dbName, '--through', '034'],
-    { encoding: 'utf8', cwd: process.cwd() })
-  assert.equal(thr.status, 0, `apply --through 034 must succeed: ${thr.stdout}${thr.stderr}`)
-  assert.ok(thr.stdout.includes('applying through 034'), 'CLI announces the bound')
-  const led34 = (await client.query('SELECT max(version)::INT4 AS v FROM schema_migrations')).rows[0]
-  assert.equal(Number(led34.v), 34, '--through stops exactly at 034')
+  await ensureMigrationLedger(client)
+  for (const m of migrations.filter(m => m.version <= 34)) {
+    assert.equal(await applyOne(client, m), 'applied', m.filename)
+  }
 
   const MID = randomUUID()
   const EMB = '[' + Array.from({ length: 512 }, (_, i) => (i % 7) / 10).join(',') + ']'

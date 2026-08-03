@@ -1,0 +1,43 @@
+{
+  "name": "hackathon-memory",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "migrate": "node --env-file=.env migrations/apply.mjs",
+    "verify:migrations": "node --env-file=.env migrations/verify.mjs",
+    "test": "node --check migrations/apply.mjs && node --check migrations/verify.mjs && node --check src/server.mjs && node --check src/tools/remember.mjs && node src/test-admission.mjs && node src/test-db-release.mjs && node src/test-config.mjs && node src/test-preflight.mjs && node src/test-disposable-db.mjs && node src/test-secrets.mjs && node src/test-nightly-handler.mjs && node src/test-embed-onnx.mjs",
+    "test:remember": "node --env-file=.env src/test-remember.mjs",
+    "test:recall": "node --env-file=.env src/test-recall.mjs",
+    "test:log-event": "node --env-file=.env src/test-log-event.mjs",
+    "test:report-outcome": "node --env-file=.env src/test-report-outcome.mjs",
+    "test:pin": "node --env-file=.env src/test-pin.mjs",
+    "test:migrate-integration": "node --env-file=.env migrations/test-migrate-integration.mjs",
+    "test:transition": "node --env-file=.env src/test-transition.mjs",
+    "nightly": "node --env-file=.env src/nightly/orchestrator.mjs",
+    "test:nightly": "node --env-file=.env src/test-nightly.mjs",
+    "test:dream": "node --env-file=.env src/test-nightly.mjs",
+    "test:reflection": "node --env-file=.env src/test-nightly.mjs",
+    "test:forget": "node --env-file=.env src/test-forget.mjs",
+    "test:embed-isolation": "node --env-file=.env src/test-embed-isolation.mjs",
+    "backfill:embeddings": "node --env-file=.env migrations/backfill-embeddings.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1097.0",
+    "@aws-sdk/client-secrets-manager": "^3.1101.0",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "pg": "^8.22.0",
+    "serverless-http": "^4.0.0",
+    "zod": "^4.4.3"
+  }
+}
