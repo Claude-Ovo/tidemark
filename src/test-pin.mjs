@@ -211,8 +211,8 @@ try {
     const sid = randomUUID(); directIds.push(sid)
     // accepted 行必须带 embedding（001 的 CHECK）——复用开头种子的向量
     const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, memId])).rows[0].e
-    await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
-             VALUES ($1,$2,$3,'experience',$4,'superseded exp body',$5,$6,'superseded','agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
+    await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+             VALUES ($1,$2,$3,'experience',$4,'superseded exp body',$5,'stub-sha256-512',$6,'superseded','agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
       [TENANT, AGENT, sid, `${suite}-direct`, emb, JSON.stringify({ trigger: 't', correct_action: 'a', caution: 'c' })])
     await withClient(AUTH, async (c) => {
       const r = await call(c, 'pin', { memory_id: sid, pinned: true, reason: 'unit', request_id: rid() })

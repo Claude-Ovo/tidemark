@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url'
 import { inSerializableTx } from '../lib/db.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext } from '../lib/scheduler.mjs'
-import { embed } from '../lib/embed.mjs'
+import { embed, embedModelId } from '../lib/embed.mjs'
 import { toVectorLiteral, canonicalDigest } from '../lib/vector-canonical.mjs'
 import { runAdmissionGate } from '../lib/admission.mjs'
 import { dreamSummarize, NIGHTLY_PROVIDER, NIGHTLY_MODEL_ID, PROMPT_VERSION } from '../lib/nightly-provider.mjs'
@@ -34,7 +34,8 @@ export const DREAM_CFG = {
 }
 
 export const dreamPipelineVersionOf = (cfg) => [
-  'dream-v1', `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
+  // v2: 加入精确 embedding 身份（derived payload 的向量随 embed 空间变化，结论 55）
+  'dream-v2', `embed=${embedModelId()}`, `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
   `minc=${DREAM_CFG.min_cluster}`, `maxc=${DREAM_CFG.max_clusters}`, `maxsrc=${DREAM_CFG.max_sources_per_cluster}`,
   `scan=${cfg.batch_size}`,
 ].join('|')
@@ -144,7 +145,7 @@ export const executeDream = async (tenantId, evaluationAtIso, claim) => {
       const importance = Math.max(...cl.members.map(m => Number(m.importance)))
       const created = cl.members.map(m => new Date(m.created_at).getTime())
       products.push({
-        cluster: cl, content: gate.canonical, f32: e.f32, embedMeta: { model_id: e.model_id, provider: e.provider }, importance,
+        cluster: cl, content: gate.canonical, f32: e.f32, embedding_model_id: e.model_id, embedMeta: { model_id: e.model_id, provider: e.provider }, importance,
         time_range: { from: new Date(Math.min(...created)).toISOString(), to: new Date(Math.max(...created)).toISOString() },
         output_checksum: createHash('sha256').update(gate.canonical).digest('hex'),
       })
@@ -198,12 +199,12 @@ export const executeDream = async (tenantId, evaluationAtIso, claim) => {
           strength_anchor: 1.0, strength_anchor_at: new Date(evalMs), half_life_hours: halfLife,
           credited_success_count: 0, consolidation_baseline: 0 }, evalMs)
         await c.query(
-          `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source,
+          `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source,
              admission, state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at,
              half_life_hours, credited_success_count, consolidation_baseline, next_transition_at)
-           VALUES ($1,$2,$3,'event',$4,$5,$6,'derived','accepted','fresh',false,$7,1.0,$8,$8,$9,0,0,$10)`,
+           VALUES ($1,$2,$3,'event',$4,$5,$6,$7,'derived','accepted','fresh',false,$8,1.0,$9,$9,$10,0,0,$11)`,
           [tenantId, cl.members[0].agent_id, cl.derived_memory_id, cl.members[0].episode_id,
-           p.content, toVectorLiteral(p.f32), p.importance, new Date(evalMs), halfLife, nextAt])
+           p.content, toVectorLiteral(p.f32), p.embedding_model_id, p.importance, new Date(evalMs), halfLife, nextAt])
       }
       for (const m of cl.members) {
         const ins = await c.query(

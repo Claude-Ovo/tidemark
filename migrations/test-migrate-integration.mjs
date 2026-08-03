@@ -124,9 +124,9 @@ await withDisposableDb({ base, mkName: mkDbName, connect: connectWithRetry, fn: 
   const EMB = '[' + Array(512).fill('0.01').join(',') + ']'
   const badId = randomUUID(), goodId = randomUUID()
   const insRow = (id, anchorOffset) => client.query(
-    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source, admission,
        state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
-     VALUES ($1,$2,$3,'event','ep','x',$4,'agent_inferred','accepted','fresh',false,0.5,0.8, now()+($5::FLOAT8||' hours')::INTERVAL, now(), 108)`,
+     VALUES ($1,$2,$3,'event','ep','x',$4,'stub-sha256-512','agent_inferred','accepted','fresh',false,0.5,0.8, now()+($5::FLOAT8||' hours')::INTERVAL, now(), 108)`,
     [T, A, id, EMB, anchorOffset])
   await insRow(badId, 48)     // future anchor：022 必须拒
   await insRow(goodId, -10)

@@ -47,10 +47,10 @@ const insertRow = async ({ agent = AGENT, layer = 'event', content, embSourceId,
                            anchor = 1.0, anchorAt = 'now()', halfLife = 72, credited = 0, blamed = 0, episode }) => {
   const id = randomUUID(); directIds.push(id)
   const emb = embLiteral ?? (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, embSourceId])).rows[0].e
-  await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status,
+  await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, experience_body, exp_status,
              source, admission, quarantine_expires_at, state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at,
              half_life_hours, credited_success_count, evidenced_blame_count)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'agent_inferred',$10,NULL,$11,$12,$13,$14,${anchorAt},now(),$15,$16,$17)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'stub-sha256-512',$8,$9,'agent_inferred',$10,NULL,$11,$12,$13,$14,${anchorAt},now(),$15,$16,$17)`,
     [TENANT, agent, id, layer, episode, content, emb, experience_body, exp_status, admission, state, pinned, importance, anchor, halfLife, credited, blamed])
   return id
 }
@@ -128,7 +128,8 @@ try {
     assert.equal(row.pipeline_version, PIPELINE_VERSION, 'DB column matches exported PIPELINE_VERSION')
     assert.equal(row.receipt_json.receipt.pipeline_version, PIPELINE_VERSION, 'receipt field matches exported PIPELINE_VERSION')
     // v4: receipt item 增加 experience_status_at_recall 快照；v5: faded+pinned 可召回（结论 3）
-    assert.ok(PIPELINE_VERSION.startsWith('recall-v5|'), 'algorithm change bumped the version')
+    assert.ok(PIPELINE_VERSION.startsWith('recall-v6|'), 'algorithm change bumped the version')
+    assert.ok(/embed=[^|]+/.test(PIPELINE_VERSION), 'version carries the exact embedding identity segment')
     for (const marker of ['gateA=0.55', 'floorB=0.35', 'limitB=20', 'overfetchMax=1600', 'inject-schema=v2']) {
       assert.ok(PIPELINE_VERSION.includes(marker), `version string carries candidate-semantics param: ${marker}`)
     }

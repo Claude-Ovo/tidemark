@@ -39,10 +39,10 @@ const insMem = async (tenant, agent, episode, content, over = {}) => {
   const id = randomUUID()
   const e = await embed(content)
   await q(
-    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source, admission,
        state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
        credited_success_count, consolidation_baseline, next_transition_at, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'accepted',$9,$10,$11,0.5, now() - INTERVAL '200 hours', now(), 108,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'stub-sha256-512',$8,'accepted',$9,$10,$11,0.5, now() - INTERVAL '200 hours', now(), 108,
        $12, 0, CASE WHEN $13::FLOAT8 IS NULL THEN NULL ELSE now()+($13::FLOAT8||' hours')::INTERVAL END,
        now()+($14::FLOAT8||' hours')::INTERVAL)`,
     [tenant, agent, id, o.layer, episode, content, e.f32 ? toVectorLiteral(e.f32) : null, o.source,

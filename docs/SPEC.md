@@ -1,5 +1,6 @@
 # SPEC v1.2.5 — Tidemark（会遗忘的记忆）
 
+> v1.2.6（2026-08-03，local-onnx 转向，结论 55）：本账号 Bedrock 官方终审拒绝（enterprise-only），v1 embedding 主路径改为 Lambda 内自托管量化 MiniLM（q8 ONNX 随部署包封存，manifest SHA 验真、冷启动 fail-closed、零外部 AI 调用）。`embedding_model_id` 为派生身份（可读前缀+完整 64-hex digest，覆盖模型 commit/文件 SHA/输出契约/运行时版本），落库于 memories（034/035），vector index prefix 含身份（036/037）——不同 embedding 空间绝不混检索，recall/nightly dedup 只查当前身份；三处 pipeline version 注入精确身份（recall-v6/dream-v2/reflect-v3）。截断契约：tokenizer cap 512 wordpiece 确定性截断+可观测标记（训练长度 256 见 README）。正文中 "Bedrock" 的 embedding 语境按本条读作"当前 embedding provider"；bedrock 分支保留为企业账号未验证可选项。
 > v1.2.5（2026-08-01，P0-07 dream/reflection，Codex 方案两审+代码一审驱动）：nightly 三 job（dream/reflection/transition）共用 run harness（claim/lease/fencing/future-gate/frozen-control）；dream=due 队列低权重簇浓缩（(agent,episode) 分组、derived 硬排除防回流、每簇独立 fingerprint 与确定性 derived_memory_id、全簇或零、server 算 time_range、salient canonical rendering 入正文）；reflection=failure->success 配对提炼 candidate 经验（`reflection_pairs` 账本 exactly-once、outcome 锚定终态真相、anchors 优先截断 32/16KiB、(agent,scope) 分区双层 dedup 0.92、evidence_ids server 封口、事件全字段 hash 快照）；orchestrator 单入口 dream->reflection->transition（dream 占源故 stale/暂态短路，reflection 不占源故任何结果不阻 transition）；Dream/Reflection Receipt 落 `result_receipt`（028）。常数：min_cluster=3/max_clusters=5/max_sources=8/window=72h/retention=120h/max_pairs=5/32ev/16KiB/dedup=0.92。migrations 024-032。Bedrock 前保持 conditional / blocked_external（结论 36）。
 
 > v1.2.4（2026-07-31，P0-06 生命周期调度，Codex 两轮方案审驱动）：状态机边界统一 `<=`（消除阈值等值热循环）；consolidation progress 独立于 lifetime count（`consolidation_baseline`，migration 020/021，"复活后重新挣"可执行化）；`next_transition_at` canonical scheduler 收口（结论 39 债务清偿，migration 022 回填 + PREFLIGHTS[22]）；nightly_runs 增 `control_config`（023，takeover 只读冻结控制面）；transition job 契约=evaluation_at=scheduled_for 进 fingerprint、lease 用墙钟、fencing generation token、no-work 不落 run、整批 stale 零写入。
@@ -265,7 +266,7 @@ experience: candidate --(2 个不同 task_instance 的 success_evidence)--> veri
 ## 3. Recall 流水线（回应 P0-2 的幂等语义）
 
 1. **DB preflight（事务外）**：`SELECT ... WHERE (tenant_id, request_id)`；命中且 query_hmac 相同 → 直接返回原 receipt；命中但 hmac 不同 → `idempotency_key_reused`；miss → 继续
-2. embedding（Bedrock，事务外）——接受极少数并发场景重复 embedding，不做 committed processing+lease 状态机
+2. embedding（当前 provider，事务外；v1=local-onnx，见 v1.2.6 头注）——接受极少数并发场景重复 embedding，不做 committed processing+lease 状态机
 3. **事务 A（短 SERIALIZABLE）**：再次检查 `(tenant_id, request_id)`（存在则放弃本次计算、读首次结果返回）→ 两路候选 → rerank → packing → `INSERT recall_requests`（completed 形态一次写入，无中间态）→ COMMIT；unique 冲突 = 并发 loser，重读首次结果返回；40001 整体重试（≤5 次 + jitter）
 4. 并发测试（验收）：同 request_id 并发 N 路，恰 1 行落库、所有调用方拿到同一 receipt
 

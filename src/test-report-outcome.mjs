@@ -214,8 +214,8 @@ try {
       const seed = await call(c, 'remember', { content: 'exp seed ' + suite, episode_id: episode, request_id: rid() })
       const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seed.body.memory_id])).rows[0].e
       expId = randomUUID(); directIds.push(expId)
-      await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
-               VALUES ($1,$2,$3,'experience',$4,'exp candidate body',$5,$6,'candidate','agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
+      await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+               VALUES ($1,$2,$3,'experience',$4,'exp candidate body',$5,'stub-sha256-512',$6,'candidate','agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
         [TENANT, AGENT, expId, episode, emb, JSON.stringify({ trigger: 'when X', correct_action: 'do Y', caution: 'mind Z' })])
     })
     // 两次不同 task_instance 的成功归因
@@ -450,8 +450,8 @@ try {
       const seed = await call(c, 'remember', { content: seedText, episode_id: episode, request_id: rid() })
       const emb = (await q('SELECT embedding::STRING AS e FROM memories WHERE tenant_id=$1 AND memory_id=$2', [TENANT, seed.body.memory_id])).rows[0].e
       const id = randomUUID(); directIds.push(id)
-      await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
-               VALUES ($1,$2,$3,'experience',$4,$5,$6,$7,$8,'agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
+      await q(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+               VALUES ($1,$2,$3,'experience',$4,$5,$6,'stub-sha256-512',$7,$8,'agent_inferred','accepted','fresh',0.5,1.0,now(),now(),2160)`,
         [TENANT, AGENT, id, episode, `exp ${tag} body`, emb, JSON.stringify({ trigger: `when ${tag}`, correct_action: 'do it', caution: 'careful' }), status])
       return id
     }

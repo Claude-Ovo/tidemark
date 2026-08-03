@@ -13,6 +13,7 @@ import { logEventTool, EVENT_TYPES } from './tools/log-event.mjs'
 import { reportOutcomeTool } from './tools/report-outcome.mjs'
 import { pinTool } from './tools/pin.mjs'
 import { forgetMemory } from './admin/forget.mjs'
+import { embedModelId } from './lib/embed.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
 // 认证上下文（P0-09 接真实密钥源，round-2 修 P0-1 的 fail-open）：
@@ -70,7 +71,13 @@ const runToolResilient = async (label, fn) => {
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'tidemark-memory-mcp', tools: ['remember', 'recall', 'log_event', 'report_outcome', 'pin'] }))
+// health 同时暴露当前 embedding 身份（审计面：部署产物/DB 隔离/pipeline 版本三处
+// 引用的是不是同一个空间，一眼可查——身份是派生值不是配置项，见 embed-identity.mjs）
+app.get('/health', (_req, res) => res.json({
+  ok: true, service: 'tidemark-memory-mcp',
+  tools: ['remember', 'recall', 'log_event', 'report_outcome', 'pin'],
+  embedding_model_id: embedModelId(),
+}))
 
 // P0-08 forget：owner/admin HTTP 面（非 agent 工具，冻结 §12 五工具不变）。
 // 鉴权 fail-closed：必须配 TIDEMARK_ADMIN_KEY（或显式 TIDEMARK_DEV_INSECURE=1 时收 'dev-admin'）

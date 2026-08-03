@@ -65,6 +65,22 @@ No Row-Level TTL is enabled.
 - `memory_derivations_source_fk` is restrictive while the derived-memory FK cascades. A source cannot be deleted directly while provenance remains; the owner/admin forget path must traverse and delete derived descendants first.
 - `memory_derivations` treats an existing `(tenant_id, derived_memory_id, source_memory_id)` edge as an idempotent retry. Writers must not reuse a derived-memory ID for a different logical nightly/rebuild run.
 
+## Embedding-space identity (034-037, conclusion 55)
+
+- `034` adds nullable `memories.embedding_model_id`; `035` freezes the contract afterwards
+  (any row with an embedding must carry its identity). The 034->backfill->035 order is
+  deliberate: the CHECK only lands once `backfill-embeddings.mjs` proved residual zero.
+- `backfill-embeddings.mjs` re-embeds every row whose identity is missing or stale into the
+  CURRENT space (model call outside transactions, per-row CAS on `revision`, `revision+1` on
+  success). It refuses to run under `EMBED_PROVIDER=stub` and exits non-zero on residual.
+- `036` recreates the vector index with `embedding_model_id` in the prefix (each embedding
+  space is its own sub-index; filtering a non-prefix column made the planner reject the
+  forced index with 42809); `037` drops the legacy `(tenant, agent)` prefix index after 036
+  exists, so no window lacks a vector index.
+- Identity values are DERIVED (`src/lib/embed-identity.mjs`), never hand-written: readable
+  prefix + full 64-hex digest over model commit, file SHAs, output contract, and installed
+  runtime versions.
+
 ## Verification
 
 `verify.mjs` rolls every test back. It:

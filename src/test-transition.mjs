@@ -47,10 +47,10 @@ const ins = async (tenant, { state = 'fresh', pinned = false, admission = 'accep
                              halfLife = 108, count = 0, baseline = 0, nextH = null } = {}) => {
   const id = randomUUID()
   await q(
-    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source, admission,
        state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
        credited_success_count, consolidation_baseline, next_transition_at)
-     VALUES ($1,$2,$3,'event',$4,$5,$6,'agent_inferred',$7,$8,$9,0.5,$10, now()+($11::FLOAT8||' hours')::INTERVAL, now(),
+     VALUES ($1,$2,$3,'event',$4,$5,$6,'stub-sha256-512','agent_inferred',$7,$8,$9,0.5,$10, now()+($11::FLOAT8||' hours')::INTERVAL, now(),
        $12,$13,$14, CASE WHEN $15::FLOAT8 IS NULL THEN NULL ELSE now()+($15::FLOAT8||' hours')::INTERVAL END)`,
     [tenant, A, id, `${suite}-direct`, `row ${id.slice(0, 8)}`, admission === 'accepted' ? EMB : null, admission,
      state, pinned, anchor, anchorAtH, halfLife, count, baseline, nextH])
@@ -316,10 +316,10 @@ try {
   {
     const T15 = t(15)
     await q(
-      `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+      `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source, admission,
          state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
          credited_success_count, consolidation_baseline, next_transition_at)
-       SELECT $1, $2, gen_random_uuid(), 'event', $3, 'bulk ' || i, $4, 'agent_inferred', 'accepted',
+       SELECT $1, $2, gen_random_uuid(), 'event', $3, 'bulk ' || i, $4, 'stub-sha256-512', 'agent_inferred', 'accepted',
          'fresh', false, 0.5, 0.5, now() - INTERVAL '200 hours', now(), 108, 0, 0, now() - INTERVAL '1 hour'
        FROM generate_series(1, 200) AS g(i)`,
       [T15, A, `${suite}-bulk`, EMB])

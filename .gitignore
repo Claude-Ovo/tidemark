@@ -11,3 +11,4 @@ out.json
 *.err
 src/server.log
 *.out
+models/

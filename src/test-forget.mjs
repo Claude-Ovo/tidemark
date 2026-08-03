@@ -34,10 +34,10 @@ const insMem = async (content, over = {}) => {
   const id = randomUUID()
   const e = await embed(content)
   await q(
-    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, source, admission,
+    `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id, source, admission,
        state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
        credited_success_count, consolidation_baseline)
-     VALUES ($1,$2,$3,'event',$4,$5,$6,$7,'accepted','fresh',false,0.5,1.0, now(), now(), 108, 0, 0)`,
+     VALUES ($1,$2,$3,'event',$4,$5,$6,'stub-sha256-512',$7,'accepted','fresh',false,0.5,1.0, now(), now(), 108, 0, 0)`,
     [o.tenant, A, id, `${suite}-ep`, content, toVectorLiteral(e.f32), o.source])
   return id
 }

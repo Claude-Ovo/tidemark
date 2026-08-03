@@ -22,7 +22,7 @@ import { pathToFileURL } from 'node:url'
 import { inSerializableTx } from '../lib/db.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext } from '../lib/scheduler.mjs'
-import { embed } from '../lib/embed.mjs'
+import { embed, embedModelId } from '../lib/embed.mjs'
 import { toVectorLiteral } from '../lib/vector-canonical.mjs'
 import { runAdmissionGate } from '../lib/admission.mjs'
 import { reflectExtract, NIGHTLY_PROVIDER, NIGHTLY_MODEL_ID, PROMPT_VERSION } from '../lib/nightly-provider.mjs'
@@ -41,8 +41,8 @@ export const REFLECT_CFG = {
 }
 
 export const reflectPipelineVersionOf = (cfg) => [
-  'reflect-v2', 'cursor=v1',   // v2: durable keyset cursor 选源（round-4/5）——snapshot/fingerprint/重试语义全变
-  `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
+  'reflect-v3', 'cursor=v1',   // v2: durable keyset cursor；v3: 精确 embedding 身份入串（结论 55）
+  `embed=${embedModelId()}`, `prov=${NIGHTLY_PROVIDER}`, `model=${NIGHTLY_MODEL_ID}`, `prompt=${PROMPT_VERSION}`,
   `win=${REFLECT_CFG.window_hours}`, `ret=${REFLECT_CFG.retention_hours}`, `maxp=${REFLECT_CFG.max_pairs}`, `maxev=${REFLECT_CFG.max_events_per_pair}`,
   `maxb=${REFLECT_CFG.max_pair_bytes}`, `dedup=${REFLECT_CFG.dedup_threshold}`, `scan=${cfg.batch_size}`,
 ].join('|')
@@ -275,7 +275,7 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
       if (gate.admission !== 'accepted') throw Object.assign(new Error('reflection_output_admission_rejected'), { terminal: true })
       const e = await embed(gate.canonical)
       products.push({
-        pair: p, narrative, content: gate.canonical, f32: e.f32,
+        pair: p, narrative, content: gate.canonical, f32: e.f32, embedding_model_id: e.model_id,
         embedMeta: { model_id: e.model_id, provider: e.provider },
         evidence_ids: p.anchors.map(a => a.event_id),   // server 封口：模型永不生成
         output_checksum: createHash('sha256').update(gate.canonical).digest('hex'),
@@ -337,12 +337,15 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
       for (const prod of products) {
         if (prod.batchRoot) continue
         // DB 内 (agent, scope) dedup：有界候选 + 精确 cosine 复核（低频 nightly 路径，LIMIT 10）
+        // 身份同空间约束（结论 55）：跨 embedding 空间的 cosine 是噪声，dedup 只在
+        // 当前 identity 的向量之间比较——旧 stub 行既不该赢也不该输，直接不入候选
         const cands = (await c.query(
           `SELECT memory_id, embedding::STRING AS emb FROM memories
            WHERE tenant_id=$1 AND agent_id=$2 AND layer='experience' AND exp_status='candidate'
              AND admission='accepted' AND (experience_body->>'scope') = $3 AND embedding IS NOT NULL
+             AND embedding_model_id = $5
            ORDER BY embedding <=> $4 LIMIT 10`,
-          [tenantId, prod.pair.failure.agent_id, SCOPE_V1, toVectorLiteral(prod.f32)])).rows
+          [tenantId, prod.pair.failure.agent_id, SCOPE_V1, toVectorLiteral(prod.f32), prod.embedding_model_id])).rows
         let winner = null, best = -1
         for (const cd of cands) {
           const v = Float32Array.from(JSON.parse(cd.emb))
@@ -420,14 +423,14 @@ export const executeReflection = async (tenantId, evaluationAtIso, claim) => {
               strength_anchor: 1.0, strength_anchor_at: new Date(evalMs), half_life_hours: halfLife,
               credited_success_count: 0, consolidation_baseline: 0 }, evalMs)
             await c.query(
-              `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding,
+              `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, episode_id, content, embedding, embedding_model_id,
                  experience_body, exp_status, source, admission, state, pinned, importance,
                  strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours,
                  credited_success_count, consolidation_baseline, next_transition_at)
-               VALUES ($1,$2,$3,'experience',$4,$5,$6,$7,'candidate','derived','accepted','fresh',false,0.5,
-                 1.0,$8,$8,$9,0,0,$10)`,
+               VALUES ($1,$2,$3,'experience',$4,$5,$6,$7,$8,'candidate','derived','accepted','fresh',false,0.5,
+                 1.0,$9,$9,$10,0,0,$11)`,
               [tenantId, prod.pair.failure.agent_id, finalExperienceId, prod.pair.failure.episode_id,
-               prod.content, toVectorLiteral(prod.f32), JSON.stringify(body), new Date(evalMs), halfLife, nextAt])
+               prod.content, toVectorLiteral(prod.f32), prod.embedding_model_id, JSON.stringify(body), new Date(evalMs), halfLife, nextAt])
             inserted++
           }
         }

@@ -78,14 +78,15 @@ export const rememberTool = async ({ principal, content, kind, episode_id, reque
       // 与 anchor_at 同用 DB now()，SQL 表达式即 scheduler 解析解（与 JS 版一致性由集成测试锁定）
       await c.query(
         `INSERT INTO memories (tenant_id, agent_id, memory_id, layer, kind, episode_id, content, embedding,
-           source, admission, quarantine_expires_at, importance, strength_anchor, strength_anchor_at,
+           embedding_model_id, source, admission, quarantine_expires_at, importance, strength_anchor, strength_anchor_at,
            last_rewarded_at, half_life_hours, next_transition_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, 1.0, now(), now(), $13,
-           CASE WHEN $10 = 'accepted'
-                THEN now() + ($13 * (ln(1.0 / $14::FLOAT8) / ln(2::FLOAT8))) * INTERVAL '1 hour'
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, 1.0, now(), now(), $14,
+           CASE WHEN $11 = 'accepted'
+                THEN now() + ($14 * (ln(1.0 / $15::FLOAT8) / ln(2::FLOAT8))) * INTERVAL '1 hour'
                 ELSE NULL END)`,
         [tenant_id, agent_id, memory_id, layer, kind ?? null, episode_id, gate.canonical,
          f32 ? toVectorLiteral(f32) : null,
+         f32 ? embeddingMeta.model_id : null,   // 有向量必有身份（结论 55）；quarantine 无向量则 NULL
          source, gate.admission,
          gate.admission === 'quarantined' ? new Date(Date.now() + QUARANTINE_TTL_HOURS * 3600e3) : null,
          imp, BASE_HALF_LIFE_HOURS[layer] * (1 + imp), TRANSITION_CFG.fade_threshold])

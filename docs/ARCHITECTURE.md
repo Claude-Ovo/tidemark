@@ -17,7 +17,7 @@
 | Memory MCP（自建薄 server，**部署于 AWS**） | 业务路径，agent 面 5 tool：remember / recall / pin / report_outcome / log_event | （自研核心，跑在 AWS 服务 1 上） |
 | CockroachDB 官方 Managed MCP | Auditor Mode：operator-facing 审计路径（隔离 demo cluster，按 request_id 查回执→记忆→归因→夜间任务全链） | CRDB 工具 2：Cloud Managed MCP Server |
 | AWS Lambda（+Function URL）或 ECS Fargate | **主服务运行时**（7/29 部署 spike 定型）+ EventBridge 夜间批处理（幂等+租约+revision 防竞态） | AWS 服务 1 |
-| Amazon Bedrock | embedding、做梦（碎片→摘要）、反省（失败+成功配对→经验） | AWS 服务 2 |
+| Lambda 内自托管 ONNX 推理 | embedding（量化 MiniLM 随部署包封存，manifest 验真、派生身份、零外部 AI 调用；结论 55——本账号 Bedrock 官方终审拒绝 resolved-negative，bedrock 分支保留为企业账号可选未验证路径） | AWS 服务 1 内（推理跑在 Lambda 上） |
 | CloudWatch | 延迟/失败率/outcome_report_rate/隔离记忆数 | AWS 服务 3 |
 
 ## 记忆分层

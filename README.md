@@ -20,7 +20,12 @@ Prerequisites: Node.js 22+, a CockroachDB Cloud cluster.
 npm run migrate -- --database tidemark_dev --create-database
 npm run verify:migrations -- --database tidemark_dev
 
-# 3. Start the Memory MCP server (stub embeddings until Bedrock allowlisting clears):
+# 2b. Fetch + verify the sealed embedding model (once; ~23MB, SHA256-pinned by embed-manifest.json):
+node infra/fetch-model.mjs                    # add NODE_USE_ENV_PROXY=1 on proxied networks
+
+# 3. Start the Memory MCP server.
+#    EMBED_PROVIDER: local-onnx (default; in-process MiniLM, real semantics)
+#                    stub (tests only; hash pseudo-vectors) | bedrock (enterprise accounts, unverified)
 $env:EMBED_PROVIDER="stub"; $env:TIDEMARK_POOL_MAX="10"; $env:TIDEMARK_DEV_INSECURE="1"
 node --env-file=.env src/server.mjs           # listens on :3901
 
@@ -34,6 +39,30 @@ Notes:
   dev server is a single process, so 10 mirrors the account-level concurrency budget (10 x 1).
 - Numbered migration files are immutable once published; the runner refuses checksum drift.
 - `spike/` contains the signed P0-01 AWS runtime spike (Lambda + API Gateway); see `docs/SPIKE-MCP.md`.
+
+## Embedding: self-hosted ONNX inside Lambda
+
+Bedrock access was formally denied for this individual account (enterprise-only per the AWS
+support case), so v1 runs its own inference: quantized `all-MiniLM-L6-v2` (q8 ONNX, 22MB,
+Apache-2.0) executes **inside the Lambda** via transformers.js - no external AI API in the
+request path at all. Details that matter:
+
+- **Sealed artifacts**: `embed-manifest.json` pins the model commit + SHA256 of every file;
+  `infra/fetch-model.mjs` verifies on download, the runtime re-verifies at cold start and
+  refuses to serve on any mismatch. Remote model downloads are disabled at runtime.
+- **Derived identity**: `embedding_model_id` is computed from the manifest + installed
+  runtime versions (readable prefix + full 64-hex digest, `src/lib/embed-identity.mjs`).
+  Every embedded row stores it; recall only searches the CURRENT identity (the vector index
+  prefix includes it), so vector spaces can never mix. `GET /health` exposes the live value.
+- **Truncation contract**: inputs beyond the tokenizer cap (512 wordpieces; the model's
+  trained length is 256) are deterministically truncated and observably flagged
+  (`embed_truncated` log + `truncated` in the embed result) - never silently passed off
+  as fully embedded.
+- **Numbers** (see docs/SPIKE-ONNX.md): cold start ~2.2s at 1024MB, warm 4-34ms per text,
+  bit-exact vectors across win32-dev and linux-Lambda (recomputed canonical digests equal,
+  max_abs_diff=0).
+- Re-embedding legacy rows: `npm run backfill:embeddings` (CAS on revision, residual must
+  be zero; run with `EMBED_PROVIDER=local-onnx`).
 
 ## Deploy (AWS)
 

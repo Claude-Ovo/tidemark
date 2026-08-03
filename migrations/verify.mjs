@@ -48,6 +48,7 @@ const memoryInsert = (overrides = {}) => {
     layer: 'event',
     content: 'verify-only content',
     embedding: vector512,
+    embedding_model_id: 'verify-embed-identity',
     experience_body: null,
     exp_status: null,
     source: 'agent_inferred',
@@ -67,13 +68,13 @@ const memoryInsert = (overrides = {}) => {
   }
   return {
     text: `INSERT INTO public.memories (
-      tenant_id, agent_id, memory_id, layer, content, embedding, experience_body, exp_status,
+      tenant_id, agent_id, memory_id, layer, content, embedding, embedding_model_id, experience_body, exp_status,
       source, admission, quarantine_expires_at, state, pinned, importance, strength_anchor,
       strength_anchor_at, last_rewarded_at, half_life_hours, credited_success_count,
       evidenced_blame_count, revision
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7::JSONB, $8, $9, $10, $11, $12, $13, $14, $15,
-      $16, $17, $18, $19, $20, $21
+      $1, $2, $3, $4, $5, $6, $7, $8::JSONB, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20, $21, $22
     )`,
     values: [
       row.tenant_id,
@@ -82,6 +83,7 @@ const memoryInsert = (overrides = {}) => {
       row.layer,
       row.content,
       row.embedding,
+      row.embedding_model_id,
       row.experience_body === null ? null : JSON.stringify(row.experience_body),
       row.exp_status,
       row.source,
@@ -277,7 +279,8 @@ const checkCases = [
   ['memories_quarantine_expiry_ck', () => memoryInsert({ admission: 'quarantined', embedding: null })],
   ['memories_accepted_embedding_ck', () => memoryInsert({ embedding: null })],
   ['memories_quarantined_no_embedding_ck', () => memoryInsert({ admission: 'quarantined', quarantine_expires_at: new Date(Date.now() + 60_000) })],
-  ['memories_pin_accepted_ck', () => memoryInsert({ admission: 'quarantined', embedding: null, quarantine_expires_at: new Date(Date.now() + 60_000), pinned: true })],
+  ['memories_pin_accepted_ck', () => memoryInsert({ admission: 'quarantined', embedding: null, embedding_model_id: null, quarantine_expires_at: new Date(Date.now() + 60_000), pinned: true })],
+  ['memories_embedding_identity_ck', () => memoryInsert({ embedding_model_id: null })],
   ['attempt_events_event_type_ck', () => attemptEventInsert({ event_type: 'invalid' })],
   ['recall_requests_outcome_state_ck', () => ({
     text: `INSERT INTO public.recall_requests (

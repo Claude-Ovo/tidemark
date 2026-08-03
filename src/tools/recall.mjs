@@ -5,7 +5,7 @@
 // 正文在响应时 hydrate；replay 时按 (tenant, agent) 重新 hydrate，已删除的返回 [deleted] 且不注入。
 import { createHmac, createHash, randomUUID } from 'node:crypto'
 import { inSerializableTx } from '../lib/db.mjs'
-import { embed, embedProviderName } from '../lib/embed.mjs'
+import { embed, embedProviderName, embedModelId } from '../lib/embed.mjs'
 import { toVectorLiteral } from '../lib/vector-canonical.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'
 import { estimateTokens, ITEM_JSON_OVERHEAD, TOKEN_ESTIMATOR_VERSION } from '../lib/tokens.mjs'
@@ -53,9 +53,9 @@ const fetchVectorCandidates = async (c, tenant_id, agent_id, vecLiteral) => {
   for (;;) {
     const rows = (await c.query(
       `SELECT ${CAND_COLS}, embedding <=> $3 AS dist
-       FROM memories@mem_vec_idx
-       WHERE tenant_id = $1 AND agent_id = $2
-       ORDER BY embedding <=> $3 LIMIT ${limit}`, [tenant_id, agent_id, vecLiteral])).rows
+       FROM memories@mem_vec_id_idx
+       WHERE tenant_id = $1 AND agent_id = $2 AND embedding_model_id = $4
+       ORDER BY embedding <=> $3 LIMIT ${limit}`, [tenant_id, agent_id, vecLiteral, embedModelId()])).rows
     lastRows = rows
     const eligible = rows.filter(isEligible)
     trail.push({ inner_limit: limit, inner_rows: rows.length, eligible: eligible.length })
@@ -161,13 +161,14 @@ export const recallTool = async ({ principal, query, purpose, episode_id, attemp
       `SELECT ${CAND_COLS}, embedding <=> $3 AS dist
        FROM memories
        WHERE tenant_id = $1 AND agent_id = $2 AND embedding IS NOT NULL
+         AND embedding_model_id = $4
          AND admission = 'accepted' AND (state <> 'faded' OR pinned)
          AND (layer = 'event' OR exp_status <> 'superseded')
          AND (pinned OR importance >= 0.8)
          AND embedding <=> $3 <= ${maxDist}
        ORDER BY pinned DESC, importance DESC, embedding <=> $3, memory_id
        LIMIT ${CFG.second_path_limit + 1}`,
-      [tenant_id, agent_id, vecLiteral])).rows
+      [tenant_id, agent_id, vecLiteral, embedModelId()])).rows
     const pathBTruncated = pathB.length > CFG.second_path_limit
     if (pathBTruncated) pathB.length = CFG.second_path_limit
 

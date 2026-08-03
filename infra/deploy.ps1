@@ -121,23 +121,79 @@ if (-not $SkipMigrate) {
   Assert-NativeSuccess "verify $prodDb"
 }
 
-# ---- 4. package (tar.exe makes zip via -a and supports excludes; Compress-Archive does not) ----
+# ---- 4. package: staged linux/x64 build (conclusion 55 - the artifact carries the model) ----
+# The repo node_modules is a WINDOWS install; onnxruntime/sharp are platform-native, so the
+# Lambda artifact is assembled in a staging dir with the spike-proven recipe: ci -> force
+# linux sharp -> prune -> sharp stub -> models + manifest + NOTICE -> content gates -> zip.
 $zip = Join-Path $repo 'tidemark.zip'
 if (-not $SkipPackage) {
-  if (Test-Path $zip) { Remove-Item $zip -Force -Confirm:$false }
-  # System32 bsdtar explicitly: Git's GNU tar (if first in PATH) cannot produce zip archives.
-  & "$env:SystemRoot\System32\tar.exe" -a -c -f $zip --exclude "src/*.log" --exclude "src/*.err" --exclude "src/test-*.mjs" src migrations package.json node_modules
-  Assert-NativeSuccess "package zip"
+  node infra/fetch-model.mjs
+  Assert-NativeSuccess "model artifacts verification"
+  $stage = Join-Path $repo '.lambda-build'
+  if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -Confirm:$false }
+  New-Item -ItemType Directory $stage | Out-Null
+  Copy-Item package.json,package-lock.json $stage/
+  Push-Location $stage
+  try {
+    # npm stderr must NOT be redirected here (PS5.1 Stop + 2>&1 = terminating NativeCommandError)
+    npm ci --omit=dev | Select-Object -Last 1
+    Assert-NativeSuccess "staging npm ci"
+    npm install --force --no-save "@img/sharp-linux-x64" "@img/sharp-libvips-linux-x64" | Select-Object -Last 1
+    Assert-NativeSuccess "staging sharp linux (force reinstalls the tree: prune AFTER)"
+    Remove-Item node_modules/onnxruntime-node/bin/napi-v6/darwin -Recurse -Force -Confirm:$false
+    Remove-Item node_modules/onnxruntime-node/bin/napi-v6/win32 -Recurse -Force -Confirm:$false
+    Remove-Item node_modules/onnxruntime-node/bin/napi-v6/linux/arm64 -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item node_modules/onnxruntime-web -Recurse -Force -Confirm:$false
+    Remove-Item node_modules/@img -Recurse -Force -Confirm:$false
+    Get-ChildItem node_modules/@huggingface/transformers/dist -File | Where-Object {
+      $_.Name -match '^(transformers|transformers\.min|transformers\.web)\.js(\.map)?$' -or $_.Name -like 'ort-wasm*'
+    } | Remove-Item -Force -Confirm:$false
+    Remove-Item node_modules/sharp -Recurse -Force -Confirm:$false
+    New-Item -ItemType Directory node_modules/sharp | Out-Null
+    Copy-Item (Join-Path $repo 'spike\onnx\sharp-stub\package.json'),(Join-Path $repo 'spike\onnx\sharp-stub\index.js') node_modules/sharp/
+    # payload: src (minus tests/logs), migrations, manifest, NOTICE, sealed models
+    Copy-Item (Join-Path $repo 'src') . -Recurse
+    Get-ChildItem src -Recurse -File | Where-Object { $_.Name -like 'test-*.mjs' -or $_.Name -like '*.log' -or $_.Name -like '*.err' } | Remove-Item -Force -Confirm:$false
+    Copy-Item (Join-Path $repo 'migrations') . -Recurse
+    Copy-Item (Join-Path $repo 'embed-manifest.json') .
+    Copy-Item (Join-Path $repo 'NOTICE.md') .
+    Copy-Item (Join-Path $repo 'models') . -Recurse
+    # content gates: fail the build, not the cold start
+    if (Test-Path node_modules/onnxruntime-node/bin/napi-v6/win32) { throw "win32 binaries survived pruning" }
+    if (Test-Path node_modules/onnxruntime-node/bin/napi-v6/darwin) { throw "darwin binaries survived pruning" }
+    if (Test-Path node_modules/onnxruntime-web) { throw "onnxruntime-web survived pruning" }
+    if (-not (Select-String -Path node_modules/sharp/index.js -Pattern "TIDEMARK_SHARP_STUB" -Quiet)) { throw "sharp is not the stub" }
+    if (-not (Test-Path 'models/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx')) { throw "model missing from payload" }
+    if (Test-Path $zip) { Remove-Item $zip -Force -Confirm:$false }
+    & "$env:SystemRoot\System32\tar.exe" -a -c -f $zip src migrations embed-manifest.json NOTICE.md models node_modules package.json
+    Assert-NativeSuccess "package zip"
+  } finally { Pop-Location }
   $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-  Write-Host "packaged tidemark.zip ($mb MB)"
+  Write-Host "packaged tidemark.zip ($mb MB, staged linux/x64 + sealed model)"
 }
+$zipShaHex = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+$hexBytes = [byte[]]::new(32)
+for ($i = 0; $i -lt 32; $i++) { $hexBytes[$i] = [Convert]::ToByte($zipShaHex.Substring($i * 2, 2), 16) }
+$zipShaB64 = [Convert]::ToBase64String($hexBytes)
+
+# ---- 4b. ship the artifact once via S3 (40MB+ direct upload dies on cross-border routes) ----
+$acct = & $aws sts get-caller-identity --query Account --output text
+Assert-NativeSuccess "get account"
+$bucket = "tidemark-artifacts-$acct"
+& $aws s3api head-bucket --bucket $bucket | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  & $aws s3api create-bucket --bucket $bucket --query Location --output text | Out-Null
+  Assert-NativeSuccess "create artifacts bucket"
+}
+& $aws s3 cp $zip "s3://$bucket/tidemark.zip" --only-show-errors
+Assert-NativeSuccess "s3 upload artifact"
 
 # ---- 5. Lambda functions (create-or-update) ----
 function Deploy-Function([string]$name, [string]$handler, [int]$timeout, [hashtable]$envVars) {
   & $aws lambda get-function --function-name $name --query Configuration.FunctionArn --output text | Out-Null
   $exists = ($LASTEXITCODE -eq 0)
   $cfgFile = Join-Path $PSScriptRoot ".fn-cfg.json"
-  $cfg = @{ FunctionName = $name; Handler = $handler; Timeout = $timeout; MemorySize = 512; Environment = @{ Variables = $envVars } }
+  $cfg = @{ FunctionName = $name; Handler = $handler; Timeout = $timeout; MemorySize = 1024; Environment = @{ Variables = $envVars } }
   if (-not $exists) { $cfg.Runtime = "nodejs22.x"; $cfg.Role = $roleArn }
   try {
     Write-NoBom $cfgFile ($cfg | ConvertTo-Json -Depth 5)
@@ -147,10 +203,12 @@ function Deploy-Function([string]$name, [string]$handler, [int]$timeout, [hashta
       Assert-NativeSuccess "update-function-configuration $name"
       & $aws lambda wait function-updated-v2 --function-name $name
       Assert-NativeSuccess "wait config $name"
-      & $aws lambda update-function-code --function-name $name --zip-file fileb://tidemark.zip --query LastUpdateStatus --output text | Out-Null
+      & $aws lambda update-function-code --function-name $name --s3-bucket $bucket --s3-key tidemark.zip --query LastUpdateStatus --output text | Out-Null
       Assert-NativeSuccess "update-function-code $name"
     } else {
-      & $aws lambda create-function --cli-input-json $fileArg --zip-file fileb://tidemark.zip --query FunctionArn --output text | Out-Null
+      $cfg.Code = @{ S3Bucket = $bucket; S3Key = "tidemark.zip" }
+      Write-NoBom $cfgFile ($cfg | ConvertTo-Json -Depth 5)
+      & $aws lambda create-function --cli-input-json $fileArg --query FunctionArn --output text | Out-Null
       Assert-NativeSuccess "create-function $name"
     }
   } finally { Remove-Item $cfgFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
@@ -158,10 +216,14 @@ function Deploy-Function([string]$name, [string]$handler, [int]$timeout, [hashta
   Assert-NativeSuccess "wait active $name"
   & $aws lambda wait function-updated-v2 --function-name $name
   Assert-NativeSuccess "wait updated $name"
-  Write-Host "function ready: $name"
+  # deployed-artifact identity proof: the function must run THIS zip (round-4 contract)
+  $deployedSha = & $aws lambda get-function --function-name $name --query Configuration.CodeSha256 --output text
+  Assert-NativeSuccess "get CodeSha256 $name"
+  if ($deployedSha -ne $zipShaB64) { throw "$name CodeSha256 $deployedSha != local zip sha256(b64) $zipShaB64" }
+  Write-Host "function ready: $name (CodeSha256 verified)"
 }
 
-$mcpEnv = @{ TIDEMARK_SECRET_ARN = $secretArn; TIDEMARK_DATABASE = $prodDb; TIDEMARK_POOL_MAX = "1"; EMBED_PROVIDER = "stub" }
+$mcpEnv = @{ TIDEMARK_SECRET_ARN = $secretArn; TIDEMARK_DATABASE = $prodDb; TIDEMARK_POOL_MAX = "1"; EMBED_PROVIDER = "local-onnx" }
 $nightlyEnv = $mcpEnv.Clone()
 $nightlyEnv.TIDEMARK_NIGHTLY_TENANTS = "demo-tenant"
 Deploy-Function $mcpFn "src/aws/mcp-handler.handler" 30 $mcpEnv
@@ -183,6 +245,7 @@ if ($apiId -eq "None" -or [string]::IsNullOrWhiteSpace($apiId)) {
   Assert-NativeSuccess "create-api"
   Write-Host "api created: $apiId"
 }
+# account already resolved in section 4b
 # Existing API by name is NOT trusted blindly (round-2 P1-4, tightened round-3 P1-3):
 # follow the $default ROUTE to its integration id, then compare that integration's URI.
 # Items[0] of get-integrations could be an unused leftover while the route points elsewhere.
@@ -194,8 +257,6 @@ $integId = $routeTarget -replace '^integrations/', ''
 $integTarget = & $aws apigatewayv2 get-integration --api-id $apiId --integration-id $integId --query IntegrationUri --output text
 Assert-NativeSuccess "get-integration $integId"
 if ($integTarget -ne $mcpArn) { throw "api $apiId `$default integration points at '$integTarget', expected $mcpFn ($mcpArn)" }
-$acct = & $aws sts get-caller-identity --query Account --output text
-Assert-NativeSuccess "get account"
 Grant-InvokePermission $mcpFn "tidemark-apigw" "apigateway.amazonaws.com" "arn:aws:execute-api:${region}:${acct}:${apiId}/*"
 $apiUrl = & $aws apigatewayv2 get-api --api-id $apiId --query ApiEndpoint --output text
 Assert-NativeSuccess "get api endpoint"
