@@ -12,3 +12,4 @@ out.json
 src/server.log
 *.out
 models/
+.lambda-build/
