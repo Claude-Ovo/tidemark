@@ -46,7 +46,10 @@ exact `pipeline_version` (including the full embedding-model identity) that prod
 ```sql
 SELECT m.memory_id, m.state, m.pinned, m.credited_success_count, m.evidenced_blame_count,
        m.strength_anchor, m.half_life_hours, m.embedding_model_id,
-       count(o.outcome_request_id) AS attributed_outcomes
+       count(o.outcome_request_id) FILTER (WHERE o.status = 'success'
+         AND o.attributions @> ('[{"memory_id":"' || m.memory_id || '","role":"credited"}]')::JSONB) AS credited_outcomes,
+       count(o.outcome_request_id) FILTER (WHERE o.status = 'failure'
+         AND o.attributions @> ('[{"memory_id":"' || m.memory_id || '","role":"blamed"}]')::JSONB) AS blamed_outcomes
 FROM audit_memories m
 LEFT JOIN outcomes o
   ON o.tenant_id = m.tenant_id
@@ -59,8 +62,9 @@ ORDER BY m.credited_success_count DESC, m.memory_id LIMIT 10;
 Honest scope: anchors also move without outcomes **by design** (initial strength on
 remember/derive, pin materialization, lifecycle transitions). What is outcome-gated is
 **credit and blame**: any row with `credited_success_count > 0` or
-`evidenced_blame_count > 0` must show matching `attributed_outcomes` — a nonzero counter
-with zero attribution rows would falsify the design, and this query would show it.
+`evidenced_blame_count > 0` must show matching `credited_outcomes` / `blamed_outcomes`
+respectively (direction matters: a credit counter backed only by failure attributions would
+be a lie) — a nonzero counter with zero matching rows falsifies the design on the spot.
 
 **3a. "Where did this dream memory come from?" — memory-to-memory lineage:**
 
@@ -82,13 +86,16 @@ SELECT e.derived_memory_id AS experience_id, e.attempt_id, e.event_id,
 FROM memory_event_evidence e
 JOIN audit_nightly_runs r ON r.tenant_id = e.tenant_id AND r.run_id = e.run_id
 LEFT JOIN reflection_pairs p ON p.tenant_id = e.tenant_id AND p.experience_id = e.derived_memory_id
+  AND p.run_id = e.run_id AND e.attempt_id IN (p.failure_attempt_id, p.success_attempt_id)
 WHERE e.tenant_id = 'demo-tenant'
 ORDER BY r.scheduled_for DESC LIMIT 10;
 ```
 
 Dream products chain through `memory_derivations`; reflection products anchor to the exact
 attempt EVENTS they were extracted from (`memory_event_evidence`) plus the exactly-once
-pair ledger. Both end at an idempotent, lease-fenced run with a frozen source fingerprint —
+pair ledger — the `run_id` + attempt constraints matter: when semantic dedup resolves two
+pairs to one experience, the unconstrained join would cross-pair every event with every
+pair (proven by red gate A7). Both end at an idempotent, lease-fenced run with a frozen source fingerprint —
 no orphaned "the model just said so" rows.
 
 ## Wiring the Managed MCP Server

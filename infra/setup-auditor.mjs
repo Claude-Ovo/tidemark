@@ -58,24 +58,55 @@ try {
     (rel === null && sch === null && priv === 'CONNECT' && dbn === database) ||
     (rel === null && sch === 'public' && priv === 'USAGE') ||
     (sch === 'public' && rel !== null && AUDIT_RELATIONS.includes(rel) && priv === 'SELECT')
+  // 按 object_type 分派 REVOKE（round-3：table 之外的形状不许错撤，未知形状 fail-closed）
+  const revokeByType = async (grantee, g) => {
+    const otype = String(g.object_type ?? '').toLowerCase()
+    const sch = g.schema_name ?? null, rel = g.object_name ?? null
+    const dbn = g.database_name ?? null, priv = g.privilege_type
+    if (otype === 'table' || otype === 'view') {
+      await c.query(`REVOKE ${priv} ON TABLE ${quoteIdentifier(sch ?? 'public')}.${quoteIdentifier(rel)} FROM ${grantee}`)
+    } else if (otype === 'sequence') {
+      await c.query(`REVOKE ${priv} ON SEQUENCE ${quoteIdentifier(sch ?? 'public')}.${quoteIdentifier(rel)} FROM ${grantee}`)
+    } else if (otype === 'schema') {
+      await c.query(`REVOKE ${priv} ON SCHEMA ${quoteIdentifier(sch)} FROM ${grantee}`)
+    } else if (otype === 'database') {
+      await c.query(`REVOKE ${priv} ON DATABASE ${quoteIdentifier(dbn)} FROM ${grantee}`)
+    } else {
+      throw new Error(`unknown grant shape for ${grantee}, refusing to guess: ${JSON.stringify(g)}`)
+    }
+    console.log(`revoked drifted grant from ${grantee}: ${priv} on ${otype} ${sch ?? dbn}${rel ? '.' + rel : ''}`)
+  }
   const grants = (await c.query(`SHOW GRANTS FOR ${AUDITOR}`)).rows
   for (const g of grants) {
-    if (g.grantee !== AUDITOR) continue   // SHOW GRANTS FOR 也回带 public 角色继承行，不归我们撤
-    const dbn = g.database_name ?? null
-    const sch = g.schema_name ?? null
-    const rel = g.object_name ?? g.relation_name ?? null
-    const priv = g.privilege_type
-    if (allowed(dbn, sch, rel, priv)) continue
-    if (rel !== null) {
-      await c.query(`REVOKE ${priv} ON TABLE ${quoteIdentifier(sch ?? 'public')}.${quoteIdentifier(rel)} FROM ${AUDITOR}`)
-      console.log(`revoked drifted grant: ${priv} on ${sch}.${rel}`)
-    } else if (sch !== null) {
-      await c.query(`REVOKE ${priv} ON SCHEMA ${quoteIdentifier(sch)} FROM ${AUDITOR}`)
-      console.log(`revoked drifted schema grant: ${priv} on ${sch}`)
-    } else if (dbn !== null) {
-      await c.query(`REVOKE ${priv} ON DATABASE ${quoteIdentifier(dbn)} FROM ${AUDITOR}`)
-      console.log(`revoked drifted database grant: ${priv} on ${dbn}`)
-    }
+    if (g.grantee !== AUDITOR) continue   // 直授面在此；public 扩张面单独收敛（见下）
+    if (allowed(g.database_name ?? null, g.schema_name ?? null, g.object_name ?? null, g.privilege_type)) continue
+    await revokeByType(AUDITOR, g)
+  }
+  // public 扩张面（round-3 P1：grantee=public 的授权 auditor 全部继承——隔离 demo DB 上
+  // 用户空间的任何 public 授权都属于漂移，强拆；系统 schema 的默认面保留）
+  const SYSTEM_SCHEMAS = new Set(['crdb_internal', 'information_schema', 'pg_catalog', 'pg_extension'])
+  const pubAllowed = (g) => {
+    const otype = String(g.object_type ?? '').toLowerCase()
+    const sch = g.schema_name ?? null, priv = g.privilege_type
+    if (otype === 'database' && (priv === 'CONNECT' || priv === 'TEMPORARY')) return true
+    if (sch !== null && SYSTEM_SCHEMAS.has(sch)) return true
+    if (otype === 'schema' && sch === 'public' && priv === 'USAGE') return true
+    if (otype === 'type' && priv === 'USAGE') return true   // CRDB 内建类型的默认 public USAGE
+    return false
+  }
+  const pubGrants = (await c.query(`SHOW GRANTS FOR public`)).rows
+  for (const g of pubGrants) {
+    if (g.grantee !== 'public') continue
+    if (pubAllowed(g)) continue
+    await revokeByType('public', g)
+  }
+  // SYSTEM 级授权：auditor 必须为零（round-3 P1，Codex 注入 VIEWACTIVITY 实弹存活过）
+  const sysGrants = (await c.query(`SHOW SYSTEM GRANTS FOR ${AUDITOR}`)).rows
+  for (const g of sysGrants) {
+    const priv = g.privilege_type ?? g.privilege ?? g.system_privilege
+    if (!priv) throw new Error(`unknown system grant shape: ${JSON.stringify(g)}`)
+    await c.query(`REVOKE SYSTEM ${priv} FROM ${AUDITOR}`)
+    console.log(`revoked drifted SYSTEM grant: ${priv}`)
   }
   // role 继承：auditor 不许是任何角色的成员（public 隐式成员除外，系统不允许撤）
   const memberships = (await c.query(`SHOW GRANTS ON ROLE`)).rows

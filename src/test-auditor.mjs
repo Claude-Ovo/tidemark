@@ -4,6 +4,7 @@
 //       （TIDEMARK_AUDITOR_PASSWORD 与本卷共用同一 env）
 import './lib/test-env.mjs'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { withDatabase } from '../migrations/db.mjs'
 import { AUDIT_RELATIONS } from '../infra/setup-auditor.mjs'
@@ -17,7 +18,7 @@ const u = new URL(withDatabase(process.env.COCKROACH_DATABASE_URL, DB))
 u.username = 'tidemark_auditor'
 u.password = PASSWORD
 const auditor = new pg.Pool({ connectionString: u.href, max: 2 })
-const q = async (text) => auditor.query(text)
+const q = async (text, values) => auditor.query(text, values)
 const expectDenied = async (label, text) => {
   try { await q(text); assert.fail(`${label}: expected permission denial, got success`) }
   catch (e) {
@@ -72,6 +73,10 @@ try {
   }
   console.log(`PASS A4 exact column surface frozen for all ${AUDIT_RELATIONS.length} relations`)
 
+  // ---- A5+ 需要写库的红门只准 dev/disposable 库（round-3 P1-2）：prod 只跑 A1-A4 ----
+  if (DB === 'tidemark_prod') {
+    console.log('SKIP A5-A7 on tidemark_prod (mutation red gates are dev-only by design)')
+  } else {
   // A5 自由文本 sentinel 红门（round-2 P1-1）：admin 往 rebuild_queue.last_error 写哨兵，
   // auditor 无论投影原列（42703：视图上根本没有）还是任何可读面都摸不到它
   const admin = new pg.Pool({ connectionString: withDatabase(process.env.COCKROACH_DATABASE_URL, DB), max: 1 })
@@ -91,36 +96,128 @@ try {
     await admin.query(`DELETE FROM memory_rebuild_queue WHERE rebuild_id = $1`, [rbId])
   }
 
-  // A6 授权漂移红门（round-2 P1-2）：他 schema 同名表 + 角色继承注入，setup 重跑必须精确复原
+  // A6 授权漂移红门（round-3 重做：随机不可碰撞名 + CREATE 硬碰撞即停 + 清理不吞错 + 零残留后置断言）
   const { spawnSync } = await import('node:child_process')
-  await admin.query(`CREATE SCHEMA IF NOT EXISTS secretsch`)
-  await admin.query(`CREATE TABLE IF NOT EXISTS secretsch.audit_memories (x INT)`)
-  await admin.query(`GRANT USAGE ON SCHEMA secretsch TO tidemark_auditor`)
-  await admin.query(`GRANT SELECT ON TABLE secretsch.audit_memories TO tidemark_auditor`)
-  await admin.query(`CREATE ROLE IF NOT EXISTS snooprole`)
-  await admin.query(`GRANT SELECT ON TABLE public.memories TO snooprole`)
-  await admin.query(`GRANT snooprole TO tidemark_auditor`)
+  const rnd = randomUUID().replaceAll('-', '').slice(0, 10)
+  const SCH = `drift_sch_${rnd}`, ROLE = `drift_role_${rnd}`
+  await admin.query(`CREATE SCHEMA "${SCH}"`)                 // 无 IF NOT EXISTS：撞名=fail，绝不接管他人对象
+  let roleCreated = false, cleanupErrors = []
   try {
-    // 注入生效的证明（不然红门测了个寂寞）
-    await q(`SELECT count(*) FROM secretsch.audit_memories`)
+    await admin.query(`CREATE TABLE "${SCH}".audit_memories (x INT)`)
+    await admin.query(`GRANT USAGE ON SCHEMA "${SCH}" TO tidemark_auditor`)
+    await admin.query(`GRANT SELECT ON TABLE "${SCH}".audit_memories TO tidemark_auditor`)
+    await admin.query(`CREATE ROLE "${ROLE}"`)
+    roleCreated = true
+    await admin.query(`GRANT SELECT ON TABLE public.memories TO "${ROLE}"`)
+    await admin.query(`GRANT "${ROLE}" TO tidemark_auditor`)
+    await q(`SELECT count(*) FROM "${SCH}".audit_memories`)
     await q(`SELECT count(*) FROM public.memories`)
     console.log('      (drift injected and CONFIRMED effective: decoy schema + inherited role)')
     const rerun = spawnSync(process.execPath, ['--env-file=.env', 'infra/setup-auditor.mjs', '--database', DB],
       { encoding: 'utf8', cwd: process.cwd(), env: { ...process.env, TIDEMARK_AUDITOR_PASSWORD: PASSWORD } })
     assert.equal(rerun.status, 0, `A6 setup rerun failed: ${rerun.stdout}${rerun.stderr}`)
     assert.ok(rerun.stdout.includes('revoked drifted'), `A6 setup must report revocations: ${rerun.stdout}`)
-    try { await q(`SELECT count(*) FROM secretsch.audit_memories`); assert.fail('A6 decoy grant survived') }
+    try { await q(`SELECT count(*) FROM "${SCH}".audit_memories`); assert.fail('A6 decoy grant survived') }
     catch (e) { assert.equal(e.code, '42501', `A6 decoy denial expected, got ${e.code}`) }
     try { await q(`SELECT count(*) FROM public.memories`); assert.fail('A6 inherited role read survived') }
     catch (e) { assert.equal(e.code, '42501', `A6 role-inheritance denial expected, got ${e.code}`) }
     console.log('PASS A6 drift converged: decoy-schema grant and role inheritance both revoked by rerun')
   } finally {
-    await admin.query(`REVOKE snooprole FROM tidemark_auditor`).catch(() => {})
-    await admin.query(`DROP ROLE IF EXISTS snooprole`).catch(() => {})
-    await admin.query(`DROP TABLE IF EXISTS secretsch.audit_memories`).catch(() => {})
-    await admin.query(`DROP SCHEMA IF EXISTS secretsch`).catch(() => {})
-    await admin.end()
+    // 清理顺序（round-3）：先撤 role 自身持有的授权，再删 role；任何失败进 cleanupErrors，绝不静默
+    const step = async (label, sql) => { try { await admin.query(sql) } catch (e) { cleanupErrors.push(`${label}: ${e.message}`) } }
+    if (roleCreated) {
+      await step('revoke role table grant', `REVOKE SELECT ON TABLE public.memories FROM "${ROLE}"`)
+      await step('revoke membership', `REVOKE "${ROLE}" FROM tidemark_auditor`)
+      await step('drop role', `DROP ROLE "${ROLE}"`)
+    }
+    await step('drop decoy table', `DROP TABLE IF EXISTS "${SCH}".audit_memories`)
+    await step('drop decoy schema', `DROP SCHEMA IF EXISTS "${SCH}"`)
+  }
+  if (cleanupErrors.length > 0) throw new Error(`A6 cleanup failures (dirty state!): ${cleanupErrors.join(' | ')}`)
+  {
+    const leftRole = (await admin.query(`SELECT count(*)::INT AS n FROM [SHOW ROLES] WHERE username = $1`, [ROLE])).rows[0].n
+    const leftSch = (await admin.query(`SELECT count(*)::INT AS n FROM information_schema.schemata WHERE schema_name = $1`, [SCH])).rows[0].n
+    assert.equal(Number(leftRole) + Number(leftSch), 0, 'A6 postcondition: zero residue (role and schema gone)')
+    console.log('PASS A6-post zero residue verified')
   }
 
-  console.log('ALL P0-10 AUDITOR ASSERTIONS PASSED (A1-A6)')
+  // A6b public 扩张面 + SYSTEM 授权红门（round-3 P1-1，Codex 双注入实弹场景）
+  {
+    const decoy = `public_decoy_${rnd}`
+    await admin.query(`CREATE TABLE public."${decoy}" (x INT)`)
+    try {
+      await admin.query(`GRANT SELECT ON TABLE public."${decoy}" TO public`)
+      await admin.query(`GRANT SYSTEM VIEWACTIVITY TO tidemark_auditor`)
+      await q(`SELECT count(*) FROM public."${decoy}"`)   // 经 public 角色继承可读——注入生效
+      const sysBefore = (await admin.query(`SHOW SYSTEM GRANTS FOR tidemark_auditor`)).rows
+      assert.ok(sysBefore.length > 0, 'A6b system grant injected and visible')
+      console.log('      (public-role decoy + SYSTEM grant injected and CONFIRMED effective)')
+      const rerun = spawnSync(process.execPath, ['--env-file=.env', 'infra/setup-auditor.mjs', '--database', DB],
+        { encoding: 'utf8', cwd: process.cwd(), env: { ...process.env, TIDEMARK_AUDITOR_PASSWORD: PASSWORD } })
+      assert.equal(rerun.status, 0, `A6b setup rerun failed: ${rerun.stdout}${rerun.stderr}`)
+      try { await q(`SELECT count(*) FROM public."${decoy}"`); assert.fail('A6b public-role decoy grant survived') }
+      catch (e) { assert.equal(e.code, '42501', `A6b decoy denial expected, got ${e.code}`) }
+      const sysAfter = (await admin.query(`SHOW SYSTEM GRANTS FOR tidemark_auditor`)).rows
+      assert.equal(sysAfter.length, 0, `A6b system grants must converge to zero, got ${JSON.stringify(sysAfter)}`)
+      console.log('PASS A6b public-role expansion revoked and SYSTEM grants converged to zero')
+    } finally {
+      await admin.query(`DROP TABLE IF EXISTS public."${decoy}"`)
+    }
+  }
+
+  // A7 Q3b 串线红门（round-3 P2）：两个 pair dedup 到同一 experience，judge 查询不得交叉配对
+  {
+    const T = 'audit-test-tenant', A = 'audit-test-agent'
+    const runIds = [randomUUID(), randomUUID()]
+    const expId = randomUUID()
+    const mk = (i) => ({ f: `a7-f-${i}-${rnd}`, s: `a7-s-${i}-${rnd}`, fo: randomUUID(), so: randomUUID(), ev: randomUUID() })
+    const P = [mk(0), mk(1)]
+    const H = Buffer.from([0])
+    try {
+      await admin.query(`INSERT INTO memories (tenant_id, agent_id, memory_id, layer, content, embedding, embedding_model_id, experience_body, exp_status, source, admission, state, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours)
+        VALUES ($1,$2,$3,'experience','a7 exp body','[${Array(512).fill('0.01').join(',')}]','stub-sha256-512','{"trigger":"t","correct_action":"a"}','candidate','derived','accepted','fresh',0.5,1.0,now(),now(),2160)`, [T, A, expId])
+      for (let i = 0; i < 2; i++) {
+        await admin.query(`INSERT INTO nightly_runs (tenant_id, run_id, job_kind, scheduled_for, pipeline_version, status, attempt_count, batch_size, source_fingerprint, source_snapshot, control_config)
+          VALUES ($1,$2,'reflection', now() - ($3::FLOAT8 || ' hours')::INTERVAL, 'a7-test-v1', 'completed', 1, 200, $4, '{}', '{}')`, [T, runIds[i], i + 1, Buffer.from('a7fp' + i + rnd)])
+        for (const [att, orid, st] of [[P[i].f, P[i].fo, 'failure'], [P[i].s, P[i].so, 'success']]) {
+          await admin.query(`INSERT INTO outcomes (tenant_id, outcome_request_id, agent_id, episode_id, task_instance_id, attempt_id, status, attributions, plasticity_applied, payload_hmac, response_json)
+            VALUES ($1,$2,$3,'a7-ep','a7-task',$4,$5,'[]',false,$6,'{}')`, [T, orid, A, att, st, H])
+        }
+        await admin.query(`INSERT INTO attempt_events (tenant_id, agent_id, episode_id, task_instance_id, attempt_id, event_id, event_type, payload)
+          VALUES ($1,$2,'a7-ep','a7-task',$3,$4,'note','{"ref":"${randomUUID()}"}')`, [T, A, P[i].f, P[i].ev])
+        await admin.query(`INSERT INTO memory_event_evidence (tenant_id, derived_memory_id, attempt_id, event_id, run_id)
+          VALUES ($1,$2,$3,$4,$5)`, [T, expId, P[i].f, P[i].ev, runIds[i]])
+        await admin.query(`INSERT INTO reflection_pairs (tenant_id, agent_id, failure_attempt_id, success_attempt_id, failure_outcome_request_id, success_outcome_request_id, pair_fingerprint, experience_id, run_id, status)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'resolved')`, [T, A, P[i].f, P[i].s, P[i].fo, P[i].so, Buffer.from('a7pair' + i + rnd), expId, runIds[i]])
+      }
+      // doc 里的加严 Q3b（run_id + attempt 双约束）：每条 evidence 只配到自己的 pair
+      const rows = (await q(`SELECT e.event_id, e.run_id, p.failure_attempt_id
+        FROM memory_event_evidence e
+        JOIN reflection_pairs p ON p.tenant_id = e.tenant_id AND p.experience_id = e.derived_memory_id
+          AND p.run_id = e.run_id AND e.attempt_id IN (p.failure_attempt_id, p.success_attempt_id)
+        WHERE e.tenant_id = $1 AND e.derived_memory_id = $2`, [T, expId])).rows
+      assert.equal(rows.length, 2, `A7 exactly one pair per evidence row (no cross-pairing), got ${rows.length}`)
+      for (let i = 0; i < 2; i++) {
+        const r = rows.find(x => x.run_id === runIds[i])
+        assert.equal(r.failure_attempt_id, P[i].f, 'A7 evidence bound to its OWN pair')
+      }
+      // 反证：doc 旧版（无 run/attempt 约束）确实会串成 4 行——证明加严是必要的
+      const loose = (await q(`SELECT count(*)::INT AS n FROM memory_event_evidence e
+        JOIN reflection_pairs p ON p.tenant_id = e.tenant_id AND p.experience_id = e.derived_memory_id
+        WHERE e.tenant_id = $1 AND e.derived_memory_id = $2`, [T, expId])).rows[0].n
+      assert.equal(Number(loose), 4, 'A7 the un-constrained join DOES cross-pair (4 rows) - the doc constraint is load-bearing')
+      console.log('PASS A7 dedup-shared experience does not cross-pair under the judge query (loose join proven broken)')
+    } finally {
+      await admin.query(`DELETE FROM reflection_pairs WHERE tenant_id = $1 AND failure_attempt_id LIKE 'a7-f-%'`, [T])
+      await admin.query(`DELETE FROM memory_event_evidence WHERE tenant_id = $1 AND derived_memory_id = $2`, [T, expId])
+      await admin.query(`DELETE FROM attempt_events WHERE tenant_id = $1 AND episode_id = 'a7-ep'`, [T])
+      await admin.query(`DELETE FROM outcomes WHERE tenant_id = $1 AND episode_id = 'a7-ep'`, [T])
+      await admin.query(`DELETE FROM nightly_runs WHERE tenant_id = $1 AND pipeline_version = 'a7-test-v1'`, [T])
+      await admin.query(`DELETE FROM memories WHERE tenant_id = $1 AND memory_id = $2`, [T, expId])
+    }
+  }
+  await admin.end()
+  }
+
+  console.log(DB === 'tidemark_prod' ? 'ALL P0-10 AUDITOR ASSERTIONS PASSED (A1-A4, prod read-only mode)' : 'ALL P0-10 AUDITOR ASSERTIONS PASSED (A1-A7)')
 } finally { await auditor.end() }
