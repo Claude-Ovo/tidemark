@@ -80,6 +80,7 @@ try {
   // A5 自由文本 sentinel 红门（round-2 P1-1）：admin 往 rebuild_queue.last_error 写哨兵，
   // auditor 无论投影原列（42703：视图上根本没有）还是任何可读面都摸不到它
   const admin = new pg.Pool({ connectionString: withDatabase(process.env.COCKROACH_DATABASE_URL, DB), max: 1 })
+  try {   // admin pool 外层 finally（round-4：任何断言失败也要关闭）
   const SENTINEL = 'SENTINEL-' + Math.random().toString(36).slice(2, 10)
   const rbId = (await admin.query(
     `INSERT INTO memory_rebuild_queue (tenant_id, agent_id, deleted_derived_memory_id, remaining_source_memory_ids, status, last_error)
@@ -161,13 +162,24 @@ try {
       assert.equal(sysAfter.length, 0, `A6b system grants must converge to zero, got ${JSON.stringify(sysAfter)}`)
       console.log('PASS A6b public-role expansion revoked and SYSTEM grants converged to zero')
     } finally {
-      await admin.query(`DROP TABLE IF EXISTS public."${decoy}"`)
+      // round-4 P1：finally 不信被测代码——setup 成败与否，注入的授权都由测试亲手独立撤销；
+      // 清理失败大声收集，后置断言 decoy 不存在 + SYSTEM grants 为空
+      const errs = []
+      const step = async (label, sql) => { try { await admin.query(sql) } catch (e) { errs.push(`${label}: ${e.message}`) } }
+      await step('revoke public decoy grant', `REVOKE SELECT ON TABLE public."${decoy}" FROM public`)
+      await step('revoke SYSTEM grant', `REVOKE SYSTEM VIEWACTIVITY FROM tidemark_auditor`)
+      await step('drop decoy table', `DROP TABLE IF EXISTS public."${decoy}"`)
+      if (errs.length > 0) throw new Error(`A6b cleanup failures (dirty state!): ${errs.join(' | ')}`)
+      const tLeft = (await admin.query(`SELECT count(*)::INT AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`, [decoy])).rows[0].n
+      const sysLeft = (await admin.query(`SHOW SYSTEM GRANTS FOR tidemark_auditor`)).rows
+      assert.equal(Number(tLeft) + sysLeft.length, 0, 'A6b postcondition: decoy gone AND zero system grants')
     }
+    console.log('PASS A6b-post independent cleanup verified (zero residue even if setup had failed)')
   }
 
   // A7 Q3b 串线红门（round-3 P2）：两个 pair dedup 到同一 experience，judge 查询不得交叉配对
   {
-    const T = 'audit-test-tenant', A = 'audit-test-agent'
+    const T = `a7-t-${rnd}`, A = `a7-a-${rnd}`   // 本轮随机命名空间：并发跑各删各的
     const runIds = [randomUUID(), randomUUID()]
     const expId = randomUUID()
     const mk = (i) => ({ f: `a7-f-${i}-${rnd}`, s: `a7-s-${i}-${rnd}`, fo: randomUUID(), so: randomUUID(), ev: randomUUID() })
@@ -216,7 +228,7 @@ try {
       await admin.query(`DELETE FROM memories WHERE tenant_id = $1 AND memory_id = $2`, [T, expId])
     }
   }
-  await admin.end()
+  } finally { await admin.end() }
   }
 
   console.log(DB === 'tidemark_prod' ? 'ALL P0-10 AUDITOR ASSERTIONS PASSED (A1-A4, prod read-only mode)' : 'ALL P0-10 AUDITOR ASSERTIONS PASSED (A1-A7)')

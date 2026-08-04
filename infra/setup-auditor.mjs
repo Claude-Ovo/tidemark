@@ -1,4 +1,7 @@
 // P0-10：审计只读账号开户/轮换（幂等）。结论 18/25：Managed MCP 是 operator-facing
+// 注意：CRDB 的 SQL user 与密码是【集群级】的——dev/prod 同集群共用一个 tidemark_auditor，
+// 最后一次 ALTER PASSWORD 生效于两库。正式口径：以 tidemark/auditor secret 里的值为准；
+// dev 测试临时改密后必须重跑 prod --store-secret 收尾（本文件调用顺序纪律）。
 // 审计路径，凭据只配这个 auditor 账号——SELECT 限于三张脱敏视图 + 九张"永无散文"表，
 // 基表 memories/recall_requests/nightly_runs 无任何授权，写操作全库无授权。
 // 用法:

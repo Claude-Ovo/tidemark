@@ -11,7 +11,10 @@ seeing stored prose, vectors, or credentials.
 `tidemark_auditor` (created by `infra/setup-auditor.mjs`; prod credentials sealed in
 Secrets Manager `tidemark/auditor`, never in the repo).
 
-What it can see — exactly 12 relations:
+What it can see — exactly 12 **application** relations (standard CockroachDB catalogs —
+`pg_catalog` / `information_schema` / `crdb_internal` — remain platform-default,
+privilege-filtered and credential-masked; e.g. `pg_shadow.passwd` is a fixed mask and
+cluster views show only the auditor's own sessions):
 
 | Relation | What it proves |
 |---|---|
@@ -102,6 +105,6 @@ no orphaned "the model just said so" rows.
 
 The CockroachDB Cloud console configures the Managed MCP endpoint with the
 `tidemark_auditor` SQL credentials (console step, operator-performed). The MCP tools are
-the official fixed 12 (read/query); with this account they can only reach the relations
-above. Business traffic never touches this path — it stays on Tidemark's own Memory MCP
+the official fixed 12 (read/query); with this account the APPLICATION data they can reach
+is exactly the relations above (platform catalogs stay privilege-filtered as noted). Business traffic never touches this path — it stays on Tidemark's own Memory MCP
 (conclusion 18).
