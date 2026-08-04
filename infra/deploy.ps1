@@ -233,6 +233,10 @@ if ($LASTEXITCODE -ne 0) {
 # is READ BACK (cutover-lib). Mid-cutover death = explicit maintenance, recovery = rerun deploy
 # (roll-forward) or -Rollback (allowed only pre-backfill, enforced by Resolve-RollbackTarget).
 $priorState = Get-CutoverState $bucket
+$init = Resolve-InitialPhase $priorState   # round-5 P1-1: phase NEVER regresses past the irreversible line
+if ($init.phase -eq "backfill-started") {
+  Write-Host "resuming an interrupted cutover PAST the irreversible line: roll-forward only (cutover $($init.cutover_id))"
+}
 Set-RuleState $ruleName "DISABLED"
 $gated = @()
 foreach ($fn in @($mcpFn, $nightlyFn)) {
@@ -249,7 +253,8 @@ if ($gated.Count -gt 0) {
   Write-Host ("maintenance gate up + proven (invoke throttled): " + ($gated -join ', '))
 }
 $state = [pscustomobject]@{
-  phase = "gated"; artifact_key = $artifactKey; artifact_sha256 = $zipShaHex; identity = $expectedId
+  phase = $init.phase; cutover_id = $init.cutover_id
+  artifact_key = $artifactKey; artifact_sha256 = $zipShaHex; identity = $expectedId
   last_good = if ($priorState -and $priorState.last_good) { $priorState.last_good } else { $null }
   updated_at = ""
 }
@@ -295,15 +300,26 @@ $nightlyEnv = $mcpEnv.Clone()
 $nightlyEnv.TIDEMARK_NIGHTLY_TENANTS = "demo-tenant"
 Deploy-Function $mcpFn "src/aws/mcp-handler.handler" 30 $mcpEnv
 Deploy-Function $nightlyFn "src/aws/nightly-handler.handler" 600 $nightlyEnv
-$state.phase = "code-swapped"
-Set-CutoverState $bucket $state
+if ($state.phase -eq "gated") { $state.phase = "code-swapped"; Set-CutoverState $bucket $state }
+# (a resumed backfill-started cutover stays backfill-started: monotonic, round-5 P1-1)
 
 # ---- 5b. cutover phase B: backfill into the current space, then the remaining migrations ----
 if (-not $SkipMigrate) {
   $env:EMBED_PROVIDER = "local-onnx"
+  # round-5 P1-1: the irreversible line is persisted BEFORE the first backfill write.
+  # dry-run counts pending rows; writers are gated, so the count cannot change under us.
+  $dry = node --env-file=$envFile migrations/backfill-embeddings.mjs --database $prodDb --dry-run
+  Assert-NativeSuccess "backfill dry-run $prodDb"
+  $pendingLine = ($dry | Select-String -Pattern "rows needing migration: (\d+)").Matches
+  if ($pendingLine.Count -lt 1) { throw "backfill dry-run output unparseable: $dry" }
+  $pending = [int]$pendingLine[0].Groups[1].Value
+  if ($pending -gt 0 -and $state.phase -ne "backfill-started") {
+    $state.phase = "backfill-started"                  # from THIS moment: roll-forward only
+    Set-CutoverState $bucket $state
+  }
   node --env-file=$envFile migrations/backfill-embeddings.mjs --database $prodDb
   Assert-NativeSuccess "backfill embeddings $prodDb (residual must be zero)"
-  $state.phase = "post-backfill"                       # from here on: roll-forward only
+  $state.phase = "post-backfill"
   Set-CutoverState $bucket $state
   node --env-file=$envFile migrations/apply.mjs --database $prodDb
   Assert-NativeSuccess "migrate $prodDb (035+)"

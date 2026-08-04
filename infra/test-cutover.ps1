@@ -66,5 +66,53 @@ $got = Get-CutoverState "b"
 if ($got.phase -ne "gated" -or $got.artifact_key -ne "artifacts/a.zip") { throw "T6 state round-trip mismatch" }
 Write-Host "PASS T6 cutover state persists and reads back"; $passes++
 
+# T7 state absence must be PROVEN: read AccessDenied is fatal, verified-absent returns null
+Set-MockState @{ concurrency = @{}; rule = "DISABLED"; fail = @{ "s3api list-objects-v2" = $true } }
+Expect-Throw { Get-CutoverState "b" } "absence must be verifiable" "T7a state list AccessDenied is fatal, not first-deploy"
+Set-MockState @{ concurrency = @{}; rule = "DISABLED" }
+Remove-Item (Join-Path $env:TIDEMARK_MOCK_S3DIR "cutover-state.json") -Force -Confirm:$false -ErrorAction SilentlyContinue
+if ($null -ne (Get-CutoverState "b")) { throw "T7b expected null for verified-absent state" }
+Write-Host "PASS T7b verified-absent state returns null"; $passes++
+Set-MockState @{ concurrency = @{}; rule = "DISABLED"; fail = @{ "s3 cp" = $true } }
+[IO.File]::WriteAllText((Join-Path $env:TIDEMARK_MOCK_S3DIR "cutover-state.json"), '{"phase":"gated"}', (New-Object Text.UTF8Encoding($false)))
+Expect-Throw { Get-CutoverState "b" } "could not be fetched" "T7c state exists but unreadable is fatal"
+
+# T8 rule double-failure must NOT be mistaken for first deploy
+Set-MockState @{ concurrency = @{}; rule = "ENABLED"; fail = @{ "events disable-rule" = $true; "events describe-rule" = $true } }
+Expect-Throw { Set-RuleState "r" "DISABLED" } "unreadable" "T8a rule disable+describe double-failure is fatal (list proves it exists)"
+Set-MockState @{ concurrency = @{}; rule = "ENABLED"; fail = @{ "events disable-rule" = $true; "events describe-rule" = $true; "events list-rules" = $true } }
+Expect-Throw { Set-RuleState "r" "DISABLED" } "absence must be verifiable" "T8b triple network failure is fatal, never first-deploy"
+
+# T9 backfill-started refuses rollback (the irreversible line moved EARLIER, round-5 P1-1)
+Expect-Throw { Resolve-RollbackTarget ([pscustomobject]@{ phase = "backfill-started"; identity = "id-new"; last_good = [pscustomobject]@{ artifact_key = "artifacts/prev.zip"; identity = "id-old" } }) } "ROLLBACK REFUSED" "T9 backfill-started (partial backfill) refuses rollback"
+
+# T10 phase resume is monotonic: no regression past the irreversible line
+$r1 = Resolve-InitialPhase ([pscustomobject]@{ phase = "backfill-started"; cutover_id = "abc" })
+if ($r1.phase -ne "backfill-started" -or $r1.cutover_id -ne "abc") { throw "T10a regression: got $($r1.phase)" }
+Write-Host "PASS T10a rerun after partial backfill resumes at backfill-started (same cutover)"; $passes++
+$r2 = Resolve-InitialPhase ([pscustomobject]@{ phase = "post-backfill"; cutover_id = "abc" })
+if ($r2.phase -ne "backfill-started" -or $r2.cutover_id -ne "abc") { throw "T10b regression" }
+Write-Host "PASS T10b rerun after post-backfill stays roll-forward-only"; $passes++
+$r3 = Resolve-InitialPhase ([pscustomobject]@{ phase = "complete"; cutover_id = "abc" })
+if ($r3.phase -ne "gated" -or $r3.cutover_id -eq "abc") { throw "T10c completed cutover must start FRESH" }
+Write-Host "PASS T10c completed prior starts a fresh cutover (new id, gated)"; $passes++
+$r4 = Resolve-InitialPhase ([pscustomobject]@{ phase = "code-swapped"; cutover_id = "abc" })
+if ($r4.phase -ne "gated" -or $r4.cutover_id -ne "abc") { throw "T10d pre-backfill resume wrong" }
+Write-Host "PASS T10d pre-backfill death resumes same cutover at gated (rollback still legal)"; $passes++
+
+# T11 partial ungate re-gates what it already opened (round-4 P2 honesty)
+Set-MockState @{ concurrency = @{ "fn-a" = 0; "fn-b" = 0 }; rule = "DISABLED"; fail_after = @{ "lambda delete-function-concurrency" = 1 } }
+Expect-Throw { Remove-MaintenanceGate @("fn-a", "fn-b") } "cutover step failed" "T11a partial ungate throws"
+$after = (Get-Content $statePath -Raw | ConvertFrom-Json).concurrency."fn-a"
+if ($after -ne 0) { throw "T11b fn-a was left ungated after partial failure (got '$after')" }
+Write-Host "PASS T11b partial ungate re-gated the opened function (no half-open service)"; $passes++
+
+# T12 state write is read back (phase reconciliation)
+Set-MockState @{ concurrency = @{}; rule = "DISABLED" }
+Set-CutoverState "b" ([pscustomobject]@{ phase = "backfill-started"; cutover_id = "x"; artifact_key = "artifacts/a.zip"; artifact_sha256 = "s"; identity = "i"; last_good = $null; updated_at = "" })
+$got2 = Get-CutoverState "b"
+if ($got2.phase -ne "backfill-started") { throw "T12 read-back mismatch" }
+Write-Host "PASS T12 state write verified by read-back"; $passes++
+
 Remove-Item $tmp -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host ("ALL CUTOVER STATE-MACHINE RED GATES PASSED (" + $passes + " checks)")

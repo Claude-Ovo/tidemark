@@ -15,9 +15,14 @@ function Assert-CutoverNative([string]$step) {
 # shape: { phase, artifact_key, artifact_sha256, identity, last_good: { artifact_key, identity }, updated_at }
 # phases: gated -> code-swapped -> post-backfill -> complete. last_good moves ONLY at complete.
 function Get-CutoverState([string]$Bucket) {
+  # round-5 P1-2: absence must be PROVEN by a successful listing, never inferred from a
+  # failed read (AccessDenied/DNS/line errors are fatal, not "first deploy").
+  $n = & $script:CutoverAws s3api list-objects-v2 --bucket $Bucket --prefix cutover-state.json --query 'length(Contents || `[]`)' --output text
+  Assert-CutoverNative "list cutover state (absence must be verifiable)"
+  if ("$n".Trim() -eq "0" -or "$n".Trim() -eq "None") { return $null }   # verified absent
   $tmp = Join-Path $env:TEMP ("cutover-state-" + [guid]::NewGuid().ToString("N").Substring(0, 8) + ".json")
   & $script:CutoverAws s3 cp "s3://$Bucket/cutover-state.json" $tmp --only-show-errors | Out-Null
-  if ($LASTEXITCODE -ne 0) { return $null }   # first deploy: no state yet
+  Assert-CutoverNative "read cutover state (it exists but could not be fetched)"
   try { return (Get-Content $tmp -Raw | ConvertFrom-Json) } finally { Remove-Item $tmp -Force -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
@@ -29,6 +34,11 @@ function Set-CutoverState([string]$Bucket, $State) {
     & $script:CutoverAws s3 cp $tmp "s3://$Bucket/cutover-state.json" --only-show-errors | Out-Null
     Assert-CutoverNative "persist cutover state ($($State.phase))"
   } finally { Remove-Item $tmp -Force -Confirm:$false -ErrorAction SilentlyContinue }
+  # read-back: the persisted phase must be what we wrote (round-5 P1-2)
+  $rb = Get-CutoverState $Bucket
+  if ($null -eq $rb -or $rb.phase -ne $State.phase) {
+    throw "cutover state read-back mismatch: wrote '$($State.phase)', read '$(if ($rb) { $rb.phase } else { "<absent>" })'"
+  }
 }
 
 # ---- verified gate primitives ----
@@ -43,14 +53,25 @@ function Set-MaintenanceGate([string[]]$Functions) {
 }
 
 function Remove-MaintenanceGate([string[]]$Functions) {
-  # all-or-nothing: verify every function ungated; any failure leaves maintenance in place
-  foreach ($fn in $Functions) {
-    & $script:CutoverAws lambda delete-function-concurrency --function-name $fn
-    Assert-CutoverNative "ungate $fn (delete-function-concurrency)"
-    $rb = & $script:CutoverAws lambda get-function-concurrency --function-name $fn --query ReservedConcurrentExecutions --output text
-    Assert-CutoverNative "ungate read-back $fn"
-    $v = "$rb".Trim()
-    if ($v -ne "" -and $v -ne "None") { throw "ungate NOT verified on ${fn}: read-back '$v' (still reserved)" }
+  # all-or-nothing FOR REAL (round-4 P2): a partial failure re-gates whatever was already
+  # ungated before throwing -- mixed-version half-open service is never left behind
+  $ungated = @()
+  try {
+    foreach ($fn in $Functions) {
+      & $script:CutoverAws lambda delete-function-concurrency --function-name $fn
+      Assert-CutoverNative "ungate $fn (delete-function-concurrency)"
+      $rb = & $script:CutoverAws lambda get-function-concurrency --function-name $fn --query ReservedConcurrentExecutions --output text
+      Assert-CutoverNative "ungate read-back $fn"
+      $v = "$rb".Trim()
+      if ($v -ne "" -and $v -ne "None") { throw "ungate NOT verified on ${fn}: read-back '$v' (still reserved)" }
+      $ungated += $fn
+    }
+  } catch {
+    if ($ungated.Count -gt 0) {
+      Write-Host ("partial ungate failure: re-gating " + ($ungated -join ', '))
+      Set-MaintenanceGate $ungated
+    }
+    throw
   }
 }
 
@@ -63,8 +84,13 @@ function Set-RuleState([string]$RuleName, [string]$Target) {
   $state = & $script:CutoverAws events describe-rule --name $RuleName --query State --output text
   $descExit = $LASTEXITCODE
   if ($descExit -ne 0) {
-    # NotFound is legitimate ONLY on first deploy while disabling (nothing to disable yet)
-    if ($Target -eq "DISABLED" -and $verbExit -ne 0) { Write-Host "rule $RuleName absent (first deploy)"; return }
+    # round-5 P1-2: absence must be PROVEN by a successful list, never assumed from failures
+    if ($Target -eq "DISABLED" -and $verbExit -ne 0) {
+      $cnt = & $script:CutoverAws events list-rules --name-prefix $RuleName --query "length(Rules[?Name=='$RuleName'])" --output text
+      Assert-CutoverNative "list rules (absence must be verifiable)"
+      if ("$cnt".Trim() -eq "0") { Write-Host "rule $RuleName verified absent (first deploy)"; return }
+      throw "rule $RuleName exists but is unreadable after $verb (AccessDenied/network?)"
+    }
     throw "rule $RuleName state unreadable after $verb (exit $descExit)"
   }
   if ("$state".Trim() -ne $Target) { throw "rule $RuleName is '$state' after $verb, expected $Target" }
@@ -72,9 +98,27 @@ function Set-RuleState([string]$RuleName, [string]$Target) {
 
 # ---- phase-aware rollback decision (pure logic, unit-tested) ----
 # Returns the artifact key to restore, or throws when rollback is physically unsafe.
+$script:PhaseRank = @{ "gated" = 0; "code-swapped" = 1; "backfill-started" = 2; "post-backfill" = 3; "complete" = 4 }
+
+# Where may a NEW deploy run start, given the prior persisted state? (round-5 P1-1)
+# - no prior / prior complete: fresh cutover (new cutover_id, phase gated)
+# - prior gated/code-swapped (died pre-backfill, functions still gated): resume same cutover at gated
+# - prior backfill-started/post-backfill: the irreversible line was crossed -- resume the SAME
+#   cutover at backfill-started; phase NEVER regresses to a rollback-permitting value
+function Resolve-InitialPhase($Prior) {
+  if ($null -eq $Prior -or $Prior.phase -eq "complete") {
+    return [pscustomobject]@{ phase = "gated"; cutover_id = [guid]::NewGuid().ToString("N") }
+  }
+  $cid = if ($Prior.cutover_id) { $Prior.cutover_id } else { [guid]::NewGuid().ToString("N") }
+  if ($Prior.phase -eq "backfill-started" -or $Prior.phase -eq "post-backfill") {
+    return [pscustomobject]@{ phase = "backfill-started"; cutover_id = $cid }
+  }
+  return [pscustomobject]@{ phase = "gated"; cutover_id = $cid }
+}
+
 function Resolve-RollbackTarget($State) {
   if ($null -eq $State) { throw "no cutover state: nothing was ever deployed by the gated flow; nothing to roll back to" }
-  if ($State.phase -eq "post-backfill" -or $State.phase -eq "complete") {
+  if ($State.phase -eq "backfill-started" -or $State.phase -eq "post-backfill" -or $State.phase -eq "complete") {
     throw ("ROLLBACK REFUSED at phase '" + $State.phase + "': the database has been backfilled into identity '" +
       $State.identity + "'. Old code derives a different identity and would see NO rows while forking new " +
       "writes into a dead space. Past backfill the only safe direction is roll-forward: fix and rerun deploy.")

@@ -16,6 +16,10 @@ const argOf = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i +
 const fail = (code = 254, msg = 'mock failure') => { console.error(`mock: ${msg} (${cmd})`); process.exit(code) }
 
 if (st.fail?.[cmd]) fail(254, 'scripted failure')
+if (st.fail_after?.[cmd] !== undefined) {
+  st.fail_after[cmd] -= 1; save()
+  if (st.fail_after[cmd] < 0) fail(254, 'scripted failure (after N successes)')
+}
 
 const localOf = (s3uri) => join(s3dir, s3uri.replace(/^s3:\/\/[^/]+\//, '').replace(/\//g, '_'))
 
@@ -40,6 +44,12 @@ switch (cmd) {
   case 'events disable-rule': { if (st.rule === null) fail(254, 'rule not found'); st.rule = st.stick_rule ?? 'DISABLED'; save(); break }
   case 'events describe-rule': { if (st.rule === null) fail(254, 'rule not found'); console.log(st.rule); break }
   case 'sts get-caller-identity': { console.log('123456789012'); break }
+  case 's3api list-objects-v2': {
+    const prefix = argOf('--prefix') ?? ''
+    console.log(existsSync(localOf('s3://b/' + prefix)) ? '1' : '0')
+    break
+  }
+  case 'events list-rules': { console.log(st.rule === null ? '0' : '1'); break }
   case 's3api head-object': { existsSync(localOf('s3://b/' + argOf('--key'))) ? console.log('{}') : fail(254, 'not found'); break }
   case 's3 cp': {
     const [src, dst] = [args[2], args[3]]

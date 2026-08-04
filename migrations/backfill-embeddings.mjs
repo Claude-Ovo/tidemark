@@ -30,7 +30,8 @@ try {
   const before = (await pending()).rows[0].n
   console.log(`rows needing migration: ${before}`)
   if (dryRun || Number(before) === 0) {
-    if (Number(before) !== 0) process.exitCode = 1
+    // dry-run 是报告不是判决：无论 pending 多少都 exit 0（deploy 靠解析行数决定相位）；
+    // 只有【真跑后仍有残留】才是失败态
     console.log(dryRun ? 'dry-run done' : 'nothing to do; space is clean')
   } else {
     let migrated = 0, retried = 0
