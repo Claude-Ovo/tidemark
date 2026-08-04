@@ -38,26 +38,32 @@ function Grant-InvokePermission([string]$fn, [string]$sid, [string]$principal, [
   Write-Host "permission already present, verified by Sid/principal/sourceArn: $fn/$sid"
 }
 
+. (Join-Path $PSScriptRoot 'cutover-lib.ps1')   # verified gate/rule/state/rollback primitives (round-4)
+
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 $envFile = Join-Path $repo '.env'
 if (-not (Test-Path $envFile)) { throw ".env not found at $envFile" }
 
-# ---- rollback mode (round-3 P1-1): restore previous artifact and lift the gate, nothing else ----
+# ---- rollback mode (round-4: phase-aware, physically safe only BEFORE backfill) ----
 if ($Rollback) {
   $acctR = & $aws sts get-caller-identity --query Account --output text
   Assert-NativeSuccess "get account"
   $bucketR = "tidemark-artifacts-$acctR"
+  $stateR = Get-CutoverState $bucketR
+  $target = Resolve-RollbackTarget $stateR    # throws at post-backfill/complete or without last_good
+  Write-Host ("rolling back to last_good artifact " + $target.artifact_key + " (identity " + $target.identity + ")")
   foreach ($fn in @($mcpFn, $nightlyFn)) {
-    & $aws lambda update-function-code --function-name $fn --s3-bucket $bucketR --s3-key tidemark-prev.zip --query LastUpdateStatus --output text | Out-Null
+    & $aws lambda update-function-code --function-name $fn --s3-bucket $bucketR --s3-key $target.artifact_key --query LastUpdateStatus --output text | Out-Null
     Assert-NativeSuccess "rollback code $fn"
     & $aws lambda wait function-updated-v2 --function-name $fn
     Assert-NativeSuccess "rollback wait $fn"
-    & $aws lambda delete-function-concurrency --function-name $fn
-    Write-Host "rolled back + ungated: $fn"
   }
-  & $aws events enable-rule --name $ruleName
-  Write-Host "rollback complete (functions on tidemark-prev.zip, gate lifted, nightly rule enabled)"
+  Remove-MaintenanceGate @($mcpFn, $nightlyFn)          # verified; partial failure keeps maintenance
+  Set-RuleState $ruleName "ENABLED"
+  $stateR.phase = "complete"                             # last_good unchanged: it IS what we restored
+  Set-CutoverState $bucketR $stateR
+  Write-Host "rollback complete (verified ungate, rule enabled, state persisted)"
   exit 0
 }
 
@@ -206,40 +212,48 @@ if ($LASTEXITCODE -ne 0) {
   & $aws s3api create-bucket --bucket $bucket --query Location --output text | Out-Null
   Assert-NativeSuccess "create artifacts bucket"
 }
-# keep the previous artifact for -Rollback before overwriting the key
-& $aws s3api head-object --bucket $bucket --key tidemark.zip | Out-Null
-if ($LASTEXITCODE -eq 0) {
-  & $aws s3 cp "s3://$bucket/tidemark.zip" "s3://$bucket/tidemark-prev.zip" --only-show-errors
-  Assert-NativeSuccess "backup previous artifact"
-}
-& $aws s3 cp $zip "s3://$bucket/tidemark.zip" --only-show-errors
-Assert-NativeSuccess "s3 upload artifact"
+# ---- 4b2. derive the built artifact's embedding identity (from the STAGED tree) ----
+$expectedId = node -e "import(process.argv[1]).then(m => process.stdout.write(m.embedIdentity().embedding_model_id))" "file:///$((Join-Path $repo '.lambda-build\src\lib\embed-identity.mjs') -replace '\\','/')"
+Assert-NativeSuccess "derive built identity"
+if ([string]::IsNullOrWhiteSpace($expectedId)) { throw "derived identity is empty" }
+Write-Host "built identity: $expectedId"
 
-# ---- 4c. maintenance gate (round-3 P1-1): no traffic may reach schema-incompatible code ----
-# reserved-concurrency 0 throttles BOTH the API path and EventBridge invokes at the Lambda
-# itself (probed live on this account: reserved=0 is accepted, unreserved stays >= 10).
-# The gate goes up BEFORE the code swap and comes down only after backfill + 035-037 + verify.
-# If the script dies in between, the service sits in EXPLICIT maintenance (throttled), never
-# in silent wrong-answer state. Recovery: rerun deploy, or infra\deploy.ps1 -Rollback.
-& $aws events disable-rule --name $ruleName
-if ($LASTEXITCODE -ne 0) { Write-Host "nightly rule absent (first deploy), nothing to disable" }
+# ---- 4b3. content-addressed immutable artifact upload (round-4 P1-1) ----
+# key carries the zip sha: reruns after a failed cutover can never clobber a good artifact,
+# and last_good in cutover-state always points at bytes that still exist.
+$artifactKey = "artifacts/tidemark-" + $zipShaHex.Substring(0, 16) + ".zip"
+& $aws s3api head-object --bucket $bucket --key $artifactKey | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  & $aws s3 cp $zip "s3://$bucket/$artifactKey" --only-show-errors
+  Assert-NativeSuccess "s3 upload artifact"
+} else { Write-Host "artifact already uploaded (content-addressed): $artifactKey" }
+
+# ---- 4c. maintenance gate (round-3 P1-1, round-4 verified): no traffic reaches mixed state ----
+# reserved-concurrency 0 throttles BOTH the API path and EventBridge invokes; every transition
+# is READ BACK (cutover-lib). Mid-cutover death = explicit maintenance, recovery = rerun deploy
+# (roll-forward) or -Rollback (allowed only pre-backfill, enforced by Resolve-RollbackTarget).
+$priorState = Get-CutoverState $bucket
+Set-RuleState $ruleName "DISABLED"
 $gated = @()
 foreach ($fn in @($mcpFn, $nightlyFn)) {
   & $aws lambda get-function --function-name $fn --query Configuration.FunctionArn --output text | Out-Null
-  if ($LASTEXITCODE -eq 0) {
-    & $aws lambda put-function-concurrency --function-name $fn --reserved-concurrent-executions 0 --output text | Out-Null
-    Assert-NativeSuccess "gate $fn"
-    $gated += $fn
-  }
+  if ($LASTEXITCODE -eq 0) { $gated += $fn }
 }
 if ($gated.Count -gt 0) {
-  # runtime proof the gate is real: an invoke MUST be throttled before we touch the code
+  Set-MaintenanceGate $gated
+  # runtime proof beyond read-back: an invoke MUST be throttled before we touch the code
   $probeOut = Join-Path $env:TEMP 'gate-probe.json'
-  & $aws lambda invoke --function-name $mcpFn --cli-binary-format raw-in-base64-out --payload '{}' $probeOut --output text | Out-Null
-  if ($LASTEXITCODE -eq 0) { throw "maintenance gate FAILED: $mcpFn still invocable with reserved-concurrency 0" }
+  & $aws lambda invoke --function-name $gated[0] --cli-binary-format raw-in-base64-out --payload '{}' $probeOut --output text | Out-Null
+  if ($LASTEXITCODE -eq 0) { throw "maintenance gate FAILED: $($gated[0]) still invocable with reserved-concurrency 0" }
   Remove-Item $probeOut -Force -Confirm:$false -ErrorAction SilentlyContinue
   Write-Host ("maintenance gate up + proven (invoke throttled): " + ($gated -join ', '))
 }
+$state = [pscustomobject]@{
+  phase = "gated"; artifact_key = $artifactKey; artifact_sha256 = $zipShaHex; identity = $expectedId
+  last_good = if ($priorState -and $priorState.last_good) { $priorState.last_good } else { $null }
+  updated_at = ""
+}
+Set-CutoverState $bucket $state
 
 # ---- 5. Lambda functions (create-or-update) ----
 function Deploy-Function([string]$name, [string]$handler, [int]$timeout, [hashtable]$envVars) {
@@ -256,10 +270,10 @@ function Deploy-Function([string]$name, [string]$handler, [int]$timeout, [hashta
       Assert-NativeSuccess "update-function-configuration $name"
       & $aws lambda wait function-updated-v2 --function-name $name
       Assert-NativeSuccess "wait config $name"
-      & $aws lambda update-function-code --function-name $name --s3-bucket $bucket --s3-key tidemark.zip --query LastUpdateStatus --output text | Out-Null
+      & $aws lambda update-function-code --function-name $name --s3-bucket $bucket --s3-key $artifactKey --query LastUpdateStatus --output text | Out-Null
       Assert-NativeSuccess "update-function-code $name"
     } else {
-      $cfg.Code = @{ S3Bucket = $bucket; S3Key = "tidemark.zip" }
+      $cfg.Code = @{ S3Bucket = $bucket; S3Key = $artifactKey }
       Write-NoBom $cfgFile ($cfg | ConvertTo-Json -Depth 5)
       & $aws lambda create-function --cli-input-json $fileArg --query FunctionArn --output text | Out-Null
       Assert-NativeSuccess "create-function $name"
@@ -281,24 +295,26 @@ $nightlyEnv = $mcpEnv.Clone()
 $nightlyEnv.TIDEMARK_NIGHTLY_TENANTS = "demo-tenant"
 Deploy-Function $mcpFn "src/aws/mcp-handler.handler" 30 $mcpEnv
 Deploy-Function $nightlyFn "src/aws/nightly-handler.handler" 600 $nightlyEnv
+$state.phase = "code-swapped"
+Set-CutoverState $bucket $state
 
 # ---- 5b. cutover phase B: backfill into the current space, then the remaining migrations ----
 if (-not $SkipMigrate) {
   $env:EMBED_PROVIDER = "local-onnx"
   node --env-file=$envFile migrations/backfill-embeddings.mjs --database $prodDb
   Assert-NativeSuccess "backfill embeddings $prodDb (residual must be zero)"
+  $state.phase = "post-backfill"                       # from here on: roll-forward only
+  Set-CutoverState $bucket $state
   node --env-file=$envFile migrations/apply.mjs --database $prodDb
   Assert-NativeSuccess "migrate $prodDb (035+)"
   node --env-file=$envFile migrations/verify.mjs --database $prodDb
   Assert-NativeSuccess "verify $prodDb"
+} else {
+  $state.phase = "post-backfill"                       # SkipMigrate implies the DB already matches
+  Set-CutoverState $bucket $state
 }
-
-# ---- 5c. lift the maintenance gate: schema and code are now consistent ----
-foreach ($fn in @($mcpFn, $nightlyFn)) {
-  & $aws lambda delete-function-concurrency --function-name $fn
-  if ($LASTEXITCODE -ne 0) { Write-Host "no concurrency setting to remove on $fn" }
-}
-Write-Host "maintenance gate lifted"
+# NOTE: the gate stays UP here. It is lifted at the very end (section 8), after the API is
+# wired, with a verified ungate followed by a live /health identity read-back.
 
 
 $mcpArn = & $aws lambda get-function --function-name $mcpFn --query Configuration.FunctionArn --output text
@@ -362,6 +378,10 @@ try {
   if ($failedCount -ne "0") { throw "put-targets reported FailedEntryCount=$failedCount (exit 0 does not mean success)" }
 } finally { Remove-Item $targetsFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
 Grant-InvokePermission $nightlyFn "tidemark-events" "events.amazonaws.com" $ruleArn
+# put-rule above re-enabled the rule while functions are still gated: hold it DISABLED until
+# the final verified ungate (section 8). Fires during this window would only meet throttles,
+# but a disabled rule is the honest state.
+Set-RuleState $ruleName "DISABLED"
 
 # Async execution failures: 2 retries, 6h max age, then DLQ. Idempotent upsert by nature.
 $eicFile = Join-Path $PSScriptRoot '.event-invoke.json'
@@ -371,6 +391,28 @@ try {
   & $aws lambda put-function-event-invoke-config --cli-input-json ("file://" + ($eicFile -replace '\\','/')) --query LastModified --output text | Out-Null
   Assert-NativeSuccess "put-function-event-invoke-config"
 } finally { Remove-Item $eicFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
+
+# ---- 8. verified ungate + live identity read-back, then the cutover is COMPLETE ----
+Remove-MaintenanceGate @($mcpFn, $nightlyFn)
+Set-RuleState $ruleName "ENABLED"
+# live proof: the API must answer with the EXACT built identity; mismatch = re-gate + fail
+$healthOk = $false
+for ($i = 1; $i -le 5; $i++) {
+  try {
+    $h = Invoke-RestMethod -Uri ($apiUrl + "/health") -TimeoutSec 20
+    if ($h.embedding_model_id -eq $expectedId) { $healthOk = $true; break }
+    throw "live identity '$($h.embedding_model_id)' != built '$expectedId'"
+  } catch {
+    if ($_.Exception.Message -like "*!= built*") { Set-MaintenanceGate @($mcpFn, $nightlyFn); throw $_ }
+    Write-Host "health probe $i/5 failed (route flake); retrying in 5s"
+    Start-Sleep -Seconds 5
+  }
+}
+if (-not $healthOk) { Set-MaintenanceGate @($mcpFn, $nightlyFn); throw "health identity read-back never succeeded; service RE-GATED" }
+$state.phase = "complete"
+$state.last_good = [pscustomobject]@{ artifact_key = $artifactKey; identity = $expectedId }
+Set-CutoverState $bucket $state
+Write-Host "cutover complete: verified ungate + live identity match, last_good advanced"
 
 Write-Host ""
 Write-Host "=== deploy complete ==="
