@@ -1,4 +1,0 @@
-{"Version":"2012-10-17","Statement":[
- {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:us-east-1:875699231234:secret:tidemark/prod-o8Ol3g"},
- {"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":"arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"},
- {"Effect":"Allow","Action":"sqs:SendMessage","Resource":"arn:aws:sqs:us-east-1:875699231234:tidemark-nightly-dlq"}]}

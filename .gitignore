@@ -13,3 +13,10 @@ src/server.log
 *.out
 models/
 .lambda-build/
+infra/.trust.json
+infra/.inline-policy.json
+infra/.secret-payload.json
+infra/.fn-cfg.json
+infra/.targets.json
+infra/.dlq-attrs.json
+infra/.event-invoke.json
