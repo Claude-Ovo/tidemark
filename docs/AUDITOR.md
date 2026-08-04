@@ -18,14 +18,15 @@ What it can see — exactly 12 relations:
 | `audit_memories` | lifecycle truth (state/strength/counters/identity) with `content`/`embedding`/`experience_body` replaced by presence+size markers |
 | `audit_recalls` | persisted content-free receipts; the debug-only `query_preview` masked to a flag |
 | `audit_nightly_runs` | run/lease/fingerprint state; free-text `error_message` masked to a flag |
-| `attempt_events`, `outcomes`, `memory_derivations`, `memory_event_evidence`, `reflection_pairs`, `memory_tombstones`, `memory_rebuild_queue`, `success_evidence`, `reflection_cursor` | content-free by frozen write-hygiene design — granted as-is |
+| `audit_memory_rebuild_queue` | rebuild ledger with the unconstrained free-text `last_error` masked to a flag |
+| `attempt_events`, `outcomes`, `memory_derivations`, `memory_event_evidence`, `reflection_pairs`, `memory_tombstones`, `success_evidence`, `reflection_cursor` | content-free by frozen write-hygiene design — granted as-is |
 
-What it cannot do — verified by `src/test-auditor.mjs` (A1-A4): read the three prose-bearing
+What it cannot do — verified by `src/test-auditor.mjs` (A1-A6: readable surface, denials, exact frozen column surface of all 12 relations, free-text sentinel unreachability, and grant-drift convergence red gates with live injections): read the three prose-bearing
 base tables (42501), any INSERT/UPDATE/DELETE (42501), any DDL (the CockroachDB default
 `public`-role schema CREATE grant is explicitly revoked — found live by test A3), or see any
 banned column through a view.
 
-## Three judge queries (copy-paste)
+## Judge queries (copy-paste)
 
 **1. "Show me the receipt" — everything a recall claimed, content-free:**
 
@@ -40,35 +41,55 @@ ORDER BY created_at DESC LIMIT 5;
 Every item carries similarity/effective-strength/utility/final-score components and the
 exact `pipeline_version` (including the full embedding-model identity) that produced it.
 
-**2. "Why is this memory strong?" — outcome-gated plasticity, item by item:**
+**2. "Who credited this memory?" — outcome-gated plasticity, honestly stated:**
 
 ```sql
 SELECT m.memory_id, m.state, m.pinned, m.credited_success_count, m.evidenced_blame_count,
        m.strength_anchor, m.half_life_hours, m.embedding_model_id,
-       o.outcome_request_id, o.status, o.reported_at, o.attributions
+       count(o.outcome_request_id) AS attributed_outcomes
 FROM audit_memories m
-JOIN outcomes o
+LEFT JOIN outcomes o
   ON o.tenant_id = m.tenant_id
  AND o.attributions @> ('[{"memory_id":"' || m.memory_id || '"}]')::JSONB
 WHERE m.tenant_id = 'demo-tenant'
-ORDER BY o.reported_at DESC LIMIT 10;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+ORDER BY m.credited_success_count DESC, m.memory_id LIMIT 10;
 ```
 
-Strength never moves without an attribution row behind it — this join IS the proof.
+Honest scope: anchors also move without outcomes **by design** (initial strength on
+remember/derive, pin materialization, lifecycle transitions). What is outcome-gated is
+**credit and blame**: any row with `credited_success_count > 0` or
+`evidenced_blame_count > 0` must show matching `attributed_outcomes` — a nonzero counter
+with zero attribution rows would falsify the design, and this query would show it.
 
-**3. "Where did this derived memory come from?" — nightly provenance end to end:**
+**3a. "Where did this dream memory come from?" — memory-to-memory lineage:**
 
 ```sql
 SELECT d.derived_memory_id, d.source_memory_id, r.run_id, r.job_kind, r.scheduled_for,
-       r.pipeline_version, r.status, r.source_fingerprint, r.result_receipt
+       r.pipeline_version, r.status, r.source_fingerprint
 FROM memory_derivations d
 JOIN audit_nightly_runs r ON r.tenant_id = d.tenant_id AND r.run_id = d.run_id
 WHERE d.tenant_id = 'demo-tenant'
 ORDER BY r.scheduled_for DESC LIMIT 10;
 ```
 
-Dream/reflection products chain back to an idempotent, lease-fenced run with a frozen
-source snapshot — no orphaned "the model just said so" rows.
+**3b. "Where did this experience come from?" — reflection lineage runs through EVENTS:**
+
+```sql
+SELECT e.derived_memory_id AS experience_id, e.attempt_id, e.event_id,
+       p.failure_attempt_id, p.success_attempt_id, p.status AS pair_status,
+       r.run_id, r.job_kind, r.scheduled_for, r.pipeline_version
+FROM memory_event_evidence e
+JOIN audit_nightly_runs r ON r.tenant_id = e.tenant_id AND r.run_id = e.run_id
+LEFT JOIN reflection_pairs p ON p.tenant_id = e.tenant_id AND p.experience_id = e.derived_memory_id
+WHERE e.tenant_id = 'demo-tenant'
+ORDER BY r.scheduled_for DESC LIMIT 10;
+```
+
+Dream products chain through `memory_derivations`; reflection products anchor to the exact
+attempt EVENTS they were extracted from (`memory_event_evidence`) plus the exactly-once
+pair ledger. Both end at an idempotent, lease-fenced run with a frozen source fingerprint —
+no orphaned "the model just said so" rows.
 
 ## Wiring the Managed MCP Server
 

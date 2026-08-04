@@ -15,9 +15,9 @@ import { connectWithRetry, withDatabase, validateDatabaseName, quoteIdentifier }
 const AUDITOR = 'tidemark_auditor'
 // SELECT 面（唯一授权面）：脱敏视图 x3 + 写入卫生已冻结的 content-free 表 x9
 export const AUDIT_RELATIONS = [
-  'audit_memories', 'audit_recalls', 'audit_nightly_runs',
+  'audit_memories', 'audit_recalls', 'audit_nightly_runs', 'audit_memory_rebuild_queue',
   'attempt_events', 'outcomes', 'memory_derivations', 'memory_event_evidence',
-  'reflection_pairs', 'memory_tombstones', 'memory_rebuild_queue', 'success_evidence', 'reflection_cursor',
+  'reflection_pairs', 'memory_tombstones', 'success_evidence', 'reflection_cursor',
 ]
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -50,16 +50,43 @@ try {
   for (const rel of AUDIT_RELATIONS) {
     await c.query(`GRANT SELECT ON TABLE public.${quoteIdentifier(rel)} TO ${AUDITOR}`)
   }
-  // 收敛面：撤掉可能残留的额外授权（幂等防漂移——基表绝不该出现在授权清单里）
-  const grants = (await c.query(
-    `SELECT DISTINCT table_name, privilege_type FROM information_schema.table_privileges WHERE grantee = $1`, [AUDITOR])).rows
+  // 收敛面（round-2 P1-2 重做）：以 SHOW GRANTS FOR 的【全限定四元组】为准——
+  // database/schema/relation 三层全覆盖，schema 不再被吞；清单外任何 privilege 按其
+  // 真实 schema 精确 REVOKE（不再想当然拼 public.<name>）。role 继承与 role option
+  // 同步收敛：显式 membership 一律撤销，危险 option 显式关闭。
+  const allowed = (dbn, sch, rel, priv) =>
+    (rel === null && sch === null && priv === 'CONNECT' && dbn === database) ||
+    (rel === null && sch === 'public' && priv === 'USAGE') ||
+    (sch === 'public' && rel !== null && AUDIT_RELATIONS.includes(rel) && priv === 'SELECT')
+  const grants = (await c.query(`SHOW GRANTS FOR ${AUDITOR}`)).rows
   for (const g of grants) {
-    const rel = g.table_name
-    if (!AUDIT_RELATIONS.includes(rel) || g.privilege_type !== 'SELECT') {
-      await c.query(`REVOKE ${g.privilege_type} ON TABLE public.${quoteIdentifier(rel)} FROM ${AUDITOR}`)
-      console.log(`revoked drifted grant: ${g.privilege_type} on ${rel}`)
+    if (g.grantee !== AUDITOR) continue   // SHOW GRANTS FOR 也回带 public 角色继承行，不归我们撤
+    const dbn = g.database_name ?? null
+    const sch = g.schema_name ?? null
+    const rel = g.object_name ?? g.relation_name ?? null
+    const priv = g.privilege_type
+    if (allowed(dbn, sch, rel, priv)) continue
+    if (rel !== null) {
+      await c.query(`REVOKE ${priv} ON TABLE ${quoteIdentifier(sch ?? 'public')}.${quoteIdentifier(rel)} FROM ${AUDITOR}`)
+      console.log(`revoked drifted grant: ${priv} on ${sch}.${rel}`)
+    } else if (sch !== null) {
+      await c.query(`REVOKE ${priv} ON SCHEMA ${quoteIdentifier(sch)} FROM ${AUDITOR}`)
+      console.log(`revoked drifted schema grant: ${priv} on ${sch}`)
+    } else if (dbn !== null) {
+      await c.query(`REVOKE ${priv} ON DATABASE ${quoteIdentifier(dbn)} FROM ${AUDITOR}`)
+      console.log(`revoked drifted database grant: ${priv} on ${dbn}`)
     }
   }
+  // role 继承：auditor 不许是任何角色的成员（public 隐式成员除外，系统不允许撤）
+  const memberships = (await c.query(`SHOW GRANTS ON ROLE`)).rows
+    .filter(m => (m.member ?? m.grantee) === AUDITOR)
+  for (const m of memberships) {
+    const role = m.role_name ?? m.role
+    await c.query(`REVOKE ${quoteIdentifier(role)} FROM ${AUDITOR}`)
+    console.log(`revoked drifted role membership: ${role}`)
+  }
+  // 危险 role option 显式关闭（幂等）
+  await c.query(`ALTER USER ${AUDITOR} WITH NOCREATEROLE NOCREATEDB NOCONTROLJOB NOMODIFYCLUSTERSETTING`)
   console.log(`auditor ready on ${database}: SELECT on ${AUDIT_RELATIONS.length} relations, nothing else`)
 
   if (storeSecret) {
