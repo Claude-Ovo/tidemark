@@ -306,14 +306,13 @@ if ($state.phase -eq "gated") { $state.phase = "code-swapped"; Set-CutoverState 
 # ---- 5b. cutover phase B: backfill into the current space, then the remaining migrations ----
 if (-not $SkipMigrate) {
   $env:EMBED_PROVIDER = "local-onnx"
-  # round-5 P1-1: the irreversible line is persisted BEFORE the first backfill write.
-  # dry-run counts pending rows; writers are gated, so the count cannot change under us.
-  $dry = node --env-file=$envFile migrations/backfill-embeddings.mjs --database $prodDb --dry-run
-  Assert-NativeSuccess "backfill dry-run $prodDb"
-  $pendingLine = ($dry | Select-String -Pattern "rows needing migration: (\d+)").Matches
-  if ($pendingLine.Count -lt 1) { throw "backfill dry-run output unparseable: $dry" }
-  $pending = [int]$pendingLine[0].Groups[1].Value
-  if ($pending -gt 0 -and $state.phase -ne "backfill-started") {
+  # round-6: the irreversible line is persisted UNCONDITIONALLY before any process that can
+  # write. The round-5 dry-run conditional had a TOCTOU: reserved-concurrency=0 rejects NEW
+  # invocations but does not kill in-flight ones (nightly can run 600s), and direct DB
+  # writers bypass function gates entirely -- a row could appear between the count and the
+  # real run. A spurious roll-forward-only mark on an idle DB is conservative and loses
+  # nothing; a reopened rollback window loses the database.
+  if ($state.phase -ne "backfill-started") {
     $state.phase = "backfill-started"                  # from THIS moment: roll-forward only
     Set-CutoverState $bucket $state
   }

@@ -67,10 +67,11 @@ function Remove-MaintenanceGate([string[]]$Functions) {
       $ungated += $fn
     }
   } catch {
-    if ($ungated.Count -gt 0) {
-      Write-Host ("partial ungate failure: re-gating " + ($ungated -join ', '))
-      Set-MaintenanceGate $ungated
-    }
+    # round-6 P2: re-gate ALL functions, not just the tracked ones -- "delete succeeded but
+    # read-back failed" leaves a function ungated without being in the array. Best effort:
+    # a re-gate failure is printed loudly but the ORIGINAL error is what propagates.
+    Write-Host ("partial ungate failure: re-gating ALL of " + ($Functions -join ', '))
+    try { Set-MaintenanceGate $Functions } catch { Write-Host ("RE-GATE ALSO FAILED (network dead?): " + $_.Exception.Message) }
     throw
   }
 }

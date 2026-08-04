@@ -114,5 +114,23 @@ $got2 = Get-CutoverState "b"
 if ($got2.phase -ne "backfill-started") { throw "T12 read-back mismatch" }
 Write-Host "PASS T12 state write verified by read-back"; $passes++
 
+# T13 ordering contract (round-6 P1): deploy.ps1 persists backfill-started UNCONDITIONALLY
+# before the real backfill invocation -- no dry-run conditional may guard it. Textual gate:
+# brittle by nature, but the ordering is a script-order property and this catches regressions.
+$deploySrc = Get-Content (Join-Path $here "deploy.ps1") -Raw
+$phaseIdx = $deploySrc.IndexOf('$state.phase = "backfill-started"')
+$runIdx = $deploySrc.IndexOf('node --env-file=$envFile migrations/backfill-embeddings.mjs --database $prodDb')
+if ($phaseIdx -lt 0 -or $runIdx -lt 0) { throw "T13 anchors missing in deploy.ps1" }
+if ($phaseIdx -gt $runIdx) { throw "T13 backfill-started is persisted AFTER the real backfill invocation" }
+if ($deploySrc -match 'dry-run[\s\S]{0,400}\$state\.phase = "backfill-started"') { throw "T13 phase write appears to be guarded by a dry-run conditional again" }
+Write-Host "PASS T13 irreversible phase is unconditional and precedes the real backfill"; $passes++
+
+# T14 'delete succeeded but read-back failed' re-gates ALL functions (round-6 P2)
+Set-MockState @{ concurrency = @{ "fn-a" = 0; "fn-b" = 0 }; rule = "DISABLED"; fail_after = @{ "lambda get-function-concurrency" = 0 } }
+Expect-Throw { Remove-MaintenanceGate @("fn-a", "fn-b") } "cutover step failed" "T14a readback failure during ungate throws"
+$st14 = Get-Content $statePath -Raw | ConvertFrom-Json
+if ($st14.concurrency."fn-a" -ne 0 -or $st14.concurrency."fn-b" -ne 0) { throw "T14b not all functions re-gated (a=$($st14.concurrency.'fn-a') b=$($st14.concurrency.'fn-b'))" }
+Write-Host "PASS T14b readback failure re-gated ALL functions (no untracked half-open)"; $passes++
+
 Remove-Item $tmp -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host ("ALL CUTOVER STATE-MACHINE RED GATES PASSED (" + $passes + " checks)")
