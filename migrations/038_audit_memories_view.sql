@@ -1,0 +1,4 @@
+-- P0-10 Auditor Mode (conclusions 18/25). The operator-facing audit path must see lifecycle
+-- truth without ever seeing stored prose or vectors: content, embedding and experience_body
+-- are replaced by presence/size markers. Everything else on memories is operational metadata.
+CREATE VIEW IF NOT EXISTS public.audit_memories AS SELECT tenant_id, agent_id, memory_id, layer, kind, episode_id, exp_status, source, admission, quarantine_expires_at, state, pinned, importance, strength_anchor, strength_anchor_at, last_rewarded_at, half_life_hours, credited_success_count, evidenced_blame_count, revision, next_transition_at, created_at, consolidation_baseline, embedding_model_id, (content IS NOT NULL) AS has_content, length(content) AS content_length, (embedding IS NOT NULL) AS has_embedding, (experience_body IS NOT NULL) AS has_experience_body FROM public.memories

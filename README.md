@@ -104,6 +104,18 @@ Hard-deletes the memory row and every derived descendant (recursive lineage casc
 
 Agent API keys map to `{tenant, agent, capabilities}` server-side (`TIDEMARK_AGENT_KEYS` from the secret; hardcoded dev keys exist only when it is absent). `memory:pin` is a capability bit, not a default right.
 
+## Auditor Mode (read-only, judge-facing)
+
+A separate `tidemark_auditor` SQL account (provisioned by `infra/setup-auditor.mjs`, prod
+credentials sealed in Secrets Manager) sees exactly 12 relations: three sanitized views
+(`audit_memories` / `audit_recalls` / `audit_nightly_runs` - prose, vectors, previews and
+free-text errors are masked to presence markers) plus the nine content-free ledger tables.
+Every write verb and all three prose-bearing base tables are verifiably denied
+(`src/test-auditor.mjs`), including schema CREATE (CockroachDB grants it to the `public`
+role by default - revoked). Three copy-paste judge queries chain receipt -> plasticity ->
+nightly provenance: see `docs/AUDITOR.md`. This is the path the CockroachDB Managed MCP
+Server audits through (operator-facing, isolated demo cluster).
+
 ## License
 
 MIT (license file added before submission).

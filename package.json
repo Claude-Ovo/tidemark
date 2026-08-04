@@ -23,6 +23,7 @@
     "test:reflection": "node --env-file=.env src/test-nightly.mjs",
     "test:forget": "node --env-file=.env src/test-forget.mjs",
     "test:embed-isolation": "node --env-file=.env src/test-embed-isolation.mjs",
+    "test:auditor": "node --env-file=.env src/test-auditor.mjs",
     "backfill:embeddings": "node --env-file=.env migrations/backfill-embeddings.mjs"
   },
   "keywords": [],
