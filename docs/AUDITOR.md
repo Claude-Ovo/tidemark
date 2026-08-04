@@ -24,7 +24,7 @@ cluster views show only the auditor's own sessions):
 | `audit_memory_rebuild_queue` | rebuild ledger with the unconstrained free-text `last_error` masked to a flag |
 | `attempt_events`, `outcomes`, `memory_derivations`, `memory_event_evidence`, `reflection_pairs`, `memory_tombstones`, `success_evidence`, `reflection_cursor` | content-free by frozen write-hygiene design — granted as-is |
 
-What it cannot do — verified by `src/test-auditor.mjs` (A1-A6: readable surface, denials, exact frozen column surface of all 12 relations, free-text sentinel unreachability, and grant-drift convergence red gates with live injections): read the three prose-bearing
+What it cannot do — verified by `src/test-auditor.mjs` (A1-A7: readable surface, denials, exact frozen column surface of all 12 relations, free-text sentinel unreachability, grant-drift convergence red gates with live injections incl. public-role and SYSTEM grants with fail-path-safe cleanup postconditions (A6b-post), and the A7 provenance cross-pairing gate): read the three prose-bearing
 base tables (42501), any INSERT/UPDATE/DELETE (42501), any DDL (the CockroachDB default
 `public`-role schema CREATE grant is explicitly revoked — found live by test A3), or see any
 banned column through a view.

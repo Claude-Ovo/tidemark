@@ -2,8 +2,9 @@
 // 注意：CRDB 的 SQL user 与密码是【集群级】的——dev/prod 同集群共用一个 tidemark_auditor，
 // 最后一次 ALTER PASSWORD 生效于两库。正式口径：以 tidemark/auditor secret 里的值为准；
 // dev 测试临时改密后必须重跑 prod --store-secret 收尾（本文件调用顺序纪律）。
-// 审计路径，凭据只配这个 auditor 账号——SELECT 限于三张脱敏视图 + 九张"永无散文"表，
-// 基表 memories/recall_requests/nightly_runs 无任何授权，写操作全库无授权。
+// 审计路径，凭据只配这个 auditor 账号——SELECT 限于【四张脱敏视图 + 八张"永无散文"表】
+//（041 起 rebuild_queue 也走视图），基表 memories/recall_requests/nightly_runs/
+// memory_rebuild_queue 无任何授权，写操作全库无授权。
 // 用法:
 //   TIDEMARK_AUDITOR_PASSWORD=... node --env-file=.env infra/setup-auditor.mjs --database tidemark_dev
 //   node --env-file=.env infra/setup-auditor.mjs --database tidemark_prod --store-secret   （自动生成并存 Secrets Manager tidemark/auditor）
@@ -16,7 +17,7 @@ import { pathToFileURL } from 'node:url'
 import { connectWithRetry, withDatabase, validateDatabaseName, quoteIdentifier } from '../migrations/db.mjs'
 
 const AUDITOR = 'tidemark_auditor'
-// SELECT 面（唯一授权面）：脱敏视图 x3 + 写入卫生已冻结的 content-free 表 x9
+// SELECT 面（唯一授权面）：脱敏视图 x4 + 写入卫生已冻结的 content-free 表 x8
 export const AUDIT_RELATIONS = [
   'audit_memories', 'audit_recalls', 'audit_nightly_runs', 'audit_memory_rebuild_queue',
   'attempt_events', 'outcomes', 'memory_derivations', 'memory_event_evidence',
