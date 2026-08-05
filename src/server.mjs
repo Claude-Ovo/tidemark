@@ -13,6 +13,7 @@ import { logEventTool, EVENT_TYPES } from './tools/log-event.mjs'
 import { reportOutcomeTool } from './tools/report-outcome.mjs'
 import { pinTool } from './tools/pin.mjs'
 import { forgetMemory } from './admin/forget.mjs'
+import { vizOcean, vizWaves } from './viz/ocean.mjs'
 import { embedModelId } from './lib/embed.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
@@ -78,6 +79,18 @@ app.get('/health', (_req, res) => res.json({
   tools: ['remember', 'recall', 'log_event', 'report_outcome', 'pin'],
   embedding_model_id: embedModelId(),
 }))
+
+// P0-11 viz：只读观景面（agent key 定界，绝不产生 receipt/塑性）。契约见 DESIGN-OCEAN.md。
+app.get('/viz/ocean', async (req, res) => {
+  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
+  try { res.json(await vizOcean({ principal })) }
+  catch (e) { console.error(JSON.stringify({ evt: 'viz_ocean_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
+})
+app.get('/viz/waves', async (req, res) => {
+  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
+  try { res.json(await vizWaves({ principal, after: req.query.after, limit: req.query.limit })) }
+  catch (e) { console.error(JSON.stringify({ evt: 'viz_waves_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
+})
 
 // P0-08 forget：owner/admin HTTP 面（非 agent 工具，冻结 §12 五工具不变）。
 // 鉴权 fail-closed：必须配 TIDEMARK_ADMIN_KEY（或显式 TIDEMARK_DEV_INSECURE=1 时收 'dev-admin'）

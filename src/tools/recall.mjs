@@ -25,11 +25,7 @@ export { CFG }
 const requestFingerprint = (tenant_id, agent_id, params) =>
   createHmac('sha256', `${HMAC_KEY}|${tenant_id}|${agent_id}`).update(canonicalJson(params)).digest()
 
-const decayEffective = (row, now) => {
-  if (row.pinned) return Number(row.strength_anchor)     // pinned 冻结，不衰减
-  const ageH = (now - new Date(row.strength_anchor_at).getTime()) / 3600e3
-  return Number(row.strength_anchor) * Math.exp(-Math.LN2 * Math.max(0, ageH) / Number(row.half_life_hours))
-}
+import { decayEffective } from '../lib/decay.mjs'   // 共享唯一实现（viz 同源，公式禁分叉）
 const utilityOf = (row) =>
   (Number(row.credited_success_count) + 1) / (Number(row.credited_success_count) + Number(row.evidenced_blame_count) + 2)
 
