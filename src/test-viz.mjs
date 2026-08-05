@@ -1,20 +1,38 @@
-// P0-11 一审验收：node --env-file=.env src/test-viz.mjs（HTTP 段需先起 dev server，EMBED_PROVIDER=stub）
-// 覆盖一审修订清单：V0 scope 校验与工具面守卫 / V1 未认证 / V2 海湾清单收权（P0-2 的 HTTP 面）/
-// V3 viz 键进不了工具 / V4 keyset 游标（翻页、重放、坏游标、limit 钳制）/ V5 NULL episode 散粒 /
-// V6 阈值同源 / V7 快照 total 与 cap 声明 / V8 waves 走 042 索引。
-import { assertStubLocked } from './lib/test-env.mjs'
+// P0-11 验收：node src/test-viz.mjs——【自包含】（二审 P1-1）：自己加载 .env、自己锁 stub、
+// 自己用 app.listen(0) 起临时 listener，npm test 直跑必须绿，不依赖开发者恰好开着 3901。
+// 覆盖：V0 scope 校验与工具面守卫 / V1 未认证（临时端口 HTTP）/ V2 海湾清单收权 /
+// V3 viz 面与工具面分离 / V4 keyset 游标（翻页、重放、坏游标、limit 钳制、隔离）/
+// V5 NULL episode 散粒 / V6 阈值同源 / V7 cap 边界 cap-1/cap/cap+1（二审 P1-2：
+// total 恰好等于 cap 时数据完整，capped 必须为 false）/ V8 waves 走 042 索引。
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { getPool } from './lib/db.mjs'
-import { connectWithRetry, withDatabase, isRetryableDatabaseError, sleep } from '../migrations/db.mjs'
-import { vizOcean, vizWaves } from './viz/ocean.mjs'
-import { toolPrincipal, resolveAuthMap, _resetAuthMapCacheForTest } from './server.mjs'
-import { rememberTool } from './tools/remember.mjs'
-import { TRANSITION_CFG } from './lib/scheduler.mjs'
-import { embed } from './lib/embed.mjs'
-import { toVectorLiteral } from './lib/vector-canonical.mjs'
+import { fileURLToPath } from 'node:url'
+
+// ---- env 自举：一切项目模块动态 import，顺序完全受控 ----
+if (!process.env.COCKROACH_DATABASE_URL) {
+  process.loadEnvFile(fileURLToPath(new URL('../.env', import.meta.url)))
+}
+process.env.EMBED_PROVIDER = 'stub'        // 夹具向量走 stub，套件锁死不看外部环境
+process.env.TIDEMARK_DEV_INSECURE = '1'    // dev 键表（viz-demo-key）是被测面的一部分
+delete process.env.TIDEMARK_SECRET_ARN
+delete process.env.TIDEMARK_AGENT_KEYS
+
+const { assertStubLocked } = await import('./lib/test-env.mjs')
+const { getPool } = await import('./lib/db.mjs')
+const { connectWithRetry, withDatabase, isRetryableDatabaseError, sleep } = await import('../migrations/db.mjs')
+const { vizOcean, vizWaves } = await import('./viz/ocean.mjs')
+const { toolPrincipal, resolveAuthMap, _resetAuthMapCacheForTest, app } = await import('./server.mjs')
+const { rememberTool } = await import('./tools/remember.mjs')
+const { TRANSITION_CFG } = await import('./lib/scheduler.mjs')
+const { embed } = await import('./lib/embed.mjs')
+const { toVectorLiteral } = await import('./lib/vector-canonical.mjs')
 
 assertStubLocked()
+
+// 临时 listener：随机端口，测完必关（自包含的 HTTP 段）
+const listener = app.listen(0)
+await new Promise((r) => listener.once('listening', r))
+const url = `http://127.0.0.1:${listener.address().port}`
 
 let conn = null
 const q = async (text, params) => {
@@ -24,7 +42,6 @@ const q = async (text, params) => {
     catch (e) { await conn?.end().catch(() => {}); conn = null; if (!isRetryableDatabaseError(e) || attempt >= 5) throw e; await sleep(800 * attempt) }
   }
 }
-const url = process.env.TIDEMARK_URL || 'http://localhost:3901'
 const http = async (path, key) => {
   const res = await fetch(url + path, { headers: key ? { 'x-tidemark-auth': key } : {} })
   return res.json()
@@ -67,7 +84,6 @@ try {
   assert.equal(toolPrincipal(null), null, 'V0 null passes through')
   const r0 = await rememberTool({ principal: toolPrincipal(P_VIEWER), content: 'x', episode_id: 'e', request_id: randomUUID() })
   assert.equal(r0.ok, false, 'V0 tool call with blanked principal rejected')
-  const envBackup = process.env.TIDEMARK_AGENT_KEYS
   try {
     _resetAuthMapCacheForTest()
     process.env.TIDEMARK_AGENT_KEYS = JSON.stringify({ k1: { tenant_id: 't', agent_id: 'a', capabilities: [], scope: 'viz' } })
@@ -76,18 +92,17 @@ try {
     process.env.TIDEMARK_AGENT_KEYS = JSON.stringify({ k1: { tenant_id: 't', agent_id: 'a', capabilities: [], scope: 'admin' } })
     assert.throws(() => resolveAuthMap(), /entry invalid/, 'V0 unknown scope rejected')
   } finally {
-    if (envBackup === undefined) delete process.env.TIDEMARK_AGENT_KEYS
-    else process.env.TIDEMARK_AGENT_KEYS = envBackup
+    delete process.env.TIDEMARK_AGENT_KEYS
     _resetAuthMapCacheForTest()
   }
   console.log('PASS V0 scope validation + tool-face guard')
 
-  // V1 HTTP 未认证与认证（dev server 的 dev 表）
+  // V1 HTTP 未认证与认证（临时端口上的 dev 键表）
   assert.equal((await http('/viz/ocean')).error, 'unauthorized', 'V1 no key rejected')
   assert.equal((await http('/viz/ocean', 'viz-demo-key')).ok, true, 'V1 viz key accepted over HTTP')
-  console.log('PASS V1 http auth')
+  console.log('PASS V1 http auth on self-owned listener')
 
-  // 夹具：A1 两个 episode + pinned + 白化 + 散粒；A2 一条（隔离对照）
+  // 夹具：A1 两个 episode + pinned + 散粒；A2 一条（隔离对照）
   const ep1 = suite + '-ep1', ep2 = suite + '-ep2'
   await insMem(A1, { episode: ep1, anchor: 0.9 })
   await insMem(A1, { episode: ep1, anchor: 0.6 })
@@ -97,7 +112,7 @@ try {
   await insMem(A1, { episode: null, anchor: 0.05, ageH: 2000 })
   await insMem(A2, { episode: suite + '-other', anchor: 0.9 })
 
-  // V2 海湾清单收权（直调；HTTP 面 dev 键在 demo-tenant，等价路径 V1 已验 header 映射）
+  // V2 海湾清单收权
   const seenByViewer = await vizOcean({ principal: P_VIEWER })
   assert.equal(seenByViewer.ok, true)
   assert.deepEqual(seenByViewer.agents.map(a => a.agent_id).sort(), [A1, A2], 'V2 viewer sees the whole cove list')
@@ -108,7 +123,7 @@ try {
   assert.equal(seenByAgent2.episodes.some(e => e.episode_id === ep1), false, 'V2 no cross-agent episode leak')
   console.log('PASS V2 cove list scoping (viewer vs agent)')
 
-  // V3 viz 键拿不到记忆内容以外的面：工具直调已在 V0 拒绝；这里再验 viz 面本身仍可用
+  // V3 viz 面与工具面分离：V0 拒了工具，这里 viz 面本身可用
   assert.equal(seenByViewer.episodes.length >= 2, true, 'V3 viz face serves the viewer')
   console.log('PASS V3 viz face vs tool face split')
 
@@ -128,17 +143,28 @@ try {
   assert.equal((await vizWaves({ principal: P_AGENT2 })).waves.length, 0, 'V4 waves are agent-scoped')
   console.log('PASS V4 keyset cursor (paging, replay, clamps, isolation)')
 
-  // V5 NULL episode 散粒：绝不合成假气泡
+  // V5 NULL episode 散粒
   assert.equal(seenByAgent.loose.length, 2, 'V5 loose memories returned individually')
   assert.equal(seenByAgent.episodes.some(e => e.episode_id == null || e.episode_id === '(no-episode)'), false,
     'V5 no synthetic shared bucket')
   console.log('PASS V5 loose memories stay loose')
 
-  // V6 阈值同源 + V7 total/cap 声明
+  // V6 阈值同源
   assert.equal(seenByAgent.fade_threshold, TRANSITION_CFG.fade_threshold, 'V6 threshold from TRANSITION_CFG only')
-  assert.equal(seenByAgent.total_memories, 6, 'V7 total_memories counts the agent memories')
-  assert.equal(seenByAgent.capped, false, 'V7 cap not hit at fixture scale')
-  console.log('PASS V6+V7 threshold single source, total declared')
+  console.log('PASS V6 threshold single source')
+
+  // V7 cap 边界（二审 P1-2）：A1 共 6 条；total==cap 时数据完整，capped 必须 false
+  const under = await vizOcean({ principal: P_AGENT, cap: 7 })
+  assert.equal(under.total_memories, 6, 'V7 total counts agent memories')
+  assert.equal(under.capped, false, 'V7 cap+1: not capped')
+  const exact = await vizOcean({ principal: P_AGENT, cap: 6 })
+  assert.equal(exact.capped, false, 'V7 total == cap means COMPLETE, never report truncation')
+  assert.equal(exact.episodes.flatMap(e => e.memories).length + exact.loose.length, 6, 'V7 exact returns all rows')
+  const over = await vizOcean({ principal: P_AGENT, cap: 5 })
+  assert.equal(over.capped, true, 'V7 cap-1: truncation declared')
+  assert.equal(over.episodes.flatMap(e => e.memories).length + over.loose.length, 5, 'V7 over returns capped rows')
+  assert.equal(over.total_memories, 6, 'V7 total still reports the full count when capped')
+  console.log('PASS V7 cap boundary cap-1/cap/cap+1 (exact-cap is not a lie)')
 
   // V8 waves 查询走 042 keyset 索引
   const plan = (await q(
@@ -157,4 +183,5 @@ try {
   if (Number(residue) !== 0) throw new Error('viz fixtures not cleaned: ' + residue)
   await conn?.end().catch(() => {})
   await getPool().end().catch(() => {})
+  await new Promise((r) => listener.close(r))
 }

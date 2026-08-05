@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { OceanSnapshot } from './types'
 import { layoutOcean, type PlacedEpisode } from './layout'
-import { hash01, WORLD, splatsPerMemory } from './layout-core.mjs'
+import { hash01, WORLD, splatsPerMemory, hitTestOcean } from './layout-core.mjs'
 import { SKY, SAND, WATER, SEABED, CORAL_BLEACHED, FOAM, memoryColor, pearlColor } from './palette'
 
 export type FoamWave = { request_id: string; episode_id: string | null; arrivedAt: number }
@@ -108,6 +108,9 @@ export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
   const snapDirtyRef = useRef(true)
   const wavesRef = useRef<FoamWave[]>([])
   const hoverIdRef = useRef<string | null>(null)
+  // 实际绘制那一帧的相机（二审 Block 项：hit-test 只许读它，绝不读目标相机——
+  // 快速滚动中两者可差数屏，用目标相机会命中不在屏上的记忆）
+  const paintedCamRef = useRef(0)
   const [caption, setCaption] = useState<Caption | null>(null)
 
   // 数据经 ref 进入渲染循环（动效A：绝不作为 effect 依赖重建循环）
@@ -155,6 +158,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
       if (!mustPaint) return
       snapDirtyRef.current = false
       lastPaintedCam = cam
+      paintedCamRef.current = cam
 
       const camOff = cam * (WORLD_H - H)
       ctx.clearRect(0, 0, W, H)
@@ -229,19 +233,12 @@ export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
   const onMove = (e: React.PointerEvent) => {
     const rect = cvsRef.current!.getBoundingClientRect()
     const mx = e.clientX - rect.left, my = e.clientY - rect.top
-    const cam = cameraRef.current ?? 0
-    const worldH = rect.height * WORLD.DEPTH_SCALE
-    const camOff = cam * (worldH - rect.height)
-    let hit: { id: string; c: Caption } | null = null, bestD = 26 * 26
-    for (const ep of placedRef.current) for (const p of ep.memories) {
-      const dx = p.x * rect.width - mx, dy = p.y * worldH - camOff - my
-      const d = dx * dx + dy * dy
-      if (d < bestD) {
-        bestD = d
-        hit = { id: p.m.memory_id, c: { pinned: p.m.pinned, bleached: p.bleached,
+    const found = hitTestOcean(placedRef.current, mx, my, rect.width, rect.height, paintedCamRef.current)
+    const p = found?.placed
+    const hit: { id: string; c: Caption } | null = p
+      ? { id: p.m.memory_id, c: { pinned: p.m.pinned, bleached: p.bleached,
           kind: p.m.kind, strength: p.m.effective_strength, preview: p.m.content_preview } }
-      }
-    }
+      : null
     if (capRef.current) {
       capRef.current.style.transform = `translate(${mx + 14}px, ${my - 10}px)`
       capRef.current.style.opacity = hit ? '1' : '0'

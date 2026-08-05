@@ -25,8 +25,10 @@ const memoryView = (r, nowMs) => ({
   created_at: r.created_at, content_preview: r.content_preview,
 })
 
-export const vizOcean = async ({ principal }) => {
+// cap 可注入仅为测试边界行为（cap-1/cap/cap+1 不必真插两千行）；生产路径永远走默认
+export const vizOcean = async ({ principal, cap = MAX_SNAPSHOT_MEMORIES }) => {
   if (!principal) return { ok: false, error: 'unauthorized' }
+  const capN = Math.max(1, Math.floor(Number(cap) || MAX_SNAPSHOT_MEMORIES))
   const { tenant_id, agent_id } = principal
   return inSerializableTx(async (c) => {
     const snapshotAt = (await c.query('SELECT now() AS t')).rows[0].t
@@ -53,7 +55,7 @@ export const vizOcean = async ({ principal }) => {
               left(content, ${PREVIEW_CHARS}) AS content_preview
        FROM memories
        WHERE tenant_id = $1 AND agent_id = $2 AND admission = 'accepted'
-       ORDER BY created_at DESC, memory_id DESC LIMIT ${MAX_SNAPSHOT_MEMORIES}`,
+       ORDER BY created_at DESC, memory_id DESC LIMIT ${capN}`,
       [tenant_id, agent_id])).rows.reverse()
     const grouped = new Map()
     const loose = []
@@ -68,7 +70,7 @@ export const vizOcean = async ({ principal }) => {
       tenant_id, agent_id,
       agents,
       total_memories: Number(total),
-      capped: rows.length >= MAX_SNAPSHOT_MEMORIES,
+      capped: Number(total) > rows.length,
       episodes: [...grouped.entries()].map(([episode_id, memories]) => ({ episode_id, memories })),
       // NULL episode 不是一个共同气泡：每条散粒独立漂（前端不画膜、按 memory_id 布局）
       loose,

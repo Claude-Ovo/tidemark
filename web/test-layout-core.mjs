@@ -1,7 +1,7 @@
 // P0-11 一审 P1-5：布局确定性回归（node web/test-layout-core.mjs，零依赖零编译）。
 // 契约 #4 的可测半边：一切扰动来自稳定哈希——同输入同画面，刷新绝不重排。
 import assert from 'node:assert/strict'
-import { hash01, depthEase, WORLD, bubbleRadius, splatsPerMemory } from './src/ocean/layout-core.mjs'
+import { hash01, depthEase, WORLD, bubbleRadius, splatsPerMemory, hitTestOcean } from './src/ocean/layout-core.mjs'
 
 // L1 hash01 确定性 + 值域 + salt 区分
 for (const s of ['a', 'memory-uuid-1234', '', 'episode:x']) {
@@ -33,5 +33,26 @@ assert.equal(bubbleRadius(10000), 0.1, 'L4 capped')
 assert.ok(splatsPerMemory(5) > splatsPerMemory(20), 'L4 LOD sheds splats under density')
 assert.equal(splatsPerMemory(500), 3, 'L4 LOD floor')
 console.log('PASS L4 sqrt bubble radius + density LOD')
+
+// L5 命中检测的相机诚实性（二审 Block 项回归）：目标相机瞬移、平滑未收敛时，
+// 命中必须按【实际绘制的 painted 相机】算——即画面在哪，手就点哪。
+{
+  const rectW = 1000, rectH = 600
+  const worldH = rectH * WORLD.DEPTH_SCALE                    // 2700
+  const mem = { m: { memory_id: 'm1' } }
+  const placed = [{ episode_id: 'ep', cx: 0.5, cy: 0.5, cr: 0.05,
+    memories: [{ ...mem, x: 0.5, y: 0.5, r: 1, bleached: false }] }]
+  const paintedCam = 0.4                                      // 画面还停在 0.4
+  const targetCam = 1.0                                       // 用户已把滚动甩到底
+  const sy = 0.5 * worldH - paintedCam * (worldH - rectH)     // 记忆在当前画面上的真实位置
+  assert.ok(sy > 0 && sy < rectH, 'L5 fixture memory is on the painted screen')
+  const hitPainted = hitTestOcean(placed, 500, sy, rectW, rectH, paintedCam)
+  assert.equal(hitPainted?.placed.m.memory_id, 'm1', 'L5 pointer on the visible particle hits it (painted cam)')
+  const hitTarget = hitTestOcean(placed, 500, sy, rectW, rectH, targetCam)
+  assert.equal(hitTarget, null, 'L5 same pointer with TARGET cam would miss: proves target cam must never be used')
+  const offscreen = hitTestOcean(placed, 500, 100, rectW, rectH, paintedCam)
+  assert.equal(offscreen, null, 'L5 pointer away from the particle hits nothing')
+}
+console.log('PASS L5 hit-test reads the painted camera, never the target')
 
 console.log('ALL LAYOUT CORE TESTS PASSED')

@@ -25,3 +25,21 @@ export const bubbleRadius = (n) => Math.min(0.1, 0.016 + 0.011 * Math.sqrt(n))
 
 // 密度 LOD：每条记忆的 splat 数随气泡拥挤度降档（确定性，无随机）
 export const splatsPerMemory = (n) => (n <= 12 ? 6 : n <= 24 ? 4 : 3)
+
+// 命中检测（纯函数，二审 Block 项）：相机参数必须是【实际绘制那一帧用的相机】——
+// 快速滚动时平滑相机落后目标数屏，用目标相机命中会选中根本不在屏上的记忆。
+// hover/点击/透镜一律复用此函数，绝不各自再写一份坐标数学。
+export const hitTestOcean = (placed, mxCss, myCss, rectW, rectH, paintedCam, radiusCss = 26) => {
+  const worldH = rectH * WORLD.DEPTH_SCALE
+  const camOff = paintedCam * (worldH - rectH)
+  let best = null, bestD = radiusCss * radiusCss
+  for (const ep of placed) {
+    for (const p of ep.memories) {
+      const dx = p.x * rectW - mxCss
+      const dy = p.y * worldH - camOff - myCss
+      const d = dx * dx + dy * dy
+      if (d < bestD) { bestD = d; best = { episode: ep, placed: p } }
+    }
+  }
+  return best
+}
