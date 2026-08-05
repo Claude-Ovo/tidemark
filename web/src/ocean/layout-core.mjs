@@ -13,12 +13,15 @@ export const depthEase = (d) => Math.pow(Math.min(1, Math.max(0, d)), 0.72)
 
 // 世界坐标（0..1 = 整片海，纵向共 DEPTH_SCALE 个视口高——滚动即下潜）
 // 分带沿用她的手稿：奶油天空 -> 沙滩(pinned) -> 水体(活着的记忆) -> 海床(白化)
+// 六审重构：世界 = 她的画本身（自然比例 environment matte，非等比拉伸退役）。
+// DEPTH_SCALE 由图纵横比与视口动态算（setDepthScale），带坐标即图内比例坐标。
 export const WORLD = {
-  DEPTH_SCALE: 4.5,
-  skyEnd: 0.075,
-  beachEnd: 0.12,   // 对齐底图贴段的斜水线中点（图内 32% -> 世界 12%）
-  waterEnd: 0.82,
+  DEPTH_SCALE: 2.4,      // 默认值；图就绪后按 aspect*viewport 实算覆盖
+  skyEnd: 0.2,           // 图内沙滩前缘
+  beachEnd: 0.33,        // 图内斜水线中点
+  waterEnd: 0.8,         // 图内珊瑚区顶
 }
+export const setDepthScale = (v) => { WORLD.DEPTH_SCALE = Math.max(1.2, Math.min(6, v)) }
 
 // 气泡膜半径：面积随成员数量 sqrt 扩展（一审 P1-6——固定面积无限 overdraw 必然坍塌）
 export const bubbleRadius = (n) => Math.min(0.1, 0.016 + 0.011 * Math.sqrt(n))

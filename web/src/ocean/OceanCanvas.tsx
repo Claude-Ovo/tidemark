@@ -6,10 +6,11 @@
 //      跟随坐标直接写 DOM transform；连续指针值零 rerender
 // 铁律不变：零方框零按钮；强度/深度全来自服务端快照，动画只做视觉呼吸不做衰减。
 import { useEffect, useRef, useState, type RefObject } from 'react'
+import gsap from 'gsap'
 import type { OceanSnapshot } from './types'
 import { layoutOcean, type PlacedEpisode } from './layout'
 import { hash01, WORLD, splatsPerMemory, hitTestOcean } from './layout-core.mjs'
-import { FISH, GOLD_DUST, FOAM, memoryColor, pearlColor } from './palette'
+import { FOAM, memoryColor, pearlColor } from './palette'
 
 export type FoamWave = { request_id: string; episode_id: string | null; arrivedAt: number }
 export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean
@@ -19,6 +20,9 @@ type Props = {
   snap: OceanSnapshot; waves: FoamWave[]; cameraRef: RefObject<number>
   onOpen: (t: OpenTarget) => void        // 点击命中一颗记忆 -> 交给透镜（同一 hitTestOcean）
   highlightId: string | null             // 键盘巡航聚焦的记忆（视觉高亮与 hover 同款）
+  worldScale: number                     // 世界深度变化（图 aspect 实算后）触发重铺
+  openTarget: OpenTarget | null          // V-8：展开态——同一只泡在原锚点长大，文字在泡内凝出
+  lensTextRef: RefObject<HTMLDivElement | null>   // 泡内文字层（App 渲染，这里逐帧定位）
 }
 
 // 淡出必须淡向【同色 alpha=0】——CSS 'transparent' 是 rgba(0,0,0,0)，
@@ -46,12 +50,12 @@ const splat = (ctx: CanvasRenderingContext2D, x: number, y: number, rx: number, 
 // 贴世界 85-100%（轻拉伸 1.5x）；中段水体用图采样色渐变 + 程序化层（鱼群/光柱/光尘/水母）。
 // 全部贴图过 saturate(72%) ——她钦定降淡 30%。图挂载失败自动退回纯渐变（fail-safe）。
 let masterImg: HTMLImageElement | null = null
-let masterLoading: Promise<void> | null = null
-const loadMasterArt = () => {
+let masterLoading: Promise<HTMLImageElement | null> | null = null
+export const loadMasterArt = () => {
   masterLoading ??= new Promise((res) => {
     const im = new Image()
-    im.onload = () => { masterImg = im; res() }
-    im.onerror = () => res()
+    im.onload = () => { masterImg = im; res(im) }
+    im.onerror = () => res(null)
     im.src = '/ocean-master.jpg'
   })
   return masterLoading
@@ -91,9 +95,7 @@ const sampleMasterParticles = (img: HTMLImageElement): ArtParticle[] => {
       }
     }
   }
-  grab(0, 0.4, 0, 0.15, 3)      // 光尘点缀层（清晰度还给锐图，粒子只做流动的光）
-  grab(0.4, 0.72, 0.15, 0.84, 6)
-  grab(0.72, 1.0, 0.84, 1.0, 3)
+  grab(0, 1, 0, 1, 4)   // 世界=图（自然比例）：全图均匀光尘，不再分段
   return out
 }
 
@@ -115,164 +117,25 @@ const buildParticleLayers = (particles: ArtParticle[], W: number, WORLD_H: numbe
   return layers
 }
 
-const fishSplat = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number,
-  ang: number, alpha: number) => {
-  splat(ctx, x, y, size, size * 0.42, ang, FISH, alpha)
-  splat(ctx, x - Math.cos(ang) * size * 1.15, y - Math.sin(ang) * size * 0.5,
-    size * 0.42, size * 0.3, ang + 0.55, FISH, alpha * 0.85)
-}
-
-// 贴图段 + 上下缘羽化（接缝融进渐变，不留硬线）
-const drawSliceFeather = (ctx: CanvasRenderingContext2D, img: HTMLImageElement,
-  sy0: number, sy1: number, dy0: number, dy1: number, W: number,
-  featherTop: number, featherBottom: number, blurPx = 0) => {
-  const sh = img.naturalHeight, sw = img.naturalWidth
-  const h = Math.max(1, Math.round(dy1 - dy0))
-  const tmp = document.createElement('canvas')
-  tmp.width = W; tmp.height = h
-  const tc = tmp.getContext('2d')!
-  const pad = blurPx > 0 ? blurPx * 2 : 0
-  tc.filter = `${blurPx > 0 ? `blur(${blurPx}px) ` : ''}saturate(72%) brightness(1.03)`
-  tc.drawImage(img, 0, sy0 * sh, sw, (sy1 - sy0) * sh, -pad, -pad, W + pad * 2, h + pad * 2)
-  tc.filter = 'none'
-  tc.globalCompositeOperation = 'destination-out'
-  if (featherTop > 0) {
-    const g = tc.createLinearGradient(0, 0, 0, featherTop)
-    g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)')
-    tc.fillStyle = g; tc.fillRect(0, 0, W, featherTop)
-  }
-  if (featherBottom > 0) {
-    const g = tc.createLinearGradient(0, h - featherBottom, 0, h)
-    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,1)')
-    tc.fillStyle = g; tc.fillRect(0, h - featherBottom, W, featherBottom)
-  }
-  tc.globalCompositeOperation = 'source-over'
-  ctx.drawImage(tmp, 0, Math.round(dy0))
-}
-
 const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
   const ctx = c.getContext('2d')!
-  // 中段水体渐变：色标从参考图取样后降饱和（顶部天空色作贴图羽化的承接底）
-  const lg = ctx.createLinearGradient(0, 0, 0, WORLD_H)
-  lg.addColorStop(0, '#a9c9e6'); lg.addColorStop(0.13, '#8fd0d2')
-  lg.addColorStop(0.16, '#7cc4c9'); lg.addColorStop(0.34, '#4f93c6')
-  lg.addColorStop(0.52, '#2f5fab'); lg.addColorStop(0.7, '#1e3d85')
-  lg.addColorStop(0.85, '#1b2c6c'); lg.addColorStop(1, '#14224f')
-  ctx.fillStyle = lg; ctx.fillRect(0, 0, W, WORLD_H)
-
-  // 印象派中层色粒（层次感，参考图的碎光质地）
-  const midColors = ['#7cc4c9', '#4f93c6', '#2f5fab', '#1e3d85']
-  for (let i = 0; i < 140; i++) {
-    const y = 0.16 + hash01(`bg${i}`, 31) * 0.68
-    splat(ctx, hash01(`bg${i}`, 37) * W, y * WORLD_H, (0.04 + hash01(`bg${i}`, 41) * 0.09) * W,
-      (0.01 + hash01(`bg${i}`, 43) * 0.02) * WORLD_H, (hash01(`bg${i}`, 47) - 0.5) * 0.9,
-      midColors[Math.floor(hash01(`bg${i}`, 49) * 4)], 0.035 + hash01(`bg${i}`, 53) * 0.05)
-  }
-
-  // 丁达尔光柱：宽软斜光束
-  for (let r = 0; r < 5; r++) {
-    const rx = 0.16 + r * 0.16 + hash01(`ray${r}`, 141) * 0.05
-    const topY = WORLD.beachEnd + 0.012, len = 0.18 + hash01(`ray${r}`, 143) * 0.08
-    for (let seg = 0; seg < 4; seg++) {
-      const t = seg / 4
-      splat(ctx, (rx + t * 0.05) * W, (topY + (t + 0.12) * len) * WORLD_H,
-        (0.034 - t * 0.01) * W, len * WORLD_H * 0.34, 0.1,
-        '#e6f3f6', (1 - t) * 0.038, true)
-    }
-  }
-
-  // 鱼群洋流三条 + 漩涡一枚
-  const bez = (p0: number[], p1: number[], p2: number[], t: number) => [
-    (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * p1[0] + t * t * p2[0],
-    (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * p1[1] + t * t * p2[1],
-  ]
-  const bands: Array<{ p: number[][]; n: number; s: number; a: number; flip?: boolean }> = [
-    { p: [[0.02, 0.305], [0.45, 0.385], [0.9, 0.32]], n: 110, s: 1.0, a: 0.6 },
-    { p: [[0.96, 0.47], [0.55, 0.555], [0.06, 0.5]], n: 88, s: 0.9, a: 0.5, flip: true },
-    { p: [[0.04, 0.635], [0.5, 0.68], [0.94, 0.625]], n: 66, s: 0.8, a: 0.38 },
-  ]
-  for (let bi = 0; bi < bands.length; bi++) {
-    const b = bands[bi]
-    for (let i = 0; i < b.n; i++) {
-      const t = hash01(`f${bi}-${i}`, 151)
-      const [px, py] = bez(b.p[0], b.p[1], b.p[2], t)
-      const [qx, qy] = bez(b.p[0], b.p[1], b.p[2], Math.min(1, t + 0.02))
-      const ang = Math.atan2((qy - py) * WORLD_H, (qx - px) * W) + (b.flip ? Math.PI : 0)
-      const jx = (hash01(`f${bi}-${i}`, 153) - 0.5) * 0.05
-      const jy = (hash01(`f${bi}-${i}`, 155) - 0.5) * 0.018
-      fishSplat(ctx, (px + jx) * W, (py + jy) * WORLD_H,
-        (0.0035 + hash01(`f${bi}-${i}`, 157) * 0.003) * W * b.s, ang,
-        b.a * (0.6 + hash01(`f${bi}-${i}`, 159) * 0.4))
-    }
-  }
-  for (let i = 0; i < 38; i++) {
-    const a = hash01(`v${i}`, 161) * Math.PI * 2
-    const rr = 0.032 + hash01(`v${i}`, 163) * 0.02
-    fishSplat(ctx, (0.74 + Math.cos(a) * rr * 1.15) * W, (0.425 + Math.sin(a) * rr * 0.5) * WORLD_H,
-      (0.003 + hash01(`v${i}`, 165) * 0.002) * W, a + Math.PI / 2, 0.5)
-  }
-  splat(ctx, 0.74 * W, 0.425 * WORLD_H, 0.03 * W, 0.014 * WORLD_H, 0, '#cfe8ec', 0.16, true)
-
-  // 光衰（只压中深段；底段贴图自带暗部）
-  const dk = ctx.createLinearGradient(0, WORLD_H * 0.5, 0, WORLD_H * 0.85)
-  dk.addColorStop(0, 'rgba(4,10,24,0)'); dk.addColorStop(1, 'rgba(6,10,28,0.42)')
-  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'
-  ctx.fillStyle = dk; ctx.fillRect(0, WORLD_H * 0.5, W, WORLD_H * 0.35)
-
-  // 金色光尘 + 生物荧光 + 海雪（都钳在中段，不压贴图区）
-  for (let i = 0; i < 60; i++) {
-    const y = 0.4 + hash01(`gd${i}`, 171) * 0.4
-    splat(ctx, hash01(`gd${i}`, 173) * W, y * WORLD_H, 0.0022 * W, 0.0016 * W,
-      0, GOLD_DUST, 0.1 + hash01(`gd${i}`, 175) * 0.12, true)
-  }
-  for (let i = 0; i < 46; i++) {
-    const y = 0.48 + hash01(`gl${i}`, 107) * 0.32
-    splat(ctx, hash01(`gl${i}`, 109) * W, y * WORLD_H, 0.004 * W, 0.003 * W,
-      0, i % 3 ? '#7fd4d4' : '#b7e6c9', 0.18, true)
-  }
-  for (let i = 0; i < 30; i++) {
-    const y = 0.4 + hash01(`sn${i}`, 111) * 0.4
-    splat(ctx, hash01(`sn${i}`, 113) * W, y * WORLD_H, 0.0016 * W, 0.0012 * W, 0, '#e8f2f2', 0.09, true)
-  }
-
-  // 装饰玻璃泡（钳中段）
-  for (let i = 0; i < 7; i++) {
-    const bx = hash01(`db${i}`, 181) * 0.9 + 0.05, by = 0.38 + hash01(`db${i}`, 183) * 0.42
-    const br = (0.008 + hash01(`db${i}`, 185) * 0.01) * W
-    ctx.save(); ctx.globalAlpha = 0.35; ctx.strokeStyle = 'rgba(235,248,250,0.7)'
-    ctx.lineWidth = Math.max(1, br * 0.09)
-    ctx.beginPath(); ctx.arc(bx * W, by * WORLD_H, br, 0, Math.PI * 2); ctx.stroke()
-    ctx.globalAlpha = 0.55; ctx.lineWidth = Math.max(1, br * 0.14)
-    ctx.beginPath(); ctx.arc(bx * W, by * WORLD_H, br * 0.82, -2.3, -1.1); ctx.stroke(); ctx.restore()
-  }
-
-  // 水母两只
-  for (const [jx, jy, js] of [[0.17, 0.73, 1], [0.83, 0.68, 0.8]] as const) {
-    const R = 0.024 * W * js
-    splat(ctx, jx * W, jy * WORLD_H, R * 3, R * 2.4, 0, '#b9a8d6', 0.22, true)
-    splat(ctx, jx * W, jy * WORLD_H, R, R * 0.7, 0, '#eee4f6', 0.75)
-    splat(ctx, jx * W, jy * WORLD_H + R * 0.28, R * 0.85, R * 0.4, 0, '#c9b6e2', 0.4)
-    splat(ctx, jx * W - R * 0.25, jy * WORLD_H - R * 0.3, R * 0.5, R * 0.32, -0.3, '#fbf8fe', 0.85, true)
-    for (let tt = 0; tt < 6; tt++) {
-      for (let seg = 1; seg <= 11; seg++) {
-        splat(ctx, (jx + (tt - 2.5) * 0.0045 + Math.sin(seg * 0.9 + tt * 1.7) * 0.0026) * W,
-          jy * WORLD_H + R * 0.55 + seg * R * 0.42,
-          R * 0.08, R * 0.2, 0.2, '#d8cbee', 0.42 - seg * 0.033, true)
-      }
-    }
-  }
-
-  // 三段同图拼接（她的裁决：清晰 + 接缝自然）：整个世界都由原图相邻区域覆盖——
-  // 顶段 1:1 锐贴，中段取图水体区纵向拉伸（水无所谓形变，blur 2px 柔化拉伸痕），
-  // 底段锐贴；段间映射重叠 + 交叉羽化，同一张画的相邻纹理对接，无缝由图自身保证。
   if (masterImg) {
-    drawSliceFeather(ctx, masterImg, 0.34, 0.78, WORLD_H * 0.12, WORLD_H * 0.87, W, 90, 90, 2)
-    drawSliceFeather(ctx, masterImg, 0, 0.4, 0, WORLD_H * 0.15, W, 0, 100)
-    drawSliceFeather(ctx, masterImg, 0.72, 1.0, WORLD_H * 0.84, WORLD_H, W, 110, 0)
+    // 她的画按自然比例铺满世界（世界高度即图高度，六审：形体比例不可坏）；
+    // 只做 saturate(72%) 降淡——背景只提供海岸/鱼群/光/水/珊瑚，数据气泡是唯一泡层
+    ctx.filter = 'saturate(72%) brightness(1.02)'
+    ctx.drawImage(masterImg, 0, 0, masterImg.naturalWidth, masterImg.naturalHeight, 0, 0, W, WORLD_H)
+    ctx.filter = 'none'
+  } else {
+    // 图未就绪/加载失败：纯渐变 fail-safe
+    const lg = ctx.createLinearGradient(0, 0, 0, WORLD_H)
+    lg.addColorStop(0, '#a9c9e6'); lg.addColorStop(0.2, '#e9dab2')
+    lg.addColorStop(0.34, '#7cc4c9'); lg.addColorStop(0.55, '#2f5fab')
+    lg.addColorStop(0.8, '#1b2c6c'); lg.addColorStop(1, '#14224f')
+    ctx.fillStyle = lg; ctx.fillRect(0, 0, W, WORLD_H)
   }
 }
 
-export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Props) => {
+export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId, worldScale, openTarget, lensTextRef }: Props) => {
   const cvsRef = useRef<HTMLCanvasElement>(null)
   const capRef = useRef<HTMLDivElement>(null)
   const placedRef = useRef<PlacedEpisode[]>([])
@@ -282,6 +145,9 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
   // 实际绘制那一帧的相机（二审 Block 项：hit-test 只许读它，绝不读目标相机——
   // 快速滚动中两者可差数屏，用目标相机会命中不在屏上的记忆）
   const paintedCamRef = useRef(0)
+  const fitRef = useRef<(() => void) | null>(null)
+  const pressIdRef = useRef<string | null>(null)          // pointer-down 轻压（V-8 五态之一）
+  const openRef = useRef<{ t: OpenTarget | null; p: number }>({ t: null, p: 0 })
   const [caption, setCaption] = useState<Caption | null>(null)
 
   // 数据经 ref 进入渲染循环（动效A：绝不作为 effect 依赖重建循环）
@@ -289,6 +155,24 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
   useEffect(() => { wavesRef.current = waves; snapDirtyRef.current = true }, [waves])
   const highlightRef = useRef<string | null>(null)
   useEffect(() => { highlightRef.current = highlightId; snapDirtyRef.current = true }, [highlightId])
+  useEffect(() => { fitRef.current?.(); placedRef.current = layoutOcean(snap); snapDirtyRef.current = true }, [worldScale])   // 图 aspect 实算后重铺世界
+
+  // V-8 展开/收回：同一实体从当前呈现值生长/原路缩回；键盘直达，reduced 瞬切
+  useEffect(() => {
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (openTarget) {
+      openRef.current.t = openTarget
+      if (reduced || !openTarget.animateEntrance) { openRef.current.p = 1; snapDirtyRef.current = true; return }
+      gsap.to(openRef.current, { p: 1, duration: 0.5, ease: 'back.out(1.2)', overwrite: true,
+        onUpdate: () => { snapDirtyRef.current = true } })
+    } else if (openRef.current.t) {
+      if (reduced) { openRef.current.p = 0; openRef.current.t = null; snapDirtyRef.current = true; return }
+      gsap.to(openRef.current, { p: 0, duration: 0.32, ease: 'power2.inOut', overwrite: true,
+        onUpdate: () => { snapDirtyRef.current = true },
+        onComplete: () => { openRef.current.t = null; snapDirtyRef.current = true } })
+    }
+    return () => { gsap.killTweensOf(openRef.current) }
+  }, [openTarget])
 
   useEffect(() => {
     const cvs = cvsRef.current!
@@ -312,6 +196,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       snapDirtyRef.current = true
     }
     fit()
+    fitRef.current = fit
     loadMasterArt().then(() => fit())   // 底图到货重铺一次（未到时纯渐变已可看）
     const ro = new ResizeObserver(fit); ro.observe(cvs)
 
@@ -330,6 +215,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       // 动效B：reduced 时空闲帧完全不碰画布；浪的收场帧靠 hadActiveWaves 补一笔
       const mustPaint = !reduced
         || snapDirtyRef.current || cam !== lastPaintedCam || activeWaves || hadActiveWaves
+        || openRef.current.p > 0.001
       hadActiveWaves = activeWaves
       if (!mustPaint) return
       snapDirtyRef.current = false
@@ -354,21 +240,52 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       const sy = (worldY: number, b = 0) => worldY * WORLD_H - camOff + b
       const onScreen = (y: number, m = 80) => y > -m && y < H + m
 
+      // 场景实体泡（V-8）：膜 = 身后同一片海的折射（泽内轻微放大上移）+
+      // 不规则 Fresnel rim（周向哈希调制，绝非均匀双圆）；hover 膜光苏醒，
+      // pointer-down 轻压，展开 = 同一实体从锚点长大（文字由 DOM 层在泡心凝出）。
+      const openT = openRef.current.t, openP = openRef.current.p
+      const drawBubbleEntity = (cx: number, cy: number, crX: number, crY: number,
+        hovered: boolean, opened: number, seed: string) => {
+        const worldTop = cy + camOff - crY
+        ctx.save()
+        ctx.beginPath(); ctx.ellipse(cx, cy, crX, crY, 0, 0, Math.PI * 2); ctx.clip()
+        const mag = 1.08 + opened * 0.07
+        const srcW = crX * 2 * mag, srcH = crY * 2 * mag
+        const sx0 = Math.max(0, Math.min(W - crX * 2, cx - srcW / 2))
+        const sy0 = Math.max(0, Math.min(WORLD_H - crY * 2, worldTop - (srcH - crY * 2) / 2 - crY * 0.08))
+        ctx.drawImage(bg, sx0, sy0, srcW, srcH, cx - crX, cy - crY, crX * 2, crY * 2)
+        // 泡顶透光与泡底暗沉（膜的体积感）；展开时内部轻压暗保文字可读
+        splat(ctx, cx, cy - crY * 0.55, crX * 0.85, crY * 0.45, 0, '#eef8fb', 0.1 + (hovered ? 0.06 : 0), true)
+        if (opened > 0.01) {
+          const g2 = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(crX, crY))
+          g2.addColorStop(0, `rgba(8,22,44,${0.34 * opened})`)
+          g2.addColorStop(1, `rgba(8,22,44,${0.1 * opened})`)
+          ctx.fillStyle = g2; ctx.fillRect(cx - crX, cy - crY, crX * 2, crY * 2)
+        }
+        ctx.restore()
+        // 不规则 Fresnel rim：24 段弧，亮度 = 顶光分量 + 哈希起伏；hover 苏醒
+        const segs = 24
+        for (let i = 0; i < segs; i++) {
+          const a0 = (i / segs) * Math.PI * 2, a1 = ((i + 1.15) / segs) * Math.PI * 2
+          const topness = 0.5 - Math.sin(a0 + Math.PI / 2) * 0.5
+          const irr = hash01(seed + i, 219)
+          const al = (0.05 + topness * 0.2 + irr * 0.18) * (hovered ? 1.8 : 1) * (0.75 + opened * 0.5)
+          ctx.save(); ctx.globalAlpha = Math.min(0.85, al)
+          ctx.strokeStyle = irr > 0.72 ? '#f4fbfd' : '#cfe9ef'
+          ctx.lineWidth = Math.max(1, crX * (0.018 + irr * 0.03))
+          ctx.beginPath(); ctx.ellipse(cx, cy, crX, crY, 0, a0, a1); ctx.stroke(); ctx.restore()
+        }
+        splat(ctx, cx - crX * 0.45, cy - crY * 0.58, crX * 0.16, crY * 0.1, -0.5, '#ffffff', 0.4 + (hovered ? 0.2 : 0), true)
+      }
       for (const ep of placedRef.current) {
         if (ep.episode_id === null || ep.cr === 0) continue   // loose 散粒无膜（一审 P1-3）
+        if (openT && openT.episode_id === ep.episode_id && openP > 0.01) continue   // 展开态在下方单独画
+        const hovered = ep.memories.some((p) => hoverIdRef.current === p.m.memory_id || highlightRef.current === p.m.memory_id)
+        const pressed = ep.memories.some((p) => pressIdRef.current === p.m.memory_id)
+        const k = pressed ? 0.965 : 1
         const cx = ep.cx * W, cy = sy(ep.cy, bob(ep.episode_id, 0.004)), cr = ep.cr * W
         if (!onScreen(cy, cr + 80)) continue
-        // 玻璃环膜（参考图的透明泡质感）：宽淡外圈 + 内侧高光弧 + 顶部反光点
-        ctx.save()
-        ctx.globalAlpha = 0.2; ctx.strokeStyle = 'rgba(230,248,250,0.85)'
-        ctx.lineWidth = Math.max(1, cr * 0.06)
-        ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2); ctx.stroke()
-        ctx.globalAlpha = 0.38; ctx.lineWidth = Math.max(1, cr * 0.05)
-        ctx.beginPath(); ctx.arc(cx, cy, cr * 0.9, -2.3, -1.0); ctx.stroke()
-        ctx.globalAlpha = 0.22; ctx.lineWidth = Math.max(1, cr * 0.03)
-        ctx.beginPath(); ctx.arc(cx, cy, cr * 0.93, 0.6, 1.5); ctx.stroke()
-        ctx.restore()
-        splat(ctx, cx - cr * 0.5, cy - cr * 0.62, cr * 0.14, cr * 0.09, -0.6, '#f6fcff', 0.5, true)
+        drawBubbleEntity(cx, cy, cr * k, cr * k * (pressed ? 0.94 : 1), hovered, 0, ep.episode_id)
       }
       for (const ep of placedRef.current) {
         const lod = splatsPerMemory(ep.memories.length)   // 一审 P1-6：密度降档
@@ -396,6 +313,36 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
             splat(ctx, x, y, base * 4.4, base * 3.2, 0, color, 0.22, true)
         }
       }
+      // 展开态：同一只泡从锚点长大（相机已小幅让位），文字在泡内凝出
+      if (openT && openP > 0.001) {
+        let ax = 0.5, ay = 0.5, ar = 14
+        const grp = placedRef.current.find((e) => e.episode_id === openT.episode_id)
+        if (grp && grp.episode_id !== null) { ax = grp.cx; ay = grp.cy; ar = grp.cr * W }
+        else {
+          for (const e of placedRef.current) {
+            const pm = e.memories.find((q) => q.m.memory_id === openT.m.memory_id)
+            if (pm) { ax = pm.x; ay = pm.y; ar = 16 * (W / 1400) * 3; break }
+          }
+        }
+        const targetR = Math.min(H * 0.34, 300 * (W / (1400 * Math.min(2, window.devicePixelRatio || 1)) ) * (window.devicePixelRatio || 1))
+        const R = ar + (targetR - ar) * openP
+        // 水平方向没有相机可让（页面只竖向滚），泡自己随生长渐移进安全区，文字不裁边
+        const rawCx = ax * W, rawCy = sy(ay)
+        const margin = R + 14 * (window.devicePixelRatio || 1)
+        const cx = rawCx + (Math.max(margin, Math.min(W - margin, rawCx)) - rawCx) * openP
+        const cy = rawCy + (Math.max(margin, Math.min(H - margin, rawCy)) - rawCy) * openP
+        drawBubbleEntity(cx, cy, R, R, false, openP, openT.episode_id ?? openT.m.memory_id)
+        // 泡内文字层：直写 DOM transform（与 caption 同源手法，零 rerender）
+        const el = lensTextRef.current
+        if (el) {
+          const dpr = Math.min(2, window.devicePixelRatio || 1)
+          const cssX = cx / dpr, cssY = cy / dpr, cssR = R / dpr
+          el.style.transform = `translate(${cssX}px, ${cssY}px) translate(-50%, -50%)`
+          el.style.width = `${cssR * 1.5}px`
+          el.style.opacity = String(Math.max(0, (openP - 0.45) / 0.55))
+        }
+      } else if (lensTextRef.current) lensTextRef.current.style.opacity = '0'
+
       // 浪：persisted receipt 的泡沫痕；reduced 下静态潮痕（不扩散），4 秒后消失
       for (const w of wavesRef.current) {
         const age = (nowT - w.arrivedAt) / 4000
@@ -456,9 +403,20 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
     }
   }
 
+  const onDown = (e: React.PointerEvent) => {
+    const rect = cvsRef.current!.getBoundingClientRect()
+    const found = hitTestOcean(placedRef.current, e.clientX - rect.left, e.clientY - rect.top,
+      rect.width, rect.height, paintedCamRef.current)
+    pressIdRef.current = found?.placed.m.memory_id ?? null
+    if (pressIdRef.current) snapDirtyRef.current = true
+  }
+  const onUp = () => { if (pressIdRef.current) { pressIdRef.current = null; snapDirtyRef.current = true } }
+
   return (
     <div style={{ position: 'absolute', inset: 0 }}
       onPointerMove={onMove}
+      onPointerDown={onDown}
+      onPointerUp={onUp}
       onClick={onClick}
       onPointerLeave={() => {
         hoverIdRef.current = null; snapDirtyRef.current = true

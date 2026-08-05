@@ -7,20 +7,21 @@ import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useGSAP } from '@gsap/react'
-import { OceanCanvas, type FoamWave, type OpenTarget } from './ocean/OceanCanvas'
+import { OceanCanvas, loadMasterArt, type FoamWave, type OpenTarget } from './ocean/OceanCanvas'
 import { BubbleLens } from './ocean/BubbleLens'
-import { depthEase, WORLD } from './ocean/layout-core.mjs'
+import { depthEase, WORLD, setDepthScale } from './ocean/layout-core.mjs'
 import type { OceanSnapshot, VizMemory, WavesPage } from './ocean/types'
 
 gsap.registerPlugin(ScrollTrigger, useGSAP)
 
 // 下潜途中的注脚（世界深度 -> 滚动轨位置；零方框，纯柔光文字）
+// 注脚改百分比定位（世界=图，track 高度动态）：位置随图内区域走，与缩放无关
 const DIVE_NOTES = [
-  { top: '6vh', side: 'left', title: 'the shore', body: 'pinned memories stay above the tide. the sea is told it may not take them.' },
-  { top: '84vh', side: 'right', title: 'the living water', body: 'strong memories float near the light. every particle\'s depth is its real, server-computed strength.' },
-  { top: '178vh', side: 'left', title: 'episodes drift as bubbles', body: 'each bubble holds what one episode gathered. hover anything to hear it whisper.' },
-  { top: '272vh', side: 'right', title: 'the fade line', body: 'below this depth, forgetting has begun. nothing is deleted; it only sinks.' },
-  { top: '362vh', side: 'left', title: 'the bleached coral', body: 'what the sea let go rests here, colorless but recoverable. recall can still reach it by name.' },
+  { top: '3%', side: 'left', title: 'the shore', body: 'pinned memories stay above the tide. the sea is told it may not take them.' },
+  { top: '30%', side: 'right', title: 'the living water', body: 'strong memories float near the light. every particle\'s depth is its real, server-computed strength.' },
+  { top: '48%', side: 'left', title: 'episodes drift as bubbles', body: 'each bubble holds what one episode gathered. hover anything to hear it whisper.' },
+  { top: '66%', side: 'right', title: 'the fade line', body: 'below this depth, forgetting has begun. nothing is deleted; it only sinks.' },
+  { top: '82%', side: 'left', title: 'the bleached coral', body: 'what the sea let go rests here, colorless but recoverable. recall can still reach it by name.' },
 ] as const
 
 // 键盘巡航要把相机送到记忆所在深度：世界纵座标从强度按同一公式估算（近似即可，导航语义）。
@@ -40,9 +41,17 @@ export const App = () => {
   const [waves, setWaves] = useState<FoamWave[]>([])
   const [lens, setLens] = useState<OpenTarget | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
+  const [trackVh, setTrackVh] = useState(WORLD.DEPTH_SCALE * 100)
   const openerRef = useRef<HTMLElement | null>(null)   // 透镜关闭后焦点归还给打开它的元素
+  const lensTextRef = useRef<HTMLDivElement | null>(null)   // 泡内文字层，OceanCanvas 逐帧定位
   const openLens = (t: OpenTarget) => {
     openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    // V-8 相机小幅让位：泡锚在世界原位，滚动把它送到视口 45% 附近（限幅，不是跳转）
+    const delta = Math.max(-innerHeight * 0.3, Math.min(innerHeight * 0.3, t.sy - innerHeight * 0.45))
+    if (Math.abs(delta) > innerHeight * 0.1) {
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      window.scrollBy({ top: delta, behavior: reduced ? 'auto' : 'smooth' })
+    }
     setLens(t)
   }
   const closeLens = () => setLens(null)
@@ -60,6 +69,21 @@ export const App = () => {
   const cursorRef = useRef<string | null>(null)   // keyset 游标（契约#3）
   const seenRef = useRef<Set<string>>(new Set())
   const primedRef = useRef(false)                 // 首页浪只推游标不上屏（历史不是新浪）
+
+  // 世界深度 = 图自然比例（六审：宁短勿拉）；视口变化时重算
+  useEffect(() => {
+    let dead = false
+    const applyScale = async () => {
+      const img = await loadMasterArt()
+      if (dead || !img) return
+      const scale = (img.naturalHeight / img.naturalWidth) * (window.innerWidth / window.innerHeight)
+      setDepthScale(scale)
+      setTrackVh(WORLD.DEPTH_SCALE * 100)
+    }
+    applyScale()
+    window.addEventListener('resize', applyScale)
+    return () => { dead = true; window.removeEventListener('resize', applyScale) }
+  }, [])
 
   useEffect(() => {
     let dead = false
@@ -100,6 +124,8 @@ export const App = () => {
     return () => { dead = true; clearInterval(iv) }
   }, [])
 
+  useEffect(() => { ScrollTrigger.refresh() }, [trackVh])
+
   useGSAP(() => {
     // 相机：滚动进度直写 ref（连续值不进 React state——与画布同一哲学）
     ScrollTrigger.create({
@@ -131,7 +157,8 @@ export const App = () => {
       <style>{'.splat-text { filter: url(#splat-edge); }'}</style>
       <div style={{ position: 'fixed', inset: 0 }} aria-hidden="true">
         {snap && <OceanCanvas snap={snap} waves={waves} cameraRef={cameraRef}
-          onOpen={openLens} highlightId={focusId} />}
+          onOpen={openLens} highlightId={focusId} worldScale={trackVh}
+          openTarget={lens} lensTextRef={lensTextRef} />}
         {!snap && (
           <p style={{ color: '#cfe8ea', textAlign: 'center', marginTop: '40vh', fontStyle: 'italic' }}>
             {err ? `the sea is unreachable: ${err}` : 'listening for the tide...'}
@@ -141,7 +168,7 @@ export const App = () => {
       {/* 深潜轨：给文档高度，让整片海可以滚出来；事件穿透到画布 */}
       <main ref={trackRef} aria-label="Tidemark memory ocean, scroll to dive"
         inert={lens ? true : undefined}
-        style={{ height: '450vh', position: 'relative', zIndex: 1, pointerEvents: 'none' }}>
+        style={{ height: `${trackVh}vh`, position: 'relative', zIndex: 1, pointerEvents: 'none' }}>
         {DIVE_NOTES.map((n) => (
           <section key={n.title} className="dive-note" style={{
             position: 'absolute', top: n.top,
@@ -177,7 +204,7 @@ export const App = () => {
           </ul>
         ))}
       </nav>
-      {lens && <BubbleLens key={lens.m.memory_id} target={lens} onClose={closeLens} />}
+      {lens && <BubbleLens key={lens.m.memory_id} target={lens} onClose={closeLens} textRef={lensTextRef} />}
       {snap && (
         <p style={{ position: 'fixed', right: 16, bottom: 8, margin: 0, color: 'rgba(220,238,240,0.55)',
           fontSize: 11, fontStyle: 'italic', pointerEvents: 'none', zIndex: 2 }}>
