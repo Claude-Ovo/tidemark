@@ -12,7 +12,7 @@ import { hash01, WORLD, splatsPerMemory, hitTestOcean } from './layout-core.mjs'
 import { SKY, SAND, WATER, SEABED, CORAL_BLEACHED, FOAM, memoryColor, pearlColor } from './palette'
 
 export type FoamWave = { request_id: string; episode_id: string | null; arrivedAt: number }
-export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number }
+export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean }
 type Caption = { pinned: boolean; bleached: boolean; kind: string | null; strength: number; preview: string }
 type Props = {
   snap: OceanSnapshot; waves: FoamWave[]; cameraRef: RefObject<number>
@@ -257,12 +257,21 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
     }
   }
 
-  // 点击开透镜：与 hover 同一 hitTestOcean、同一 painted 相机——坐标真相只有一份
+  // 点击开透镜：与 hover 同一 hitTestOcean、同一 painted 相机——坐标真相只有一份。
+  // 四审 P1：开泡瞬间清干净 hover 字幕与高亮——半透明泡体挡不住底下的残字；
+  // 泡开着时透镜 overlay 覆盖全屏，pointermove 到不了画布，不会被重新点亮。
   const onClick = (e: React.MouseEvent) => {
     const rect = cvsRef.current!.getBoundingClientRect()
     const mx = e.clientX - rect.left, my = e.clientY - rect.top
     const found = hitTestOcean(placedRef.current, mx, my, rect.width, rect.height, paintedCamRef.current)
-    if (found) onOpen({ m: found.placed.m, episode_id: found.episode.episode_id, sx: e.clientX, sy: e.clientY })
+    if (found) {
+      hoverIdRef.current = null
+      snapDirtyRef.current = true
+      setCaption(null)
+      if (capRef.current) capRef.current.style.opacity = '0'
+      onOpen({ m: found.placed.m, episode_id: found.episode.episode_id,
+        sx: e.clientX, sy: e.clientY, bleached: found.placed.bleached })
+    }
   }
 
   return (

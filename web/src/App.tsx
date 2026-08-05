@@ -23,10 +23,11 @@ const DIVE_NOTES = [
   { top: '362vh', side: 'left', title: 'the bleached coral', body: 'what the sea let go rests here, colorless but recoverable. recall can still reach it by name.' },
 ] as const
 
-// 键盘巡航要把相机送到记忆所在深度：世界纵座标从强度按同一公式估算（近似即可，导航语义）
-const scrollToMemory = (m: VizMemory) => {
+// 键盘巡航要把相机送到记忆所在深度：世界纵座标从强度按同一公式估算（近似即可，导航语义）。
+// 阈值必须来自当前 snapshot（四审 P1：0.15 不许在客户端再长出第二真相源）
+const scrollToMemory = (m: VizMemory, fadeThreshold: number) => {
   const worldY = m.pinned ? (WORLD.skyEnd + WORLD.beachEnd) / 2
-    : m.effective_strength < 0.15 ? (WORLD.waterEnd + 0.96) / 2
+    : m.effective_strength < fadeThreshold ? (WORLD.waterEnd + 0.96) / 2
     : WORLD.beachEnd + depthEase(1 - m.effective_strength) * (WORLD.waterEnd - WORLD.beachEnd)
   const H = window.innerHeight
   const target = worldY * H * WORLD.DEPTH_SCALE - H / 2
@@ -39,6 +40,12 @@ export const App = () => {
   const [waves, setWaves] = useState<FoamWave[]>([])
   const [lens, setLens] = useState<OpenTarget | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
+  const openerRef = useRef<HTMLElement | null>(null)   // 透镜关闭后焦点归还给打开它的元素
+  const openLens = (t: OpenTarget) => {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setLens(t)
+  }
+  const closeLens = () => { setLens(null); openerRef.current?.focus?.() }
   const cameraRef = useRef(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
@@ -116,7 +123,7 @@ export const App = () => {
       <style>{'.splat-text { filter: url(#splat-edge); }'}</style>
       <div style={{ position: 'fixed', inset: 0 }} aria-hidden="true">
         {snap && <OceanCanvas snap={snap} waves={waves} cameraRef={cameraRef}
-          onOpen={setLens} highlightId={focusId} />}
+          onOpen={openLens} highlightId={focusId} />}
         {!snap && (
           <p style={{ color: '#cfe8ea', textAlign: 'center', marginTop: '40vh', fontStyle: 'italic' }}>
             {err ? `the sea is unreachable: ${err}` : 'listening for the tide...'}
@@ -125,6 +132,7 @@ export const App = () => {
       </div>
       {/* 深潜轨：给文档高度，让整片海可以滚出来；事件穿透到画布 */}
       <main ref={trackRef} aria-label="Tidemark memory ocean, scroll to dive"
+        inert={lens ? true : undefined}
         style={{ height: '450vh', position: 'relative', zIndex: 1, pointerEvents: 'none' }}>
         {DIVE_NOTES.map((n) => (
           <section key={n.title} className="dive-note" style={{
@@ -140,16 +148,19 @@ export const App = () => {
         ))}
       </main>
       {/* 可访问性镜像：键盘可达的语义清单，视觉离屏（契约#4） */}
-      <nav aria-label="memories as list, focus to highlight, enter to open" style={{ position: 'absolute', left: -9999, top: 0 }}>
+      <nav aria-label="memories as list, focus to highlight, enter to open"
+        inert={lens ? true : undefined}
+        style={{ position: 'absolute', left: -9999, top: 0 }}>
         {snap && [...snap.episodes, { episode_id: null, memories: snap.loose }].map((ep) => (
           <ul key={ep.episode_id ?? 'loose'} aria-label={`episode ${ep.episode_id ?? 'loose memories'}`}>
             {ep.memories.map((m) => (
               <li key={m.memory_id}>
                 <button
-                  onFocus={() => { setFocusId(m.memory_id); scrollToMemory(m) }}
+                  onFocus={() => { setFocusId(m.memory_id); scrollToMemory(m, snap.fade_threshold) }}
                   onBlur={() => setFocusId((cur) => (cur === m.memory_id ? null : cur))}
-                  onClick={() => setLens({ m, episode_id: ep.episode_id,
-                    sx: window.innerWidth / 2, sy: window.innerHeight * 0.45 })}>
+                  onClick={() => openLens({ m, episode_id: ep.episode_id,
+                    sx: window.innerWidth / 2, sy: window.innerHeight * 0.45,
+                    bleached: !m.pinned && m.effective_strength < snap.fade_threshold })}>
                   {m.pinned ? '[pinned] ' : ''}{m.kind ?? 'memory'} at {(m.effective_strength * 100).toFixed(0)}%: {m.content_preview}
                 </button>
               </li>
@@ -157,7 +168,7 @@ export const App = () => {
           </ul>
         ))}
       </nav>
-      {lens && <BubbleLens key={lens.m.memory_id} target={lens} onClose={() => setLens(null)} />}
+      {lens && <BubbleLens key={lens.m.memory_id} target={lens} onClose={closeLens} />}
       {snap && (
         <p style={{ position: 'fixed', right: 16, bottom: 8, margin: 0, color: 'rgba(220,238,240,0.55)',
           fontSize: 11, fontStyle: 'italic', pointerEvents: 'none', zIndex: 2 }}>
