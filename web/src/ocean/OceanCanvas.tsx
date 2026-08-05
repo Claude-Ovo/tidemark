@@ -91,9 +91,9 @@ const sampleMasterParticles = (img: HTMLImageElement): ArtParticle[] => {
       }
     }
   }
-  grab(0, 0.4, 0, 0.15, 2)      // 天空棕榈沙滩水线：密
-  grab(0.4, 0.72, 0.15, 0.84, 5) // 中段水体：稀（叠在渐变与程序化层上）
-  grab(0.72, 1.0, 0.84, 1.0, 2)  // 珊瑚森林：密
+  grab(0, 0.4, 0, 0.15, 3)      // 光尘点缀层（清晰度还给锐图，粒子只做流动的光）
+  grab(0.4, 0.72, 0.15, 0.84, 6)
+  grab(0.72, 1.0, 0.84, 1.0, 3)
   return out
 }
 
@@ -110,7 +110,7 @@ const buildParticleLayers = (particles: ArtParticle[], W: number, WORLD_H: numbe
     const pt = particles[i]
     const ctx = ctxs[i % 3]
     splat(ctx, pt.x * W, pt.y * WORLD_H, pt.s * scale * 1.6, pt.s * scale * 1.05,
-      (hash01(`pr${i}`, 211) - 0.5) * 1.2, pt.c, 0.5 + hash01(`pa${i}`, 213) * 0.3)
+      (hash01(`pr${i}`, 211) - 0.5) * 1.2, pt.c, 0.26 + hash01(`pa${i}`, 213) * 0.2)
   }
   return layers
 }
@@ -125,14 +125,15 @@ const fishSplat = (ctx: CanvasRenderingContext2D, x: number, y: number, size: nu
 // 贴图段 + 上下缘羽化（接缝融进渐变，不留硬线）
 const drawSliceFeather = (ctx: CanvasRenderingContext2D, img: HTMLImageElement,
   sy0: number, sy1: number, dy0: number, dy1: number, W: number,
-  featherTop: number, featherBottom: number) => {
+  featherTop: number, featherBottom: number, blurPx = 0) => {
   const sh = img.naturalHeight, sw = img.naturalWidth
   const h = Math.max(1, Math.round(dy1 - dy0))
   const tmp = document.createElement('canvas')
   tmp.width = W; tmp.height = h
   const tc = tmp.getContext('2d')!
-  tc.filter = 'blur(14px) saturate(72%) brightness(1.05)'
-  tc.drawImage(img, 0, sy0 * sh, sw, (sy1 - sy0) * sh, -20, -20, W + 40, h + 40)
+  const pad = blurPx > 0 ? blurPx * 2 : 0
+  tc.filter = `${blurPx > 0 ? `blur(${blurPx}px) ` : ''}saturate(72%) brightness(1.03)`
+  tc.drawImage(img, 0, sy0 * sh, sw, (sy1 - sy0) * sh, -pad, -pad, W + pad * 2, h + pad * 2)
   tc.filter = 'none'
   tc.globalCompositeOperation = 'destination-out'
   if (featherTop > 0) {
@@ -161,7 +162,7 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
 
   // 印象派中层色粒（层次感，参考图的碎光质地）
   const midColors = ['#7cc4c9', '#4f93c6', '#2f5fab', '#1e3d85']
-  for (let i = 0; i < 340; i++) {
+  for (let i = 0; i < 140; i++) {
     const y = 0.16 + hash01(`bg${i}`, 31) * 0.68
     splat(ctx, hash01(`bg${i}`, 37) * W, y * WORLD_H, (0.04 + hash01(`bg${i}`, 41) * 0.09) * W,
       (0.01 + hash01(`bg${i}`, 43) * 0.02) * WORLD_H, (hash01(`bg${i}`, 47) - 0.5) * 0.9,
@@ -261,10 +262,13 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
     }
   }
 
-  // 顶段与底段贴图（她的画上墙）；图未就绪时先跑纯程序化底，onload 后重画
+  // 三段同图拼接（她的裁决：清晰 + 接缝自然）：整个世界都由原图相邻区域覆盖——
+  // 顶段 1:1 锐贴，中段取图水体区纵向拉伸（水无所谓形变，blur 2px 柔化拉伸痕），
+  // 底段锐贴；段间映射重叠 + 交叉羽化，同一张画的相邻纹理对接，无缝由图自身保证。
   if (masterImg) {
-    drawSliceFeather(ctx, masterImg, 0, 0.4, 0, WORLD_H * 0.15, W, 0, 70)
-    drawSliceFeather(ctx, masterImg, 0.72, 1.0, WORLD_H * 0.84, WORLD_H, W, 220, 0)
+    drawSliceFeather(ctx, masterImg, 0.34, 0.78, WORLD_H * 0.12, WORLD_H * 0.87, W, 90, 90, 2)
+    drawSliceFeather(ctx, masterImg, 0, 0.4, 0, WORLD_H * 0.15, W, 0, 100)
+    drawSliceFeather(ctx, masterImg, 0.72, 1.0, WORLD_H * 0.84, WORLD_H, W, 110, 0)
   }
 }
 
@@ -338,7 +342,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       // 她的画在呼吸：三层粒子错相位明灭 + 微涌动（reduced 下静止恒亮）
       if (artLayers) {
         for (let k = 0; k < 3; k++) {
-          const a = reduced ? 0.72 : 0.58 + 0.3 * Math.sin(t / 1500 + k * 2.1)
+          const a = reduced ? 0.66 : 0.62 + 0.16 * Math.sin(t / 1500 + k * 2.1)
           const yOff = reduced ? 0 : Math.sin(t / 2800 + k * 1.9) * 2.2
           ctx.save(); ctx.globalAlpha = Math.max(0, Math.min(1, a))
           ctx.drawImage(artLayers[k], 0, camOff + yOff, W, H, 0, 0, W, H)
