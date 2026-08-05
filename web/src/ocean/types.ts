@@ -22,7 +22,10 @@ export type OceanSnapshot = {
   tenant_id: string
   agent_id: string
   agents: { agent_id: string; memory_count: number }[]
+  total_memories: number
+  capped: boolean          // 快照触顶截断时为 true（保最新，绝不装作全量）
   episodes: VizEpisode[]
+  loose: VizMemory[]       // episode_id 为 NULL 的散粒（一审 P1-3：不合成假气泡）
 }
 
 export type Wave = {

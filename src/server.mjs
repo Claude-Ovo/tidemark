@@ -22,10 +22,13 @@ import { isRetryableDatabaseError } from '../migrations/db.mjs'
 // 生产环境不保留任何硬编码可猜 key。dev 表的可达条件收紧为【显式本地不安全模式且非生产】：
 // TIDEMARK_DEV_INSECURE=1 且无 TIDEMARK_SECRET_ARN，两者同时成立才回退；其余一切缺表
 // 情形直接抛错（请求得 5xx），配置漂移绝不静默降级。
-// 表结构冻结：key -> { tenant_id, agent_id, capabilities[] }
+// 表结构冻结：key -> { tenant_id, agent_id, capabilities[], scope? }
 // capabilities：pin 是能力位不是默认权力（冻结 §12.3）——second-agent 故意不带，作越权测试对照
+// scope（P0-11 一审 P0-1/P0-2）：缺省 'agent' = 完整工具面；'viz' = 只读观景面——
+// 进不了 MCP 五工具，但作为 owner 建的 viewer 键可见全租户海湾清单（agent 键只见自己）。
 const DEV_AUTH_MAP = {
   'spike-demo-key':   { tenant_id: 'demo-tenant', agent_id: 'demo-agent', capabilities: ['memory:pin'] },
+  'viz-demo-key':     { tenant_id: 'demo-tenant', agent_id: 'demo-agent', capabilities: [], scope: 'viz' },
   'spike-second-key': { tenant_id: 'demo-tenant', agent_id: 'second-agent', capabilities: [] },
   // third-agent 有 pin 能力位：专测"capability 过了、agent scope 也必须过"（两道门独立）
   'spike-third-key':  { tenant_id: 'demo-tenant', agent_id: 'third-agent', capabilities: ['memory:pin'] },
@@ -48,13 +51,18 @@ export const resolveAuthMap = () => {
   for (const [k, p] of Object.entries(parsed)) {
     if (!k) throw new Error('TIDEMARK_AGENT_KEYS must not contain an empty api key')
     if (typeof p?.tenant_id !== 'string' || !p.tenant_id || typeof p?.agent_id !== 'string' || !p.agent_id
-        || !Array.isArray(p.capabilities) || p.capabilities.some(c => typeof c !== 'string')) {
+        || !Array.isArray(p.capabilities) || p.capabilities.some(c => typeof c !== 'string')
+        || (p.scope !== undefined && p.scope !== 'agent' && p.scope !== 'viz')) {
       throw new Error(`TIDEMARK_AGENT_KEYS entry invalid for key ${k.slice(0, 4)}***`)
     }
   }
   if (Object.keys(parsed).length === 0) throw new Error('TIDEMARK_AGENT_KEYS must not be empty')
   return (authMapCache = parsed)
 }
+
+// viz 键在工具面等同未认证（P0-2 姊妹守卫）：观景键泄露也拿不到写面/召回面。
+// 单点收口——MCP 端点唯一一次 principal 解析处过这个闸。
+export const toolPrincipal = (p) => (p?.scope === 'viz' ? null : p)
 
 // 工具级瞬断韧性：底层事务各自重试 5 次后仍失败（serverless 集群连续掐连接）时，
 // 整个工具调用重试一次——幂等台账保证无重复副作用。每次重试都打日志，绝不静默掩盖。
@@ -115,7 +123,7 @@ app.post('/mcp', async (req, res) => {
     req.rawHeaders = Object.entries(req.headers).flatMap(([k, v]) =>
       Array.isArray(v) ? v.flatMap(x => [k, x]) : [k, String(v)])
   }
-  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
+  const principal = toolPrincipal(resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null)
   const asResult = (body) => ({ content: [{ type: 'text', text: JSON.stringify(body) }], isError: body.ok === false })
 
   const server = new McpServer({ name: 'tidemark-memory', version: '0.1.0' })

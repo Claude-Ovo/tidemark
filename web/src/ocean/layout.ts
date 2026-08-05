@@ -1,88 +1,77 @@
-// 布局映射（DESIGN-OCEAN.md 契约 #1/#4）：
-//   纵轴 = 生命周期：visual_depth = 1 - effective_strength，经 easing 展开浅水区
-//   横轴 = 时间：episode 首条记忆 created_at 归一化；同座标扰动用【稳定哈希】不用随机数
+// 布局映射（DESIGN-OCEAN.md 契约 #1/#4，一审修订：loose 散粒 + sqrt 气泡半径）。
+// 纯函数在 layout-core.mjs（node 直测）；这里做类型化的场景组装。
 import type { OceanSnapshot, VizMemory } from './types'
+import { hash01, depthEase, WORLD, bubbleRadius } from './layout-core.mjs'
 
-// FNV-1a：同一 id 每次刷新落在同一位置（契约#4——扰动可复现）
-export const hash01 = (s: string, salt = 0): number => {
-  let h = 0x811c9dc5 ^ salt
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) }
-  return (h >>> 0) / 0xffffffff
-}
-
-// 深度 easing：pow(0.72) 把高强度段拉开，让"还记得清楚的"在画面里有层次
-export const depthEase = (d: number): number => Math.pow(Math.min(1, Math.max(0, d)), 0.72)
-
-// 画面纵向分带（她的手稿：奶油天空→沙滩→水体→白化珊瑚海床）
-export const BANDS = {
-  skyEnd: 0.16,
-  beachEnd: 0.30,      // pinned 的家：重要记忆浮在最上面的沙滩
-  waterEnd: 0.86,      // 水体 = 活着的记忆按深度悬浮
-  // 0.86 以下 = 海床白化珊瑚区：effective_strength < fade_threshold 的记忆沉在这
-}
+export { hash01, depthEase, WORLD }
 
 export type PlacedMemory = {
   m: VizMemory
-  x: number            // 0..1
-  y: number            // 0..1
-  r: number            // 基础半径（px 无关，画布内再乘）
-  bleached: boolean    // 低于水线 → 白化
+  x: number            // 0..1 世界横轴
+  y: number            // 0..1 世界纵轴（0=天顶 1=海底）
+  r: number            // 基础半径系数
+  bleached: boolean    // 低于 fade_threshold -> 海床白化
 }
 
 export type PlacedEpisode = {
-  episode_id: string
-  cx: number           // 气泡中心
+  episode_id: string | null   // null = loose 散粒容器（不画膜，一审 P1-3）
+  cx: number
   cy: number
-  cr: number           // 气泡膜半径
+  cr: number
   memories: PlacedMemory[]
 }
 
+const memTime = (m: VizMemory) => new Date(m.created_at).getTime()
+
 export const layoutOcean = (snap: OceanSnapshot): PlacedEpisode[] => {
-  const eps = snap.episodes
-  if (eps.length === 0) return []
-  const epTime = (e: { memories: VizMemory[] }) =>
-    Math.min(...e.memories.map((m) => new Date(m.created_at).getTime()))
-  const times = eps.map(epTime)
-  const t0 = Math.min(...times), t1 = Math.max(...times)
+  const all = [...snap.episodes.flatMap((e) => e.memories), ...snap.loose]
+  if (all.length === 0) return []
+  const t0 = Math.min(...all.map(memTime)), t1 = Math.max(...all.map(memTime))
   const span = Math.max(1, t1 - t0)
+  const timeX = (t: number) => 0.08 + ((t - t0) / span) * 0.84
+  const waterSpan = WORLD.waterEnd - WORLD.beachEnd
 
-  return eps.map((ep) => {
-    const tx = (epTime(ep) - t0) / span
-    // 横向留边 8%，稳定哈希抖动避免同刻 episode 重叠
-    const cx = 0.08 + tx * 0.84 + (hash01(ep.episode_id, 7) - 0.5) * 0.05
-    const strengths = ep.memories.filter((m) => !m.pinned).map((m) => m.effective_strength)
-    const meanStrength = strengths.length
-      ? strengths.reduce((a, b) => a + b, 0) / strengths.length : 1
-    const meanDepth = depthEase(1 - meanStrength)
-    const cy = BANDS.beachEnd + meanDepth * (BANDS.waterEnd - BANDS.beachEnd)
-    const cr = 0.035 + Math.min(0.05, ep.memories.length * 0.006)
-
-    const memories = ep.memories.map((m): PlacedMemory => {
-      const bleached = !m.pinned && m.effective_strength < snap.fade_threshold
-      if (m.pinned) {
-        // 沙滩：横向按自身时间散布，纵向压在沙带内
-        return { m, bleached: false,
-          x: 0.08 + hash01(m.memory_id, 3) * 0.84,
-          y: BANDS.skyEnd + 0.02 + hash01(m.memory_id, 5) * (BANDS.beachEnd - BANDS.skyEnd - 0.05),
-          r: 1 }
-      }
-      if (bleached) {
-        // 海床：沉底，微微起伏
-        return { m, bleached: true,
-          x: Math.min(0.95, Math.max(0.05, cx + (hash01(m.memory_id, 11) - 0.5) * 0.16)),
-          y: BANDS.waterEnd + 0.03 + hash01(m.memory_id, 13) * (0.97 - BANDS.waterEnd - 0.03),
-          r: 0.8 }
-      }
-      // 水中：围绕气泡中心的极座标散布（稳定哈希），自身深度参与纵向偏移
-      const ang = hash01(m.memory_id, 17) * Math.PI * 2
-      const rad = Math.sqrt(hash01(m.memory_id, 19)) * cr * 0.75
-      const ownDepth = depthEase(1 - m.effective_strength)
-      const y = BANDS.beachEnd + ownDepth * (BANDS.waterEnd - BANDS.beachEnd)
+  const placeOne = (m: VizMemory, cx: number, cr: number, bleachThreshold: number): PlacedMemory => {
+    const bleached = !m.pinned && m.effective_strength < bleachThreshold
+    if (m.pinned) {
+      // 沙滩：pinned 铺在沙带，横向按自身时间，纵向哈希微散
       return { m, bleached: false,
-        x: Math.min(0.95, Math.max(0.05, cx + Math.cos(ang) * rad)),
-        y: Math.min(BANDS.waterEnd, Math.max(BANDS.beachEnd + 0.01, y * 0.6 + (cy + Math.sin(ang) * rad * 0.8) * 0.4)),
-        r: 0.7 + m.effective_strength * 0.6 }
-    })
-    return { episode_id: ep.episode_id, cx, cy, cr, memories }
+        x: timeX(memTime(m)) + (hash01(m.memory_id, 3) - 0.5) * 0.04,
+        y: WORLD.skyEnd + 0.008 + hash01(m.memory_id, 5) * (WORLD.beachEnd - WORLD.skyEnd - 0.02),
+        r: 1 }
+    }
+    if (bleached) {
+      // 海床：沉底白化，微微起伏
+      return { m, bleached: true,
+        x: Math.min(0.95, Math.max(0.05, cx + (hash01(m.memory_id, 11) - 0.5) * 0.14)),
+        y: WORLD.waterEnd + 0.02 + hash01(m.memory_id, 13) * (0.96 - WORLD.waterEnd - 0.02),
+        r: 0.8 }
+    }
+    // 水中：深度由自身强度定（契约#1），围绕气泡心极座标散布
+    const ang = hash01(m.memory_id, 17) * Math.PI * 2
+    const rad = Math.sqrt(hash01(m.memory_id, 19)) * cr * 0.8
+    const y = WORLD.beachEnd + depthEase(1 - m.effective_strength) * waterSpan
+    return { m, bleached: false,
+      x: Math.min(0.95, Math.max(0.05, cx + Math.cos(ang) * rad)),
+      y: Math.min(WORLD.waterEnd, Math.max(WORLD.beachEnd + 0.005, y + Math.sin(ang) * rad * 0.35)),
+      r: 0.7 + m.effective_strength * 0.6 }
+  }
+
+  const placed: PlacedEpisode[] = snap.episodes.map((ep) => {
+    const cx = timeX(Math.min(...ep.memories.map(memTime)))
+      + (hash01(ep.episode_id ?? '', 7) - 0.5) * 0.05
+    const live = ep.memories.filter((m) => !m.pinned)
+    const meanStrength = live.length
+      ? live.reduce((a, b) => a + b.effective_strength, 0) / live.length : 1
+    const cy = WORLD.beachEnd + depthEase(1 - meanStrength) * waterSpan
+    const cr = bubbleRadius(ep.memories.length)
+    return { episode_id: ep.episode_id, cx, cy, cr,
+      memories: ep.memories.map((m) => placeOne(m, cx, cr, snap.fade_threshold)) }
   })
+  if (snap.loose.length > 0) {
+    // loose：无膜散粒，各自按自己的时间与深度独立漂（绝不合成假气泡）
+    placed.push({ episode_id: null, cx: 0.5, cy: 0.5, cr: 0,
+      memories: snap.loose.map((m) => placeOne(m, timeX(memTime(m)), 0.04, snap.fade_threshold)) })
+  }
+  return placed
 }

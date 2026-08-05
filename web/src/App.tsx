@@ -1,18 +1,34 @@
-// Tidemark 海景壳：拉单快照（契约#2）+ 轮询浪流（契约#3，游标去重）+ 零方框悬停字幕
-// + 可访问性 DOM 镜像（契约#4：视觉零按钮不等于语义零按钮）
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { OceanCanvas, type FoamWave, type HoverInfo } from './ocean/OceanCanvas'
+// Tidemark 海景壳：滚动=下潜（450vh 深潜轨，ScrollTrigger 喂相机 ref，零 rerender）。
+// 数据契约不变：单快照 60s 整体换新（#2）、浪流 keyset 游标去重（#3）、
+// 语义镜像 + reduced-motion 等价路径（#4）。
+// 一审 P0-1：bundle 里【零密钥】——dev 由 Vite 代理注入 header，
+// 生产由 CloudFront 给源站请求贴 origin custom header，浏览器永远不持有凭证。
+import { useEffect, useRef, useState } from 'react'
+import gsap from 'gsap'
+import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import { useGSAP } from '@gsap/react'
+import { OceanCanvas, type FoamWave } from './ocean/OceanCanvas'
 import type { OceanSnapshot, WavesPage } from './ocean/types'
 
-const KEY = import.meta.env.VITE_TIDEMARK_KEY ?? 'spike-demo-key'
-const HDR = { 'x-tidemark-auth': KEY }
+gsap.registerPlugin(ScrollTrigger, useGSAP)
+
+// 下潜途中的注脚（世界深度 -> 滚动轨位置；零方框，纯柔光文字）
+const DIVE_NOTES = [
+  { top: '6vh', side: 'left', title: 'the shore', body: 'pinned memories stay above the tide. the sea is told it may not take them.' },
+  { top: '84vh', side: 'right', title: 'the living water', body: 'strong memories float near the light. every particle\'s depth is its real, server-computed strength.' },
+  { top: '178vh', side: 'left', title: 'episodes drift as bubbles', body: 'each bubble holds what one episode gathered. hover anything to hear it whisper.' },
+  { top: '272vh', side: 'right', title: 'the fade line', body: 'below this depth, forgetting has begun. nothing is deleted; it only sinks.' },
+  { top: '362vh', side: 'left', title: 'the bleached coral', body: 'what the sea let go rests here, colorless but recoverable. recall can still reach it by name.' },
+] as const
 
 export const App = () => {
   const [snap, setSnap] = useState<OceanSnapshot | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [waves, setWaves] = useState<FoamWave[]>([])
-  const [hover, setHover] = useState<HoverInfo | null>(null)
-  const cursorRef = useRef<string | null>(null)   // keyset 游标（契约#3：刷新/StrictMode 重放天然去重）
+  const cameraRef = useRef(0)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
+  const cursorRef = useRef<string | null>(null)   // keyset 游标（契约#3）
   const seenRef = useRef<Set<string>>(new Set())
   const primedRef = useRef(false)                 // 首页浪只推游标不上屏（历史不是新浪）
 
@@ -20,7 +36,7 @@ export const App = () => {
     let dead = false
     const pull = async () => {
       try {
-        const r = await fetch('/viz/ocean', { headers: HDR })
+        const r = await fetch('/viz/ocean')
         const j = await r.json()
         if (!dead && j.ok) { setSnap(j as OceanSnapshot); setErr(null) }
         else if (!dead && !j.ok) setErr(String(j.error))
@@ -36,7 +52,7 @@ export const App = () => {
     const poll = async () => {
       try {
         const q = cursorRef.current ? `?after=${encodeURIComponent(cursorRef.current)}` : ''
-        const r = await fetch(`/viz/waves${q}`, { headers: HDR })
+        const r = await fetch(`/viz/waves${q}`)
         const j = (await r.json()) as WavesPage
         if (dead || !j.ok) return
         if (j.cursor) cursorRef.current = j.cursor
@@ -55,33 +71,55 @@ export const App = () => {
     return () => { dead = true; clearInterval(iv) }
   }, [])
 
-  const onHover = useCallback((h: HoverInfo | null) => setHover(h), [])
+  useGSAP(() => {
+    // 相机：滚动进度直写 ref（连续值不进 React state——与画布同一哲学）
+    ScrollTrigger.create({
+      trigger: trackRef.current, start: 'top top', end: 'bottom bottom',
+      onUpdate: (self) => { cameraRef.current = self.progress },
+    })
+    // 注脚显隐：仅在用户未要求减少动效时上 scrub 渐入渐出；reduced 下静态可读
+    gsap.matchMedia().add('(prefers-reduced-motion: no-preference)', () => {
+      gsap.utils.toArray<HTMLElement>('.dive-note').forEach((el) => {
+        gsap.timeline({
+          scrollTrigger: { trigger: el, start: 'top 92%', end: 'bottom 8%', scrub: 0.6 },
+        })
+          .fromTo(el, { opacity: 0, y: 26 }, { opacity: 1, y: 0, duration: 0.35, ease: 'none' })
+          .to(el, { opacity: 1, duration: 0.4, ease: 'none' })
+          .to(el, { opacity: 0, y: -18, duration: 0.25, ease: 'none' })
+      })
+    })
+  }, { scope: rootRef })
 
   return (
-    <main style={{ position: 'absolute', inset: 0 }} aria-label="Tidemark memory ocean">
-      {snap && <OceanCanvas snap={snap} waves={waves} onHover={onHover} />}
-      {!snap && (
-        <p style={{ color: '#cfe8ea', textAlign: 'center', marginTop: '40vh', fontStyle: 'italic' }}>
-          {err ? `the sea is unreachable — ${err}` : 'listening for the tide...'}
-        </p>
-      )}
-      {hover && (
-        <div style={{
-          position: 'absolute', left: hover.sx + 14, top: hover.sy - 10, maxWidth: 300,
-          pointerEvents: 'none', color: '#fdfbf5', fontSize: 13, lineHeight: 1.5,
-          textShadow: '0 0 6px rgba(6,20,40,0.95), 0 0 18px rgba(6,20,40,0.85), 0 0 34px rgba(6,20,40,0.7)',
-        }}>
-          <em style={{ opacity: 0.85 }}>
-            {hover.pinned ? 'pinned ashore' : hover.bleached ? 'bleaching away' : `strength ${(hover.strength * 100).toFixed(0)}%`}
-            {hover.kind ? ` · ${hover.kind}` : ''}
-          </em>
-          <br />{hover.preview}
-        </div>
-      )}
-      {/* 可访问性镜像：键盘可达的语义清单，视觉上离屏（契约#4） */}
+    <div ref={rootRef}>
+      <div style={{ position: 'fixed', inset: 0 }} aria-hidden="true">
+        {snap && <OceanCanvas snap={snap} waves={waves} cameraRef={cameraRef} />}
+        {!snap && (
+          <p style={{ color: '#cfe8ea', textAlign: 'center', marginTop: '40vh', fontStyle: 'italic' }}>
+            {err ? `the sea is unreachable: ${err}` : 'listening for the tide...'}
+          </p>
+        )}
+      </div>
+      {/* 深潜轨：给文档高度，让整片海可以滚出来；事件穿透到画布 */}
+      <main ref={trackRef} aria-label="Tidemark memory ocean, scroll to dive"
+        style={{ height: '450vh', position: 'relative', zIndex: 1, pointerEvents: 'none' }}>
+        {DIVE_NOTES.map((n) => (
+          <section key={n.title} className="dive-note" style={{
+            position: 'absolute', top: n.top,
+            ...(n.side === 'right' ? { right: '7vw' } : { left: '7vw' }),
+            textAlign: n.side === 'right' ? 'right' : 'left',
+            maxWidth: '36ch', color: '#fdfbf5',
+            textShadow: '0 0 8px rgba(6,20,40,0.9), 0 0 26px rgba(6,20,40,0.75)',
+          }}>
+            <h2 style={{ font: 'italic 400 clamp(20px, 2.6vw, 30px) Georgia, serif', margin: 0 }}>{n.title}</h2>
+            <p style={{ fontSize: 14, lineHeight: 1.7, opacity: 0.92, marginTop: 6 }}>{n.body}</p>
+          </section>
+        ))}
+      </main>
+      {/* 可访问性镜像：键盘可达的语义清单，视觉离屏（契约#4） */}
       <nav aria-label="memories as list" style={{ position: 'absolute', left: -9999, top: 0 }}>
-        {snap?.episodes.map((ep) => (
-          <ul key={ep.episode_id} aria-label={`episode ${ep.episode_id}`}>
+        {snap && [...snap.episodes, { episode_id: 'loose memories', memories: snap.loose }].map((ep) => (
+          <ul key={ep.episode_id ?? 'loose'} aria-label={`episode ${ep.episode_id}`}>
             {ep.memories.map((m) => (
               <li key={m.memory_id}>
                 {m.pinned ? '[pinned] ' : ''}{m.kind ?? 'memory'} at {(m.effective_strength * 100).toFixed(0)}%: {m.content_preview}
@@ -91,11 +129,11 @@ export const App = () => {
         ))}
       </nav>
       {snap && (
-        <p style={{ position: 'absolute', right: 16, bottom: 8, margin: 0, color: 'rgba(220,238,240,0.5)',
-          fontSize: 11, fontStyle: 'italic', pointerEvents: 'none' }}>
-          snapshot {new Date(snap.snapshot_at).toLocaleTimeString()} · {snap.episodes.reduce((a, e) => a + e.memories.length, 0)} memories · fade line {snap.fade_threshold}
+        <p style={{ position: 'fixed', right: 16, bottom: 8, margin: 0, color: 'rgba(220,238,240,0.55)',
+          fontSize: 11, fontStyle: 'italic', pointerEvents: 'none', zIndex: 2 }}>
+          snapshot {new Date(snap.snapshot_at).toLocaleTimeString()}, {snap.total_memories} memories, fade line {snap.fade_threshold}{snap.capped ? ', showing latest slice' : ''}
         </p>
       )}
-    </main>
+    </div>
   )
 }

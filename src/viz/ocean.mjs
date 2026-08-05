@@ -1,16 +1,29 @@
 // P0-11 viz 只读面（owner/viewer face，agent 面 5 工具不动）：给"会遗忘的海"供数。
-// 契约（DESIGN-OCEAN.md 数据契约，Codex kickoff 四条）：
+// 契约（DESIGN-OCEAN.md 数据契约，Codex kickoff 四条 + 一审修订）：
 //   #2 单一快照：snapshot_at 取【同一事务内的 DB now()】，全部 effective_strength 由
 //      服务端用与 recall 完全相同的 decayEffective 在该时刻计算；一个事务=一个快照。
 //   #3 浪的真源：waves 只吐 persisted recall receipt（recall_requests 行），
 //      keyset 游标 (created_at, request_id) 稳定增量，重放天然去重（游标单调）。
-// 只读：全程 SELECT，绝不产生 receipt/不触发塑性。auth 复用 agent key（tenant/agent 定界）。
+//   一审 P0-2：海湾清单（全租户 agents）只给 scope='viz' 的 viewer 键——它是 owner 建的
+//      观景凭证；agent 键只见自己，不越 agent 隔离。
+//   一审 P1-3：episode_id 为 NULL 的记忆不合成假气泡——逐条作 loose 散粒返回。
+//   一审 P1-4：fade_threshold 只从 TRANSITION_CFG 取，禁止第二真相源。
+//   一审 P1-5：快照有上界（cap 时保留 total_memories 声明截断），绝不静默。
+// 只读：全程 SELECT，绝不产生 receipt/不触发塑性。
 import { inSerializableTx } from '../lib/db.mjs'
 import { decayEffective } from '../lib/decay.mjs'
-
-const FADE_THRESHOLD = 0.15   // 与 TRANSITION_CFG.fade_threshold 同值（沙水线，契约冻结）
+import { TRANSITION_CFG } from '../lib/scheduler.mjs'
 
 const PREVIEW_CHARS = 140
+export const MAX_SNAPSHOT_MEMORIES = 2000   // demo 规模远低于此；触顶取最新、total 照报
+
+const memoryView = (r, nowMs) => ({
+  memory_id: r.memory_id, layer: r.layer, kind: r.kind, exp_status: r.exp_status,
+  pinned: r.pinned, state: r.state,
+  effective_strength: decayEffective(r, nowMs),
+  credited: Number(r.credited_success_count), blamed: Number(r.evidenced_blame_count),
+  created_at: r.created_at, content_preview: r.content_preview,
+})
 
 export const vizOcean = async ({ principal }) => {
   if (!principal) return { ok: false, error: 'unauthorized' }
@@ -18,12 +31,21 @@ export const vizOcean = async ({ principal }) => {
   return inSerializableTx(async (c) => {
     const snapshotAt = (await c.query('SELECT now() AS t')).rows[0].t
     const nowMs = new Date(snapshotAt).getTime()
-    // 海湾（岛屿）：同租户各 agent 的记忆量——隔离即地理
-    const agents = (await c.query(
-      `SELECT agent_id, count(*)::INT AS memory_count FROM memories
-       WHERE tenant_id = $1 AND admission = 'accepted' GROUP BY agent_id ORDER BY agent_id`,
-      [tenant_id])).rows
-    // 本海湾的记忆（accepted 全量；demo 规模有界，天然 < 数千）
+    // 海湾（岛屿）清单是租户级视图：只有 viewer 键（scope='viz'）配看；agent 键只见自己
+    const agents = principal.scope === 'viz'
+      ? (await c.query(
+          `SELECT agent_id, count(*)::INT AS memory_count FROM memories
+           WHERE tenant_id = $1 AND admission = 'accepted' GROUP BY agent_id ORDER BY agent_id`,
+          [tenant_id])).rows
+      : (await c.query(
+          `SELECT agent_id, count(*)::INT AS memory_count FROM memories
+           WHERE tenant_id = $1 AND agent_id = $2 AND admission = 'accepted' GROUP BY agent_id`,
+          [tenant_id, agent_id])).rows
+    const total = (await c.query(
+      `SELECT count(*)::INT AS n FROM memories
+       WHERE tenant_id = $1 AND agent_id = $2 AND admission = 'accepted'`,
+      [tenant_id, agent_id])).rows[0].n
+    // 触顶时保最新（画面偏向近期活动），capped 声明截断，绝不装作全量
     const rows = (await c.query(
       `SELECT memory_id, layer, kind, episode_id, exp_status, pinned, state,
               strength_anchor, strength_anchor_at, half_life_hours,
@@ -31,25 +53,25 @@ export const vizOcean = async ({ principal }) => {
               left(content, ${PREVIEW_CHARS}) AS content_preview
        FROM memories
        WHERE tenant_id = $1 AND agent_id = $2 AND admission = 'accepted'
-       ORDER BY created_at, memory_id`,
-      [tenant_id, agent_id])).rows
-    const episodes = new Map()
+       ORDER BY created_at DESC, memory_id DESC LIMIT ${MAX_SNAPSHOT_MEMORIES}`,
+      [tenant_id, agent_id])).rows.reverse()
+    const grouped = new Map()
+    const loose = []
     for (const r of rows) {
-      const ep = r.episode_id ?? '(no-episode)'
-      if (!episodes.has(ep)) episodes.set(ep, [])
-      episodes.get(ep).push({
-        memory_id: r.memory_id, layer: r.layer, kind: r.kind, exp_status: r.exp_status,
-        pinned: r.pinned, state: r.state,
-        effective_strength: decayEffective(r, nowMs),
-        credited: Number(r.credited_success_count), blamed: Number(r.evidenced_blame_count),
-        created_at: r.created_at, content_preview: r.content_preview,
-      })
+      if (r.episode_id == null) { loose.push(memoryView(r, nowMs)); continue }
+      if (!grouped.has(r.episode_id)) grouped.set(r.episode_id, [])
+      grouped.get(r.episode_id).push(memoryView(r, nowMs))
     }
     return {
-      ok: true, snapshot_at: snapshotAt, fade_threshold: FADE_THRESHOLD,
+      ok: true, snapshot_at: snapshotAt,
+      fade_threshold: TRANSITION_CFG.fade_threshold,
       tenant_id, agent_id,
       agents,
-      episodes: [...episodes.entries()].map(([episode_id, memories]) => ({ episode_id, memories })),
+      total_memories: Number(total),
+      capped: rows.length >= MAX_SNAPSHOT_MEMORIES,
+      episodes: [...grouped.entries()].map(([episode_id, memories]) => ({ episode_id, memories })),
+      // NULL episode 不是一个共同气泡：每条散粒独立漂（前端不画膜、按 memory_id 布局）
+      loose,
     }
   }, 'viz-ocean')
 }

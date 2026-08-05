@@ -1,6 +1,6 @@
 // 调色：她手稿的奶油→青→深蓝纵向渐变；kind 是自由字符串，常见 kind 固定色、
 // 未知 kind 用稳定哈希取色相——同一 kind 永远同一种颜色
-import { hash01 } from './layout'
+import { hash01 } from './layout-core.mjs'
 
 export const SKY = ['#f6ead8', '#f0dcc0'] as const
 export const SAND = ['#eccfa2', '#dfb98a'] as const
