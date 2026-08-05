@@ -12,7 +12,7 @@
 
 | 场景元素 | 数据语义 | 绑定字段/机制 |
 |---|---|---|
-| 纵向渐变（暖沙→深蓝） | 记忆生命周期轴 | 深度 = effective strength（真实衰减公式实算） |
+| 纵向渐变（暖沙→深蓝） | 记忆生命周期轴 | **visual_depth = 1 - effective_strength**（服务端实算，经 easing 映射；越强越浅，Codex 契约 #1） |
 | 沙滩 | 重要/新鲜记忆浮层 | pinned、高强度、近期 credited |
 | 沙水交界线 | 衰减阈值 | fade_threshold = 0.15（掉线即滑入水中下沉） |
 | **潮水（签名元素，全场唯一）** | **recall 事件** | 每次真实 recall：一道浪涌上沙滩退去，留下一道泡沫痕 = receipt。Tidemark 之名每次被使用当场上演 |
@@ -46,6 +46,19 @@ colors, dreamy layered depth, no 3D scan, no thick impasto texture.
 - 数据源：真实 API。内容面走 agent face（demo 租户），审计数值可走 audit views（content-free）。
 - 演示协同：P0-11 demo agent 的七步闭环实时反映在海里——失败→反省→珍珠成形；
   未被使用→下沉白化；credited→上浮复色。画面即 A/B 故事。
+
+## 数据契约（Codex kickoff 四条，冻结）
+
+1. **深度公式**：`visual_depth = 1 - effective_strength`（再经 easing），方向不可反。
+2. **单一快照**：客户端**永不**用浏览器时钟重算衰减。`GET /viz/ocean` 一次返回同一
+   server/DB 快照的 `snapshot_at + fade_threshold + 各记忆 effective_strength`（服务端
+   用与 recall 相同的公式计算）；多路数据必须服务端按同一快照汇合。
+3. **浪的真源**：每道潮水由 **persisted completed recall receipt** 触发；
+   `GET /viz/waves?after=<cursor>` 稳定游标增量流；刷新/断线重放/StrictMode remount
+   必须去重——optimistic 请求与 replay 不得演成第二次召回。
+4. **语义无障碍**：零方框只约束视觉。岛屿/气泡/泡破均有 keyboard/focus/ESC 等价路径，
+   `prefers-reduced-motion` 尊重；Canvas 命中目标配同步 accessible DOM overlay。
+   episode 的 x=时间、横向 jitter=`episode_id` 稳定散列（轮询不重排）。
 
 ## 比赛要求绑定
 
