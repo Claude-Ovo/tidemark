@@ -57,6 +57,64 @@ const loadMasterArt = () => {
   return masterLoading
 }
 
+// 她的画 -> 粒子（批7：整页动态）。图不再当墙纸：模糊版作色底保衔接，
+// 细节采样成色粒铺回原位，分三层错相位呼吸——全海点彩明灭。
+type ArtParticle = { x: number; y: number; c: string; s: number }
+// 必须吐 rgba（带显式 alpha=1）：fade() 的正则替换【最后一个数字】为 0——
+// rgb() 三元组会被它误伤蓝通道（实拍：全场褪蓝泛黄绿、粒子镶黄圈），rgba 的末位才是 alpha
+const desat = (r: number, g: number, b: number, k = 0.3) => {
+  const gray = 0.299 * r + 0.587 * g + 0.114 * b
+  const f = (v: number) => Math.round(v + (gray - v) * k)
+  return `rgba(${f(r)},${f(g)},${f(b)},1)`
+}
+// 图段 -> 世界段映射与色底贴图一致：顶段 [0,0.40]->[0,0.15]，底段 [0.72,1]->[0.84,1]
+const sampleMasterParticles = (img: HTMLImageElement): ArtParticle[] => {
+  const SW = 132
+  const SH = Math.round(SW * img.naturalHeight / img.naturalWidth)
+  const cv = document.createElement('canvas')
+  cv.width = SW; cv.height = SH
+  const cc = cv.getContext('2d', { willReadFrequently: true })!
+  cc.drawImage(img, 0, 0, SW, SH)
+  const data = cc.getImageData(0, 0, SW, SH).data
+  const out: ArtParticle[] = []
+  const grab = (imgY0: number, imgY1: number, wY0: number, wY1: number, step: number) => {
+    for (let gy = Math.floor(imgY0 * SH); gy < imgY1 * SH; gy += step) {
+      for (let gx = (gy % (step * 2) === 0 ? 0 : Math.floor(step / 2)); gx < SW; gx += step) {
+        const i = (gy * SW + gx) * 4
+        const jx = hash01(`px${gx}-${gy}`, 201) - 0.5, jy = hash01(`py${gx}-${gy}`, 203) - 0.5
+        out.push({
+          x: (gx + 0.5 + jx * step) / SW,
+          y: wY0 + ((gy + 0.5 + jy * step) / SH - imgY0) / (imgY1 - imgY0) * (wY1 - wY0),
+          c: desat(data[i], data[i + 1], data[i + 2]),
+          s: 5 + hash01(`ps${gx}-${gy}`, 207) * 9,
+        })
+      }
+    }
+  }
+  grab(0, 0.4, 0, 0.15, 2)      // 天空棕榈沙滩水线：密
+  grab(0.4, 0.72, 0.15, 0.84, 5) // 中段水体：稀（叠在渐变与程序化层上）
+  grab(0.72, 1.0, 0.84, 1.0, 2)  // 珊瑚森林：密
+  return out
+}
+
+// 三张呼吸层（各 1/3 粒子，错相位）；层为世界尺寸，帧循环整层 blit——零逐粒子帧成本
+const buildParticleLayers = (particles: ArtParticle[], W: number, WORLD_H: number): HTMLCanvasElement[] => {
+  const layers = [0, 1, 2].map(() => {
+    const c = document.createElement('canvas')
+    c.width = W; c.height = WORLD_H
+    return c
+  })
+  const ctxs = layers.map((c) => c.getContext('2d')!)
+  const scale = W / 1400
+  for (let i = 0; i < particles.length; i++) {
+    const pt = particles[i]
+    const ctx = ctxs[i % 3]
+    splat(ctx, pt.x * W, pt.y * WORLD_H, pt.s * scale * 1.6, pt.s * scale * 1.05,
+      (hash01(`pr${i}`, 211) - 0.5) * 1.2, pt.c, 0.5 + hash01(`pa${i}`, 213) * 0.3)
+  }
+  return layers
+}
+
 const fishSplat = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number,
   ang: number, alpha: number) => {
   splat(ctx, x, y, size, size * 0.42, ang, FISH, alpha)
@@ -73,8 +131,8 @@ const drawSliceFeather = (ctx: CanvasRenderingContext2D, img: HTMLImageElement,
   const tmp = document.createElement('canvas')
   tmp.width = W; tmp.height = h
   const tc = tmp.getContext('2d')!
-  tc.filter = 'saturate(72%) brightness(1.03)'
-  tc.drawImage(img, 0, sy0 * sh, sw, (sy1 - sy0) * sh, 0, 0, W, h)
+  tc.filter = 'blur(14px) saturate(72%) brightness(1.05)'
+  tc.drawImage(img, 0, sy0 * sh, sw, (sy1 - sy0) * sh, -20, -20, W + 40, h + 40)
   tc.filter = 'none'
   tc.globalCompositeOperation = 'destination-out'
   if (featherTop > 0) {
@@ -238,6 +296,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
     mq.addEventListener('change', onMq)
 
     let W = 0, H = 0, WORLD_H = 0
+    let artLayers: HTMLCanvasElement[] | null = null
     const fit = () => {
       const dpr = Math.min(2, window.devicePixelRatio || 1)
       W = Math.round(cvs.clientWidth * dpr); H = Math.round(cvs.clientHeight * dpr)
@@ -245,6 +304,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       WORLD_H = Math.round(H * WORLD.DEPTH_SCALE)
       bg.width = W; bg.height = WORLD_H
       paintBackdrop(bg, W, WORLD_H)
+      artLayers = masterImg ? buildParticleLayers(sampleMasterParticles(masterImg), W, WORLD_H) : null
       snapDirtyRef.current = true
     }
     fit()
@@ -275,6 +335,16 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       const camOff = cam * (WORLD_H - H)
       ctx.clearRect(0, 0, W, H)
       ctx.drawImage(bg, 0, camOff, W, H, 0, 0, W, H)
+      // 她的画在呼吸：三层粒子错相位明灭 + 微涌动（reduced 下静止恒亮）
+      if (artLayers) {
+        for (let k = 0; k < 3; k++) {
+          const a = reduced ? 0.72 : 0.58 + 0.3 * Math.sin(t / 1500 + k * 2.1)
+          const yOff = reduced ? 0 : Math.sin(t / 2800 + k * 1.9) * 2.2
+          ctx.save(); ctx.globalAlpha = Math.max(0, Math.min(1, a))
+          ctx.drawImage(artLayers[k], 0, camOff + yOff, W, H, 0, 0, W, H)
+          ctx.restore()
+        }
+      }
       const bob = (id: string, amp: number) =>
         reduced ? 0 : Math.sin(t / 2600 + hash01(id, 73) * 6.28) * amp * H
       const sy = (worldY: number, b = 0) => worldY * WORLD_H - camOff + b
