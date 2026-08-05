@@ -66,7 +66,7 @@ export const loadMasterArt = () => {
 type ArtParticle = { x: number; y: number; c: string; s: number }
 // 必须吐 rgba（带显式 alpha=1）：fade() 的正则替换【最后一个数字】为 0——
 // rgb() 三元组会被它误伤蓝通道（实拍：全场褪蓝泛黄绿、粒子镶黄圈），rgba 的末位才是 alpha
-const desat = (r: number, g: number, b: number, k = 0.3) => {
+const desat = (r: number, g: number, b: number, k = 0.42) => {   // 七审 A：粒子与底图同幅降淡，禁止鲜回去
   const gray = 0.299 * r + 0.587 * g + 0.114 * b
   const f = (v: number) => Math.round(v + (gray - v) * k)
   return `rgba(${f(r)},${f(g)},${f(b)},1)`
@@ -120,11 +120,23 @@ const buildParticleLayers = (particles: ArtParticle[], W: number, WORLD_H: numbe
 const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
   const ctx = c.getContext('2d')!
   if (masterImg) {
-    // 她的画按自然比例铺满世界（世界高度即图高度，六审：形体比例不可坏）；
-    // 只做 saturate(72%) 降淡——背景只提供海岸/鱼群/光/水/珊瑚，数据气泡是唯一泡层
-    ctx.filter = 'saturate(72%) brightness(1.02)'
-    ctx.drawImage(masterImg, 0, 0, masterImg.naturalWidth, masterImg.naturalHeight, 0, 0, W, WORLD_H)
-    ctx.filter = 'none'
+    // 七审 A+B：原画退成环境材质——低频色场打底，细节层低透明恢复（清晰 master
+    // 不再 100% 满幅终稿）；基准色调 saturate(58%) brightness(1.04) contrast(0.94)。
+    const sw = masterImg.naturalWidth, sh = masterImg.naturalHeight
+    ctx.filter = 'blur(5px) saturate(50%) brightness(1.06) contrast(0.9)'
+    ctx.drawImage(masterImg, 0, 0, sw, sh, 0, 0, W, WORLD_H)
+    ctx.filter = 'saturate(58%) brightness(1.04) contrast(0.94)'
+    ctx.globalAlpha = 0.6
+    ctx.drawImage(masterImg, 0, 0, sw, sh, 0, 0, W, WORLD_H)
+    ctx.globalAlpha = 1; ctx.filter = 'none'
+    // 浅海奶蓝雾洗（不靠高饱和碰撞，靠明度与空气感）
+    const wash = ctx.createLinearGradient(0, WORLD.beachEnd * WORLD_H, 0, (WORLD.beachEnd + 0.22) * WORLD_H)
+    wash.addColorStop(0, 'rgba(228,240,248,0.14)'); wash.addColorStop(1, 'rgba(228,240,248,0)')
+    ctx.fillStyle = wash; ctx.fillRect(0, WORLD.beachEnd * WORLD_H, W, 0.22 * WORLD_H)
+    // 深海靖蓝 depth haze（低透明，分层靠雾不靠色撞）
+    const haze = ctx.createLinearGradient(0, 0.52 * WORLD_H, 0, WORLD_H)
+    haze.addColorStop(0, 'rgba(30,38,88,0)'); haze.addColorStop(1, 'rgba(30,38,88,0.3)')
+    ctx.fillStyle = haze; ctx.fillRect(0, 0.52 * WORLD_H, W, 0.48 * WORLD_H)
   } else {
     // 图未就绪/加载失败：纯渐变 fail-safe
     const lg = ctx.createLinearGradient(0, 0, 0, WORLD_H)
@@ -255,7 +267,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId, world
         const sy0 = Math.max(0, Math.min(WORLD_H - crY * 2, worldTop - (srcH - crY * 2) / 2 - crY * 0.08))
         ctx.drawImage(bg, sx0, sy0, srcW, srcH, cx - crX, cy - crY, crX * 2, crY * 2)
         // 泡顶透光与泡底暗沉（膜的体积感）；展开时内部轻压暗保文字可读
-        splat(ctx, cx, cy - crY * 0.55, crX * 0.85, crY * 0.45, 0, '#eef8fb', 0.1 + (hovered ? 0.06 : 0), true)
+        splat(ctx, cx, cy - crY * 0.55, crX * 0.85, crY * 0.45, 0, '#eef8fb', 0.16 + (hovered ? 0.08 : 0), true)
         if (opened > 0.01) {
           const g2 = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(crX, crY))
           g2.addColorStop(0, `rgba(8,22,44,${0.34 * opened})`)
@@ -269,7 +281,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId, world
           const a0 = (i / segs) * Math.PI * 2, a1 = ((i + 1.15) / segs) * Math.PI * 2
           const topness = 0.5 - Math.sin(a0 + Math.PI / 2) * 0.5
           const irr = hash01(seed + i, 219)
-          const al = (0.05 + topness * 0.2 + irr * 0.18) * (hovered ? 1.8 : 1) * (0.75 + opened * 0.5)
+          const al = (0.1 + topness * 0.26 + irr * 0.22) * (hovered ? 1.8 : 1) * (0.75 + opened * 0.5)
           ctx.save(); ctx.globalAlpha = Math.min(0.85, al)
           ctx.strokeStyle = irr > 0.72 ? '#f4fbfd' : '#cfe9ef'
           ctx.lineWidth = Math.max(1, crX * (0.018 + irr * 0.03))
@@ -293,7 +305,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId, world
           const amp = p.m.pinned ? 0 : p.bleached ? 0.001 : 0.003   // 岸上不漂，海床微动
           const x = p.x * W, y = sy(p.y, bob(p.m.memory_id, amp))
           if (!onScreen(y)) continue
-          const base = (p.m.layer === 'experience' ? 9 : 7) * p.r * (W / 1400)
+          const base = (p.m.layer === 'experience' ? 11 : 9) * p.r * (W / 1400)
           const hovered = hoverIdRef.current === p.m.memory_id || highlightRef.current === p.m.memory_id
           const color = p.m.layer === 'experience'
             ? pearlColor(p.m.exp_status)

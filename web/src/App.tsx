@@ -35,6 +35,21 @@ const scrollToMemory = (m: VizMemory, fadeThreshold: number) => {
   window.scrollTo({ top: Math.max(0, Math.min(target, H * (WORLD.DEPTH_SCALE - 1))), behavior: 'auto' })
 }
 
+// 七审验收门：dev-only 五强度 fixture（?fixture）——只换渲染输入，绝不碰服务端快照真相
+const injectFixture = (snap: OceanSnapshot): OceanSnapshot => {
+  const ft = snap.fade_threshold
+  const targets = [0.9, 0.65, 0.38, ft + 0.02, ft - 0.02]
+  const day = 86400e3, t0 = Date.parse(snap.snapshot_at) - 6 * day
+  return { ...snap, total_memories: targets.length * 2, loose: [],
+    episodes: targets.map((s, i) => ({ episode_id: `fixture-ep-${i + 1}`,
+      memories: [0, 1].map((j) => ({
+        memory_id: `fx-${i}-${j}`, layer: 'event' as const, kind: 'fact', exp_status: null,
+        pinned: false, state: 'fresh', effective_strength: Math.max(0.01, s - j * 0.02),
+        credited: 0, blamed: 0, created_at: new Date(t0 + i * day + j * 3600e3).toISOString(),
+        content_preview: `fixture strength ${s.toFixed(2)}`,
+      })) })) }
+}
+
 export const App = () => {
   const [snap, setSnap] = useState<OceanSnapshot | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -90,7 +105,10 @@ export const App = () => {
     const pull = async () => {
       try {
         const r = await fetch('/viz/ocean')
-        const j = await r.json()
+        let j = await r.json()
+        if (j.ok && import.meta.env.DEV && new URLSearchParams(location.search).has('fixture')) {
+          j = injectFixture(j as OceanSnapshot)
+        }
         if (!dead && j.ok) { setSnap(j as OceanSnapshot); setErr(null) }
         else if (!dead && !j.ok) setErr(String(j.error))
       } catch (e) { if (!dead) setErr(String(e)) }
