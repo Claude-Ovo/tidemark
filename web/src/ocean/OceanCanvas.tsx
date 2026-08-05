@@ -12,8 +12,13 @@ import { hash01, WORLD, splatsPerMemory, hitTestOcean } from './layout-core.mjs'
 import { SKY, SAND, WATER, SEABED, CORAL_BLEACHED, FOAM, memoryColor, pearlColor } from './palette'
 
 export type FoamWave = { request_id: string; episode_id: string | null; arrivedAt: number }
+export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number }
 type Caption = { pinned: boolean; bleached: boolean; kind: string | null; strength: number; preview: string }
-type Props = { snap: OceanSnapshot; waves: FoamWave[]; cameraRef: RefObject<number> }
+type Props = {
+  snap: OceanSnapshot; waves: FoamWave[]; cameraRef: RefObject<number>
+  onOpen: (t: OpenTarget) => void        // 点击命中一颗记忆 -> 交给透镜（同一 hitTestOcean）
+  highlightId: string | null             // 键盘巡航聚焦的记忆（视觉高亮与 hover 同款）
+}
 
 // 淡出必须淡向【同色 alpha=0】——CSS 'transparent' 是 rgba(0,0,0,0)，
 // 渐变会朝黑色插值，给每枚色粒镶一圈脏黑晕（v0 首屏截图实锤过）
@@ -101,7 +106,7 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
   }
 }
 
-export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
+export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Props) => {
   const cvsRef = useRef<HTMLCanvasElement>(null)
   const capRef = useRef<HTMLDivElement>(null)
   const placedRef = useRef<PlacedEpisode[]>([])
@@ -116,6 +121,8 @@ export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
   // 数据经 ref 进入渲染循环（动效A：绝不作为 effect 依赖重建循环）
   useEffect(() => { placedRef.current = layoutOcean(snap); snapDirtyRef.current = true }, [snap])
   useEffect(() => { wavesRef.current = waves; snapDirtyRef.current = true }, [waves])
+  const highlightRef = useRef<string | null>(null)
+  useEffect(() => { highlightRef.current = highlightId; snapDirtyRef.current = true }, [highlightId])
 
   useEffect(() => {
     const cvs = cvsRef.current!
@@ -188,7 +195,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
           const x = p.x * W, y = sy(p.y, bob(p.m.memory_id, amp))
           if (!onScreen(y)) continue
           const base = (p.m.layer === 'experience' ? 9 : 7) * p.r * (W / 1400)
-          const hovered = hoverIdRef.current === p.m.memory_id
+          const hovered = hoverIdRef.current === p.m.memory_id || highlightRef.current === p.m.memory_id
           const color = p.m.layer === 'experience'
             ? pearlColor(p.m.exp_status)
             : memoryColor(p.m.kind, p.m.effective_strength, p.bleached)
@@ -250,9 +257,18 @@ export const OceanCanvas = ({ snap, waves, cameraRef }: Props) => {
     }
   }
 
+  // 点击开透镜：与 hover 同一 hitTestOcean、同一 painted 相机——坐标真相只有一份
+  const onClick = (e: React.MouseEvent) => {
+    const rect = cvsRef.current!.getBoundingClientRect()
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top
+    const found = hitTestOcean(placedRef.current, mx, my, rect.width, rect.height, paintedCamRef.current)
+    if (found) onOpen({ m: found.placed.m, episode_id: found.episode.episode_id, sx: e.clientX, sy: e.clientY })
+  }
+
   return (
     <div style={{ position: 'absolute', inset: 0 }}
       onPointerMove={onMove}
+      onClick={onClick}
       onPointerLeave={() => {
         hoverIdRef.current = null; snapDirtyRef.current = true
         if (capRef.current) capRef.current.style.opacity = '0'

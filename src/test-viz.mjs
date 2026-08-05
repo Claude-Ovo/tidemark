@@ -143,6 +143,15 @@ try {
   assert.equal((await vizWaves({ principal: P_AGENT2 })).waves.length, 0, 'V4 waves are agent-scoped')
   console.log('PASS V4 keyset cursor (paging, replay, clamps, isolation)')
 
+  // V4b 微秒精度（浪实测抓获的回归）：游标若经 JS Date 截断到毫秒，
+  // 微秒时间戳的行会永远小于自己的游标——每轮被重新返回，游标推不过最后一行
+  const rMicro = await insReceipt(A1, '2001-01-02T00:00:00.123456Z', 1)
+  const drain = await vizWaves({ principal: P_AGENT, after: page2.cursor })
+  assert.equal(drain.waves.some(w => w.request_id === rMicro), true, 'V4b microsecond row drains once')
+  const afterDrain = await vizWaves({ principal: P_AGENT, after: drain.cursor })
+  assert.deepEqual(afterDrain.waves, [], 'V4b cursor advances PAST a microsecond row: nothing replays')
+  console.log('PASS V4b cursor is microsecond-exact (no eternal last row)')
+
   // V5 NULL episode 散粒
   assert.equal(seenByAgent.loose.length, 2, 'V5 loose memories returned individually')
   assert.equal(seenByAgent.episodes.some(e => e.episode_id == null || e.episode_id === '(no-episode)'), false,

@@ -7,8 +7,10 @@ import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useGSAP } from '@gsap/react'
-import { OceanCanvas, type FoamWave } from './ocean/OceanCanvas'
-import type { OceanSnapshot, WavesPage } from './ocean/types'
+import { OceanCanvas, type FoamWave, type OpenTarget } from './ocean/OceanCanvas'
+import { BubbleLens } from './ocean/BubbleLens'
+import { depthEase, WORLD } from './ocean/layout-core.mjs'
+import type { OceanSnapshot, VizMemory, WavesPage } from './ocean/types'
 
 gsap.registerPlugin(ScrollTrigger, useGSAP)
 
@@ -21,10 +23,22 @@ const DIVE_NOTES = [
   { top: '362vh', side: 'left', title: 'the bleached coral', body: 'what the sea let go rests here, colorless but recoverable. recall can still reach it by name.' },
 ] as const
 
+// 键盘巡航要把相机送到记忆所在深度：世界纵座标从强度按同一公式估算（近似即可，导航语义）
+const scrollToMemory = (m: VizMemory) => {
+  const worldY = m.pinned ? (WORLD.skyEnd + WORLD.beachEnd) / 2
+    : m.effective_strength < 0.15 ? (WORLD.waterEnd + 0.96) / 2
+    : WORLD.beachEnd + depthEase(1 - m.effective_strength) * (WORLD.waterEnd - WORLD.beachEnd)
+  const H = window.innerHeight
+  const target = worldY * H * WORLD.DEPTH_SCALE - H / 2
+  window.scrollTo({ top: Math.max(0, Math.min(target, H * (WORLD.DEPTH_SCALE - 1))), behavior: 'auto' })
+}
+
 export const App = () => {
   const [snap, setSnap] = useState<OceanSnapshot | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [waves, setWaves] = useState<FoamWave[]>([])
+  const [lens, setLens] = useState<OpenTarget | null>(null)
+  const [focusId, setFocusId] = useState<string | null>(null)
   const cameraRef = useRef(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
@@ -92,8 +106,17 @@ export const App = () => {
 
   return (
     <div ref={rootRef}>
+      {/* 溶边字层（P2-7）：feTurbulence 位移把字缘碎化成泼溅质感，bloom 由柔光 shadow 给 */}
+      <svg width="0" height="0" aria-hidden="true" style={{ position: 'absolute' }}>
+        <filter id="splat-edge" x="-12%" y="-12%" width="124%" height="124%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.11" numOctaves="2" seed="7" result="n" />
+          <feDisplacementMap in="SourceGraphic" in2="n" scale="4.2" xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+      </svg>
+      <style>{'.splat-text { filter: url(#splat-edge); }'}</style>
       <div style={{ position: 'fixed', inset: 0 }} aria-hidden="true">
-        {snap && <OceanCanvas snap={snap} waves={waves} cameraRef={cameraRef} />}
+        {snap && <OceanCanvas snap={snap} waves={waves} cameraRef={cameraRef}
+          onOpen={setLens} highlightId={focusId} />}
         {!snap && (
           <p style={{ color: '#cfe8ea', textAlign: 'center', marginTop: '40vh', fontStyle: 'italic' }}>
             {err ? `the sea is unreachable: ${err}` : 'listening for the tide...'}
@@ -111,23 +134,30 @@ export const App = () => {
             maxWidth: '36ch', color: '#fdfbf5',
             textShadow: '0 0 8px rgba(6,20,40,0.9), 0 0 26px rgba(6,20,40,0.75)',
           }}>
-            <h2 style={{ font: 'italic 400 clamp(20px, 2.6vw, 30px) Georgia, serif', margin: 0 }}>{n.title}</h2>
+            <h2 className="splat-text" style={{ font: 'italic 400 clamp(20px, 2.6vw, 30px) Georgia, serif', margin: 0 }}>{n.title}</h2>
             <p style={{ fontSize: 14, lineHeight: 1.7, opacity: 0.92, marginTop: 6 }}>{n.body}</p>
           </section>
         ))}
       </main>
       {/* 可访问性镜像：键盘可达的语义清单，视觉离屏（契约#4） */}
-      <nav aria-label="memories as list" style={{ position: 'absolute', left: -9999, top: 0 }}>
-        {snap && [...snap.episodes, { episode_id: 'loose memories', memories: snap.loose }].map((ep) => (
-          <ul key={ep.episode_id ?? 'loose'} aria-label={`episode ${ep.episode_id}`}>
+      <nav aria-label="memories as list, focus to highlight, enter to open" style={{ position: 'absolute', left: -9999, top: 0 }}>
+        {snap && [...snap.episodes, { episode_id: null, memories: snap.loose }].map((ep) => (
+          <ul key={ep.episode_id ?? 'loose'} aria-label={`episode ${ep.episode_id ?? 'loose memories'}`}>
             {ep.memories.map((m) => (
               <li key={m.memory_id}>
-                {m.pinned ? '[pinned] ' : ''}{m.kind ?? 'memory'} at {(m.effective_strength * 100).toFixed(0)}%: {m.content_preview}
+                <button
+                  onFocus={() => { setFocusId(m.memory_id); scrollToMemory(m) }}
+                  onBlur={() => setFocusId((cur) => (cur === m.memory_id ? null : cur))}
+                  onClick={() => setLens({ m, episode_id: ep.episode_id,
+                    sx: window.innerWidth / 2, sy: window.innerHeight * 0.45 })}>
+                  {m.pinned ? '[pinned] ' : ''}{m.kind ?? 'memory'} at {(m.effective_strength * 100).toFixed(0)}%: {m.content_preview}
+                </button>
               </li>
             ))}
           </ul>
         ))}
       </nav>
+      {lens && <BubbleLens key={lens.m.memory_id} target={lens} onClose={() => setLens(null)} />}
       {snap && (
         <p style={{ position: 'fixed', right: 16, bottom: 8, margin: 0, color: 'rgba(220,238,240,0.55)',
           fontSize: 11, fontStyle: 'italic', pointerEvents: 'none', zIndex: 2 }}>

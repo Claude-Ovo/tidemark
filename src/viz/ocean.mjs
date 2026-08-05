@@ -92,8 +92,11 @@ export const vizWaves = async ({ principal, after, limit = 50 }) => {
   }
   const n = Math.min(Math.max(1, Number(limit) || 50), 200)
   return inSerializableTx(async (c) => {
+    // 游标时间戳必须取 SQL 侧精确字符串：CRDB TIMESTAMPTZ 是微秒精度，
+    // 走 JS Date/toISOString 会截断到毫秒——截断游标 < 原行，游标行每轮被重新返回，
+    // 永远推不过最后一行（浪实测抓获：同一 request_id 连续三轮 n=1 复现）。
     const rows = (await c.query(
-      `SELECT request_id, episode_id, attempt_id, created_at,
+      `SELECT request_id, episode_id, attempt_id, created_at, created_at::STRING AS created_at_exact,
               jsonb_array_length(receipt_json->'receipt'->'items') AS items_count
        FROM recall_requests
        WHERE tenant_id = $1 AND agent_id = $2
@@ -106,7 +109,7 @@ export const vizWaves = async ({ principal, after, limit = 50 }) => {
       waves: rows.map(r => ({ request_id: r.request_id, episode_id: r.episode_id,
         attempt_id: r.attempt_id, created_at: r.created_at, items_count: Number(r.items_count ?? 0) })),
       cursor: last
-        ? Buffer.from(`${new Date(last.created_at).toISOString()}|${last.request_id}`).toString('base64')
+        ? Buffer.from(`${last.created_at_exact}|${last.request_id}`).toString('base64')
         : (after ?? null),
     }
   }, 'viz-waves')
