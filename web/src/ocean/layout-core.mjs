@@ -16,7 +16,7 @@ export const depthEase = (d) => Math.pow(Math.min(1, Math.max(0, d)), 0.72)
 export const WORLD = {
   DEPTH_SCALE: 4.5,
   skyEnd: 0.075,
-  beachEnd: 0.13,
+  beachEnd: 0.12,   // 对齐底图贴段的斜水线中点（图内 32% -> 世界 12%）
   waterEnd: 0.82,
 }
 

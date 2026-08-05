@@ -9,7 +9,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { OceanSnapshot } from './types'
 import { layoutOcean, type PlacedEpisode } from './layout'
 import { hash01, WORLD, splatsPerMemory, hitTestOcean } from './layout-core.mjs'
-import { SKY, CLOUD, SAND, WATER, SEABED, CORAL_BLEACHED, CORAL_GLOW, FISH, GOLD_DUST, FOAM, memoryColor, pearlColor } from './palette'
+import { FISH, GOLD_DUST, FOAM, memoryColor, pearlColor } from './palette'
 
 export type FoamWave = { request_id: string; episode_id: string | null; arrivedAt: number }
 export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean
@@ -41,9 +41,22 @@ const splat = (ctx: CanvasRenderingContext2D, x: number, y: number, rx: number, 
   ctx.restore()
 }
 
-// 世界级背景一次性铺陈（resize 才重画）：整片海 4.5 屏高的 offscreen，逐帧按相机裁剪位块。
-// v2 美术基准 = 她的 GPT 全景参考图（ovo.jpg）降饱和 30%：蓝天白云、斜向沙水线、
-// 丁达尔光柱、鱼群洋流与漩涡（鱼群参考图）、金色光尘（银河鱼群参考图）、水母、紫晕白珊瑚。
+// 背景 v3（她拍板：参考图直接照搬当底图，不再手绘模仿）：
+// ovo.jpg 顶段（天空->水线，图 0-40%）1:1 贴世界 0-15%，底段（深海珊瑚，图 74-100%）
+// 贴世界 85-100%（轻拉伸 1.5x）；中段水体用图采样色渐变 + 程序化层（鱼群/光柱/光尘/水母）。
+// 全部贴图过 saturate(72%) ——她钦定降淡 30%。图挂载失败自动退回纯渐变（fail-safe）。
+let masterImg: HTMLImageElement | null = null
+let masterLoading: Promise<void> | null = null
+const loadMasterArt = () => {
+  masterLoading ??= new Promise((res) => {
+    const im = new Image()
+    im.onload = () => { masterImg = im; res() }
+    im.onerror = () => res()
+    im.src = '/ocean-master.jpg'
+  })
+  return masterLoading
+}
+
 const fishSplat = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number,
   ang: number, alpha: number) => {
   splat(ctx, x, y, size, size * 0.42, ang, FISH, alpha)
@@ -51,56 +64,56 @@ const fishSplat = (ctx: CanvasRenderingContext2D, x: number, y: number, size: nu
     size * 0.42, size * 0.3, ang + 0.55, FISH, alpha * 0.85)
 }
 
+// 贴图段 + 上下缘羽化（接缝融进渐变，不留硬线）
+const drawSliceFeather = (ctx: CanvasRenderingContext2D, img: HTMLImageElement,
+  sy0: number, sy1: number, dy0: number, dy1: number, W: number,
+  featherTop: number, featherBottom: number) => {
+  const sh = img.naturalHeight, sw = img.naturalWidth
+  const h = Math.max(1, Math.round(dy1 - dy0))
+  const tmp = document.createElement('canvas')
+  tmp.width = W; tmp.height = h
+  const tc = tmp.getContext('2d')!
+  tc.filter = 'saturate(72%) brightness(1.03)'
+  tc.drawImage(img, 0, sy0 * sh, sw, (sy1 - sy0) * sh, 0, 0, W, h)
+  tc.filter = 'none'
+  tc.globalCompositeOperation = 'destination-out'
+  if (featherTop > 0) {
+    const g = tc.createLinearGradient(0, 0, 0, featherTop)
+    g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)')
+    tc.fillStyle = g; tc.fillRect(0, 0, W, featherTop)
+  }
+  if (featherBottom > 0) {
+    const g = tc.createLinearGradient(0, h - featherBottom, 0, h)
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,1)')
+    tc.fillStyle = g; tc.fillRect(0, h - featherBottom, W, featherBottom)
+  }
+  tc.globalCompositeOperation = 'source-over'
+  ctx.drawImage(tmp, 0, Math.round(dy0))
+}
+
 const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
   const ctx = c.getContext('2d')!
+  // 中段水体渐变：色标从参考图取样后降饱和（顶部天空色作贴图羽化的承接底）
   const lg = ctx.createLinearGradient(0, 0, 0, WORLD_H)
-  lg.addColorStop(0, SKY[0]); lg.addColorStop(WORLD.skyEnd, SKY[1])
-  lg.addColorStop(WORLD.skyEnd + 0.004, SAND[0]); lg.addColorStop(WORLD.beachEnd, SAND[1])
-  lg.addColorStop(WORLD.beachEnd + 0.004, WATER[0]); lg.addColorStop(0.3, WATER[1])
-  lg.addColorStop(0.48, WATER[2]); lg.addColorStop(0.66, WATER[3])
-  lg.addColorStop(WORLD.waterEnd, WATER[4]); lg.addColorStop(1, SEABED)
+  lg.addColorStop(0, '#a9c9e6'); lg.addColorStop(0.13, '#8fd0d2')
+  lg.addColorStop(0.16, '#7cc4c9'); lg.addColorStop(0.34, '#4f93c6')
+  lg.addColorStop(0.52, '#2f5fab'); lg.addColorStop(0.7, '#1e3d85')
+  lg.addColorStop(0.85, '#1b2c6c'); lg.addColorStop(1, '#14224f')
   ctx.fillStyle = lg; ctx.fillRect(0, 0, W, WORLD_H)
 
-  // 斜向沙水线（参考图的有机水线，不做水平硬线）：沙滩下缘随 x 缓变，边缘铺泡沫
-  const edgeY = (x01: number) => WORLD.beachEnd + 0.012 * (x01 - 0.5) - 0.004 * Math.sin(x01 * 6.3)
-  ctx.save(); ctx.beginPath(); ctx.moveTo(0, WORLD.skyEnd * WORLD_H)
-  for (let i = 0; i <= 40; i++) ctx.lineTo((i / 40) * W, edgeY(i / 40) * WORLD_H)
-  ctx.lineTo(W, WORLD.skyEnd * WORLD_H); ctx.closePath()
-  const sg = ctx.createLinearGradient(0, WORLD.skyEnd * WORLD_H, 0, (WORLD.beachEnd + 0.012) * WORLD_H)
-  sg.addColorStop(0, SAND[0]); sg.addColorStop(1, SAND[1])
-  ctx.fillStyle = sg; ctx.fill(); ctx.restore()
-  for (let i = 0; i < 34; i++) {
-    const x01 = hash01(`fm${i}`, 57)
-    splat(ctx, x01 * W, (edgeY(x01) + (hash01(`fm${i}`, 58) - 0.5) * 0.003) * WORLD_H,
-      0.045 * W, 0.0011 * WORLD_H, (hash01(`fm${i}`, 60) - 0.5) * 0.15, FOAM, 0.2, true)
-  }
-
-  // 印象派大色粒（各带同色系微差）
-  const bandColor = (v: number): string =>
-    v < WORLD.skyEnd ? SKY[1] : v < WORLD.beachEnd ? SAND[Math.floor(hash01(String(v), 2) * 2)]
-    : v < 0.3 ? WATER[0] : v < 0.48 ? WATER[1] : v < 0.66 ? WATER[2] : v < WORLD.waterEnd ? WATER[3] : WATER[4]
-  for (let i = 0; i < 780; i++) {
-    const y = hash01(`bg${i}`, 31)
+  // 印象派中层色粒（层次感，参考图的碎光质地）
+  const midColors = ['#7cc4c9', '#4f93c6', '#2f5fab', '#1e3d85']
+  for (let i = 0; i < 340; i++) {
+    const y = 0.16 + hash01(`bg${i}`, 31) * 0.68
     splat(ctx, hash01(`bg${i}`, 37) * W, y * WORLD_H, (0.04 + hash01(`bg${i}`, 41) * 0.09) * W,
-      (0.01 + hash01(`bg${i}`, 43) * 0.022) * WORLD_H, (hash01(`bg${i}`, 47) - 0.5) * 0.9,
-      bandColor(y), 0.05 + hash01(`bg${i}`, 53) * 0.08)
+      (0.01 + hash01(`bg${i}`, 43) * 0.02) * WORLD_H, (hash01(`bg${i}`, 47) - 0.5) * 0.9,
+      midColors[Math.floor(hash01(`bg${i}`, 49) * 4)], 0.035 + hash01(`bg${i}`, 53) * 0.05)
   }
 
-  // 蓝天白云 + 天光 bloom（参考图的云）
-  for (const [cx0, cy0, sc] of [[0.32, 0.022, 1], [0.62, 0.014, 0.7], [0.8, 0.03, 0.55]] as const) {
-    for (let i = 0; i < 7; i++) {
-      splat(ctx, (cx0 + (hash01(`cl${cx0}${i}`, 91) - 0.5) * 0.1) * W,
-        (cy0 + (hash01(`cl${cx0}${i}`, 93) - 0.5) * 0.006) * WORLD_H,
-        (0.045 + hash01(`cl${cx0}${i}`, 95) * 0.03) * W * sc, 0.008 * WORLD_H * sc,
-        (hash01(`cl${cx0}${i}`, 97) - 0.5) * 0.3, CLOUD, 0.5)
-    }
-  }
-  splat(ctx, W * 0.5, WORLD_H * 0.008, W * 0.26, WORLD_H * 0.016, 0, '#fff8e6', 0.42, true)
-
-  // 丁达尔光柱：宽软斜光束（首版分段旋转叠成了麻花，实拍打回——改单角度大椭圆低透明重叠）
+  // 丁达尔光柱：宽软斜光束
   for (let r = 0; r < 5; r++) {
     const rx = 0.16 + r * 0.16 + hash01(`ray${r}`, 141) * 0.05
-    const topY = WORLD.beachEnd + 0.01, len = 0.18 + hash01(`ray${r}`, 143) * 0.08
+    const topY = WORLD.beachEnd + 0.012, len = 0.18 + hash01(`ray${r}`, 143) * 0.08
     for (let seg = 0; seg < 4; seg++) {
       const t = seg / 4
       splat(ctx, (rx + t * 0.05) * W, (topY + (t + 0.12) * len) * WORLD_H,
@@ -109,15 +122,15 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
     }
   }
 
-  // 鱼群洋流三条 + 漩涡一枚（鱼群参考图：曲线带状、越深越暗）
+  // 鱼群洋流三条 + 漩涡一枚
   const bez = (p0: number[], p1: number[], p2: number[], t: number) => [
     (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * p1[0] + t * t * p2[0],
     (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * p1[1] + t * t * p2[1],
   ]
   const bands: Array<{ p: number[][]; n: number; s: number; a: number; flip?: boolean }> = [
-    { p: [[0.02, 0.335], [0.45, 0.415], [0.9, 0.35]], n: 110, s: 1.0, a: 0.6 },
-    { p: [[0.96, 0.5], [0.55, 0.585], [0.06, 0.53]], n: 88, s: 0.9, a: 0.5, flip: true },
-    { p: [[0.04, 0.665], [0.5, 0.71], [0.94, 0.655]], n: 66, s: 0.8, a: 0.38 },
+    { p: [[0.02, 0.305], [0.45, 0.385], [0.9, 0.32]], n: 110, s: 1.0, a: 0.6 },
+    { p: [[0.96, 0.47], [0.55, 0.555], [0.06, 0.5]], n: 88, s: 0.9, a: 0.5, flip: true },
+    { p: [[0.04, 0.635], [0.5, 0.68], [0.94, 0.625]], n: 66, s: 0.8, a: 0.38 },
   ]
   for (let bi = 0; bi < bands.length; bi++) {
     const b = bands[bi]
@@ -133,39 +146,39 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
         b.a * (0.6 + hash01(`f${bi}-${i}`, 159) * 0.4))
     }
   }
-  for (let i = 0; i < 38; i++) {   // 漩涡（她的鱼群旋涡参考图）：绕亮心一圈
+  for (let i = 0; i < 38; i++) {
     const a = hash01(`v${i}`, 161) * Math.PI * 2
     const rr = 0.032 + hash01(`v${i}`, 163) * 0.02
-    fishSplat(ctx, (0.74 + Math.cos(a) * rr * 1.15) * W, (0.455 + Math.sin(a) * rr * 0.5) * WORLD_H,
+    fishSplat(ctx, (0.74 + Math.cos(a) * rr * 1.15) * W, (0.425 + Math.sin(a) * rr * 0.5) * WORLD_H,
       (0.003 + hash01(`v${i}`, 165) * 0.002) * W, a + Math.PI / 2, 0.5)
   }
-  splat(ctx, 0.74 * W, 0.455 * WORLD_H, 0.03 * W, 0.014 * WORLD_H, 0, '#cfe8ec', 0.16, true)
+  splat(ctx, 0.74 * W, 0.425 * WORLD_H, 0.03 * W, 0.014 * WORLD_H, 0, '#cfe8ec', 0.16, true)
 
-  // 光衰：越深越暗（先压暗——荧光/金尘/珊瑚必须画在黑暗之上才透得出来）
-  const dk = ctx.createLinearGradient(0, WORLD_H * 0.5, 0, WORLD_H)
-  dk.addColorStop(0, 'rgba(4,10,24,0)'); dk.addColorStop(1, 'rgba(6,10,28,0.52)')
+  // 光衰（只压中深段；底段贴图自带暗部）
+  const dk = ctx.createLinearGradient(0, WORLD_H * 0.5, 0, WORLD_H * 0.85)
+  dk.addColorStop(0, 'rgba(4,10,24,0)'); dk.addColorStop(1, 'rgba(6,10,28,0.42)')
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'
-  ctx.fillStyle = dk; ctx.fillRect(0, WORLD_H * 0.5, W, WORLD_H * 0.5)
+  ctx.fillStyle = dk; ctx.fillRect(0, WORLD_H * 0.5, W, WORLD_H * 0.35)
 
-  // 金色光尘（银河鱼群参考图）+ 生物荧光 + 海雪
+  // 金色光尘 + 生物荧光 + 海雪（都钳在中段，不压贴图区）
   for (let i = 0; i < 60; i++) {
-    const y = 0.42 + hash01(`gd${i}`, 171) * 0.5
+    const y = 0.4 + hash01(`gd${i}`, 171) * 0.4
     splat(ctx, hash01(`gd${i}`, 173) * W, y * WORLD_H, 0.0022 * W, 0.0016 * W,
       0, GOLD_DUST, 0.1 + hash01(`gd${i}`, 175) * 0.12, true)
   }
   for (let i = 0; i < 46; i++) {
-    const y = 0.5 + hash01(`gl${i}`, 107) * 0.3
+    const y = 0.48 + hash01(`gl${i}`, 107) * 0.32
     splat(ctx, hash01(`gl${i}`, 109) * W, y * WORLD_H, 0.004 * W, 0.003 * W,
       0, i % 3 ? '#7fd4d4' : '#b7e6c9', 0.18, true)
   }
   for (let i = 0; i < 30; i++) {
-    const y = 0.42 + hash01(`sn${i}`, 111) * 0.52
+    const y = 0.4 + hash01(`sn${i}`, 111) * 0.4
     splat(ctx, hash01(`sn${i}`, 113) * W, y * WORLD_H, 0.0016 * W, 0.0012 * W, 0, '#e8f2f2', 0.09, true)
   }
 
-  // 装饰玻璃泡（参考图的透明环泡，与数据气泡区分：环形描边+高光弧）
+  // 装饰玻璃泡（钳中段）
   for (let i = 0; i < 7; i++) {
-    const bx = hash01(`db${i}`, 181) * 0.9 + 0.05, by = 0.4 + hash01(`db${i}`, 183) * 0.5
+    const bx = hash01(`db${i}`, 181) * 0.9 + 0.05, by = 0.38 + hash01(`db${i}`, 183) * 0.42
     const br = (0.008 + hash01(`db${i}`, 185) * 0.01) * W
     ctx.save(); ctx.globalAlpha = 0.35; ctx.strokeStyle = 'rgba(235,248,250,0.7)'
     ctx.lineWidth = Math.max(1, br * 0.09)
@@ -174,8 +187,8 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
     ctx.beginPath(); ctx.arc(bx * W, by * WORLD_H, br * 0.82, -2.3, -1.1); ctx.stroke(); ctx.restore()
   }
 
-  // 水母两只（参考图深水的发光体）：铃体 + 垂须（首版太弱像色斑，实拍打回加大加亮）
-  for (const [jx, jy, js] of [[0.17, 0.76, 1], [0.83, 0.71, 0.8]] as const) {
+  // 水母两只
+  for (const [jx, jy, js] of [[0.17, 0.73, 1], [0.83, 0.68, 0.8]] as const) {
     const R = 0.024 * W * js
     splat(ctx, jx * W, jy * WORLD_H, R * 3, R * 2.4, 0, '#b9a8d6', 0.22, true)
     splat(ctx, jx * W, jy * WORLD_H, R, R * 0.7, 0, '#eee4f6', 0.75)
@@ -190,43 +203,10 @@ const paintBackdrop = (c: HTMLCanvasElement, W: number, WORLD_H: number) => {
     }
   }
 
-  // 白化珊瑚海床：紫晕背光（参考图）+ 真分枝（扇形角 x 沿枝串珠——首版把枝索引和
-  // 沿枝距离混成一个变量，每枝只剩一颗珠，实拍成了蠕虫柱，打回重构）。
-  // 纵向伸展一律 W 基准锁纵横比（WORLD_H 基准会随视口变高拉成蜡烛）。
-  for (let k = 0; k < 8; k++) {
-    const bx = (0.06 + k * 0.12 + hash01(`c${k}`, 59) * 0.05) * W
-    const by = WORLD_H * 0.99 - hash01(`c${k}`, 61) * 0.008 * W
-    splat(ctx, bx, by - 0.024 * W, 0.062 * W, 0.03 * W, 0, CORAL_GLOW, 0.16, true)
-    const branches = 6 + Math.floor(hash01(`c${k}`, 63) * 3)
-    for (let br = 0; br < branches; br++) {
-      // 扇形保底展开 + 哈希微抖；枝长各异；沿枝微曲
-      const ang = -Math.PI / 2 + ((br / (branches - 1)) - 0.5) * 2.1
-        + (hash01(`c${k}r${br}`, 67) - 0.5) * 0.3
-      const len = (0.028 + hash01(`c${k}r${br}`, 69) * 0.03) * W
-      const bend = (hash01(`c${k}r${br}`, 73) - 0.5) * 1.2
-      for (let seg = 0; seg <= 6; seg++) {
-        const t = seg / 6
-        const a2 = ang + bend * t * 0.5
-        splat(ctx, bx + Math.cos(a2) * t * len, by + Math.sin(a2) * t * len,
-          0.0075 * W * (1 - t * 0.55), 0.006 * W * (1 - t * 0.55),
-          a2, CORAL_BLEACHED, 0.72 - t * 0.26)
-      }
-    }
-  }
-
-  // 棕榈：树冠探进画面（参考图构图），干弯向画心
-  for (const [tx, flip] of [[0.05, 1], [0.94, -1]] as const) {
-    const px = tx * W, py = WORLD_H * (WORLD.skyEnd - 0.004)
-    for (let seg = 0; seg < 5; seg++) {
-      splat(ctx, px + flip * seg * 0.008 * W, py - seg * 0.0035 * WORLD_H,
-        0.006 * W, 0.004 * WORLD_H, flip * 0.5, '#6d5138', 0.6)
-    }
-    const cx0 = px + flip * 0.04 * W, cy0 = py - 0.018 * WORLD_H
-    for (let f = 0; f < 9; f++) {
-      const ang = -Math.PI * 0.9 + f * 0.42
-      splat(ctx, cx0 + Math.cos(ang) * 0.035 * W, cy0 + Math.sin(ang) * 0.007 * WORLD_H,
-        0.032 * W, 0.007 * W, ang * 0.35 * flip, f % 2 ? '#527a4e' : '#6a9861', 0.55)
-    }
+  // 顶段与底段贴图（她的画上墙）；图未就绪时先跑纯程序化底，onload 后重画
+  if (masterImg) {
+    drawSliceFeather(ctx, masterImg, 0, 0.4, 0, WORLD_H * 0.15, W, 0, 70)
+    drawSliceFeather(ctx, masterImg, 0.72, 1.0, WORLD_H * 0.84, WORLD_H, W, 220, 0)
   }
 }
 
@@ -268,6 +248,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       snapDirtyRef.current = true
     }
     fit()
+    loadMasterArt().then(() => fit())   // 底图到货重铺一次（未到时纯渐变已可看）
     const ro = new ResizeObserver(fit); ro.observe(cvs)
 
     let cam = cameraRef.current ?? 0
