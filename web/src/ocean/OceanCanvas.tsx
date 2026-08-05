@@ -12,7 +12,8 @@ import { hash01, WORLD, splatsPerMemory, hitTestOcean } from './layout-core.mjs'
 import { SKY, SAND, WATER, SEABED, CORAL_BLEACHED, FOAM, memoryColor, pearlColor } from './palette'
 
 export type FoamWave = { request_id: string; episode_id: string | null; arrivedAt: number }
-export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean }
+export type OpenTarget = { m: import('./types').VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean
+  animateEntrance: boolean }
 type Caption = { pinned: boolean; bleached: boolean; kind: string | null; strength: number; preview: string }
 type Props = {
   snap: OceanSnapshot; waves: FoamWave[]; cameraRef: RefObject<number>
@@ -270,7 +271,7 @@ export const OceanCanvas = ({ snap, waves, cameraRef, onOpen, highlightId }: Pro
       setCaption(null)
       if (capRef.current) capRef.current.style.opacity = '0'
       onOpen({ m: found.placed.m, episode_id: found.episode.episode_id,
-        sx: e.clientX, sy: e.clientY, bleached: found.placed.bleached })
+        sx: e.clientX, sy: e.clientY, bleached: found.placed.bleached, animateEntrance: true })
     }
   }
 

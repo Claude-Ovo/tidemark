@@ -11,14 +11,18 @@ import gsap from 'gsap'
 import { useGSAP } from '@gsap/react'
 import type { VizMemory } from './types'
 
-export type LensTarget = { m: VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean }
+export type LensTarget = { m: VizMemory; episode_id: string | null; sx: number; sy: number; bleached: boolean
+  animateEntrance: boolean }   // 五审 P1：键盘触发不动画——只有指针路径播泡生长
 type Props = { target: LensTarget; onClose: () => void }
 
 const fmt = (iso: string) => new Date(iso).toLocaleString(undefined,
   { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 
-const supportsBlur = typeof CSS !== 'undefined'
-  && (CSS.supports('backdrop-filter: blur(1px)') || CSS.supports('-webkit-backdrop-filter: blur(1px)'))
+// 透底可读性双闸：浏览器不支持 backdrop-filter，或用户偏好减少透明（五审非阻塞项补齐）
+const wantsOpaque = () =>
+  (typeof CSS === 'undefined'
+    || !(CSS.supports('backdrop-filter: blur(1px)') || CSS.supports('-webkit-backdrop-filter: blur(1px)')))
+  || window.matchMedia('(prefers-reduced-transparency: reduce)').matches
 
 export const BubbleLens = ({ target, onClose }: Props) => {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -27,8 +31,9 @@ export const BubbleLens = ({ target, onClose }: Props) => {
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const { m } = target
 
+  const opaque = wantsOpaque()
   const { contextSafe } = useGSAP(() => {
-    if (!reduced) {
+    if (!reduced && target.animateEntrance) {   // 键盘 Enter 直显（五审 P1），指针才看泡生长
       gsap.fromTo(bubbleRef.current, { scale: 0.15, opacity: 0 },
         { scale: 1, opacity: 1, duration: 0.55, ease: 'elastic.out(1, 0.55)' })
     }
@@ -72,11 +77,11 @@ export const BubbleLens = ({ target, onClose }: Props) => {
           transform: 'translate(-50%, -50%)', transformOrigin: '50% 50%',
           borderRadius: '50%',
           // 无 backdrop-filter 支持时加深膜底，不靠透底也可读（四审顺手项）
-          background: supportsBlur
+          background: !opaque
             ? 'radial-gradient(ellipse at 42% 38%, rgba(235,251,253,0.20), rgba(190,228,236,0.12) 52%, rgba(150,205,220,0.05) 68%, transparent 74%)'
             : 'radial-gradient(ellipse at 42% 38%, rgba(20,52,70,0.88), rgba(16,44,62,0.82) 58%, rgba(12,34,52,0.5) 70%, transparent 76%)',
-          backdropFilter: supportsBlur ? 'blur(7px) saturate(1.15)' : undefined,
-          WebkitBackdropFilter: supportsBlur ? 'blur(7px) saturate(1.15)' : undefined,
+          backdropFilter: !opaque ? 'blur(7px) saturate(1.15)' : undefined,
+          WebkitBackdropFilter: !opaque ? 'blur(7px) saturate(1.15)' : undefined,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
           textAlign: 'center', padding: '52px 58px', boxSizing: 'border-box',
           color: '#fdfbf5',

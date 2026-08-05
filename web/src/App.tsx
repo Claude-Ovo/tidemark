@@ -45,7 +45,15 @@ export const App = () => {
     openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setLens(t)
   }
-  const closeLens = () => { setLens(null); openerRef.current?.focus?.() }
+  const closeLens = () => setLens(null)
+  // 五审 P1：恢复必须发生在 lens=false【提交之后】——同一调用里 focus() 时 nav 还 inert，
+  // 浏览器会拒绝聚焦、焦点落 BODY。effect 在 commit 后跑，inert 已解除，且校验 opener 仍在文档里。
+  useEffect(() => {
+    if (lens !== null) return
+    const el = openerRef.current
+    openerRef.current = null
+    if (el?.isConnected) el.focus()
+  }, [lens])
   const cameraRef = useRef(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
@@ -158,9 +166,10 @@ export const App = () => {
                 <button
                   onFocus={() => { setFocusId(m.memory_id); scrollToMemory(m, snap.fade_threshold) }}
                   onBlur={() => setFocusId((cur) => (cur === m.memory_id ? null : cur))}
-                  onClick={() => openLens({ m, episode_id: ep.episode_id,
+                  onClick={(e) => openLens({ m, episode_id: ep.episode_id,
                     sx: window.innerWidth / 2, sy: window.innerHeight * 0.45,
-                    bleached: !m.pinned && m.effective_strength < snap.fade_threshold })}>
+                    bleached: !m.pinned && m.effective_strength < snap.fade_threshold,
+                    animateEntrance: e.detail !== 0 })}>{/* detail=0 = 键盘激活：直显 */}
                   {m.pinned ? '[pinned] ' : ''}{m.kind ?? 'memory'} at {(m.effective_strength * 100).toFixed(0)}%: {m.content_preview}
                 </button>
               </li>
