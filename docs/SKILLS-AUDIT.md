@@ -20,7 +20,7 @@
 
 **一个 skill 两边装**：所有放行 skill CC 与 Codex 同套安装，不再拆分。
 
-## 已装（CC 侧，项目级 `.claude/skills/`，共 12 个）
+## 已装（CC 侧，项目级 `.claude/skills/`，共 13 个）
 
 - 2026-08-05 gsap-core / gsap-plugins / gsap-react / gsap-scrolltrigger / gsap-timeline / gsap-performance（greensock/gsap-skills，裁决 #1）
 - 2026-08-05 improve-animations / find-animation-opportunities / apple-design / review-animations（DavidHDev/react-bits，裁决 #4）
@@ -31,4 +31,15 @@
 ## Codex 侧清单（已写频道）
 
 - SkillSpector v2.5.2（隔离 venv + `--no-llm` 纪律同上）
-- 与 CC 同套 12 个 skill（来源与裁决同上表）
+- 与 CC 同套 13 个 skill（来源与裁决同上表）
+
+## Codex 侧独立复核与安装（2026-08-05）
+
+- 独立确认隔离 venv 中 SkillSpector 为 v2.5.2；对已提交的 `.claude/skills/` 冻结快照执行
+  recursive `--no-llm` 静态扫描，13/13 执行成功，最高 40/100 MEDIUM，无可执行脚本。
+- 台账原“12 个”为算术笔误：GSAP 6 + react-bits 4 + frontend-design 1 +
+  react-best-practices 1 + design-taste 1 = **13**。
+- 新补供应链裁决：`design-taste` 的 `shadcn@latest` 与 `react-best-practices` 的裸
+  `npx svgo` 是操作示例，不会在安装时执行，允许安装；真正执行前必须查验并钉死精确包版本，
+  禁止照抄 `@latest` 或裸 `npx`。
+- Codex 从上述已审计冻结快照同步 13 个 skill；源/目标 62 个文件逐文件 SHA-256 对表，零差异。
