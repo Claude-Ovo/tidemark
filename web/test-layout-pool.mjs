@@ -142,7 +142,7 @@ t('全高 / 全低 边界集不越层', () => {
   for (const p of layoutPool(lo).placed) assert.equal(p.layer, 'receding_edge')
 })
 
-t('性能预算（P1-4）：74/500/2000 三档，空间哈希后须全部可交互', () => {
+t('性能预算（P1-4）：74/500/2000 三档布局耗时（2000 档含诚实 overflow，非全落位）', () => {
   const spread = (n, base) => Array.from({ length: n }, (_, i) => mem(base + i, (i % 97) / 100))
   const budget = [[74, 30], [500, 150], [2000, 1200]]
   for (const [n, ms] of budget) {

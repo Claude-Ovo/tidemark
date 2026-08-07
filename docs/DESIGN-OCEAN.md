@@ -158,14 +158,30 @@ UI 只能事后读取同一 trace 做只读解释。P1 的 A/B dashboard 不倒�
 forward-only 的 activity 流不能保证首次打开就有历史详情（Codex v2 一审 P1-2）。
 
 - agent-scoped（沿用 principal 隔离）；有界：全文按 cap 截断声明、归因列表分页上限。
-- 返回：全文、层级、年龄、effective_strength（同快照口径服务端实算）、
-  credited/blamed 归因（关联 receipt 评分构成）、衰减曲线参数
-  （anchor/anchor_at/half_life——曲线客户端按参数画，不逐点传）、关联记忆
-  （derived_from / credited_in / blamed_in 薄边）、**latest-outcome projection**。
+- 返回：内容（**按 principal 界定：agent 键得全文，viz viewer 键只得
+  content_preview——与 /viz/ocean 同界，抽屉文案须声明口径，不承诺 viewer 全文**，
+  三审遗留修正）、层级、年龄、effective_strength（同快照口径服务端实算）、
+  credited/blamed 归因（关联 receipt 评分构成）、**衰减曲线服务端采样点**
+  （有界点数组，同一 decayEffective 实算——客户端只描点，
+  不按 anchor/half_life 参数重算衰减，"客户端永不重算衰减"契约无例外，
+  三审遗留修正）、关联记忆（derived_from / credited_in / blamed_in 薄边）、
+  **latest-outcome projection**。
 - 边界：latest-outcome projection 只许用于展示；**动画只认 activity 流**，
   projection 不得成为第二事件源。
 - 脱敏：content 走 agent face 权限（viewer 键只见 content_preview 口径，
   与 /viz/ocean 同界）。
+
+## Demo refresh 契约（三审阈值裁决：b 为主，不迁就陈旧快照）
+
+真实 74 快照三层占用 0/3/71 证明系统确实会遗忘——这不是要修的 bug，
+但 30 秒可读性需要一份"活着"的演示数据。约束（Codex 裁定原文照录）：
+
+- **可重复脚本**，只走正常 `remember / log_event / report_outcome / pin` 路径；
+- **禁止**直接 UPDATE strength / created_at，**禁止**伪造时间；
+- 构成：保留一批真实旧记忆作 Receding；临演示创建新鲜记忆作 Anchor；
+  挑合法证据链走 credited/blamed 形成 Active 与迁移；
+- 0.70 / 0.35 仍是待校准视觉假设，不因单份 snapshot 冻结；
+  demo refresh 后的多份 snapshot 一并计入校准证据。
 
 ## 视觉验收清单 V2（Codex 起草 2026-08-07，取代旧 V-1~V-7；Codex 有权改）
 

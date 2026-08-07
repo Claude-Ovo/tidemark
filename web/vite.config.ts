@@ -6,6 +6,15 @@ import react from '@vitejs/plugin-react'
 // 由 origin custom header 贴只读 viz key（scope='viz'，进不了工具面），页面仍零凭证。
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      // 三审 P1-1：pool.html 必须进 production artifact，不能只活在 dev proxy 里
+      input: {
+        main: new URL('./index.html', import.meta.url).pathname,
+        pool: new URL('./pool.html', import.meta.url).pathname,
+      },
+    },
+  },
   server: {
     proxy: {
       '/viz': {
