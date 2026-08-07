@@ -24,7 +24,9 @@ memory 行，每次位移都是一次 persisted、applied 的塑性事件。没�
 | 外缘警戒线 | fade line | 掉线即 fade 候选 | `s <= fade_threshold`（同源 TRANSITION_CFG，禁止第二真相源） |
 
 - 层名只是**绝对阈值标尺**的注记，不是布局输入。`ANCHOR_MIN` / `RECEDING_MAX`
-  是冻结的校准常量（初值 0.70 / 0.35，原型期允许调，调后写回此处），
+  是**待校准视觉假设**（初值 0.70 / 0.35——Codex 裁定：领域里唯一硬边界是
+  fade_threshold=0.15，这两个值推不出天然分界，须拿真实多份 snapshot 离线看
+  三层占用与 30 秒可读性后**版本化冻结**，冻结前不称常量），
   **禁止任何形式的 percentile / 按当前样本重排**——同 strength 恒同半径，
   自己不变、邻居变化不得引起径向漂移（八审 P1-1 教训的极坐标版）。
 - 越靠中心越稳定，越靠外越接近遗忘。旧"深海=长期还是消失"歧义就此废除。
@@ -71,7 +73,8 @@ item 级归因上。视觉语法 = 架构真相。
 | blamed（applied） | 断裂侵蚀痕 | 下一快照向外迁移 | 同上，role=blamed |
 | cancelled | 无 | **无合法粒子可动**（attempt 级事件，零 attribution） | report-outcome 已规定 |
 | late / not applied | 无 | 零位移 | `applied === false`（reason 进抽屉，不进画面） |
-| passive decay | 缓慢变淡、随新快照外移 | 快照间差值 | 服务端 effective_strength 实算 |
+| passive decay | 随新快照缓慢外移（明暗不变——单编码通道，无第二条连续数值编码） | 快照间差值 | 服务端 effective_strength 实算 |
+| state→faded 过渡 | 一次终态 dissolve（离散状态过渡，非连续通道） | 无（粒子退场） | 快照 state 字段变化 |
 
 - 迁移动效：1.2–1.8s ease-in-out settle，**从当前 presentation value retarget**、
   可中断、不重启不弹跳；keyboard / reduced-motion 直达终态。
@@ -120,6 +123,16 @@ UI 只能事后读取同一 trace 做只读解释。P1 的 A/B dashboard 不倒�
 - 持久化 keyset 游标，排序键 `(occurred_at 微秒精确串, source_kind, source_id)`；
   游标编码沿用 waves 的 base64 方案与**微秒精度教训**（`created_at::STRING`，
   不走 JS Date 毫秒截断）。
+- **提交可见性水位（Codex v2 一审 P1-1，取代"排序键即够"的假设）**：三源时间列
+  都是事务内 `DEFAULT now()`，不是提交顺序的全局水位——旧时间戳的行可能晚提交，
+  单纯 `> cursor` 会把它永远漏掉。v1 采用 closed-watermark 简化方案：
+  1. 游标只推进到 `DB now() - SAFETY_GRACE`（closed watermark；`SAFETY_GRACE`
+     必须大于写路径事务最长时限，两者一起在 config 冻结并写 SPEC）；
+  2. 写路径事务时限显式强制（超时即弃，不允许长事务把行提交到水位线之后的过去）；
+  3. 每轮查询窗口向前重叠回读，客户端按 `(source_kind, source_id)` 幂等去重；
+  4. 回归测试必须真实复现"旧时间戳晚提交"场景（延迟提交事务 + 轮询穿越）。
+  CDC/changefeed resolved timestamp 是强方案，记为 stretch，不进 v1。
+  outbox + 写入时钟排序**不修复本问题**，不采用。
 - 事件为三源派生（不新增业务表；endpoint、游标、索引与丢失/重复回归测试计入工期）：
 
 | kind | 真源 | occurred_at | 载荷 |
@@ -139,6 +152,20 @@ UI 只能事后读取同一 trace 做只读解释。P1 的 A/B dashboard 不倒�
 
 活动流 B 是 waves 的超集（recall 事件 ≙ waves 行）。实现期两者并存，
 原型过门后 waves 合并进 activity 或保留为兼容别名——届时定，不留双真相源。
+
+### D. 记忆详情 `GET /viz/memory/:memory_id`（新增，hover/抽屉冷启动真源）
+
+forward-only 的 activity 流不能保证首次打开就有历史详情（Codex v2 一审 P1-2）。
+
+- agent-scoped（沿用 principal 隔离）；有界：全文按 cap 截断声明、归因列表分页上限。
+- 返回：全文、层级、年龄、effective_strength（同快照口径服务端实算）、
+  credited/blamed 归因（关联 receipt 评分构成）、衰减曲线参数
+  （anchor/anchor_at/half_life——曲线客户端按参数画，不逐点传）、关联记忆
+  （derived_from / credited_in / blamed_in 薄边）、**latest-outcome projection**。
+- 边界：latest-outcome projection 只许用于展示；**动画只认 activity 流**，
+  projection 不得成为第二事件源。
+- 脱敏：content 走 agent face 权限（viewer 键只见 content_preview 口径，
+  与 /viz/ocean 同界）。
 
 ## 视觉验收清单 V2（Codex 起草 2026-08-07，取代旧 V-1~V-7；Codex 有权改）
 
@@ -181,8 +208,10 @@ UI 只能事后读取同一 trace 做只读解释。P1 的 A/B dashboard 不倒�
 ## 技术方向（承 v1，范围收窄)
 
 - Web（S3+CloudFront 静态托管）；响应式。
-- Canvas 2D 优先评估（粒子数 ≤ 2000、单层同心布局，未必需要 WebGL；
-  原型期实测帧率后定）。GSAP 只驱动 settle 迁移与涟漪，不再有场景过渡。
+- Canvas 2D 优先评估（未必需要 WebGL；原型期实测帧率后定）。粒子规模 cap
+  以实测预算为准：布局回归对 74 / 500 / 2000 三档计时，产品 cap 取实测可交互
+  的档位，不保留未经证据的规模宣传数。GSAP 只驱动 settle 迁移与涟漪，
+  不再有场景过渡。
 - 数据源：真实 API（agent face / audit views，content-free 路径不变）。
 
 ## 比赛要求绑定（不变）
