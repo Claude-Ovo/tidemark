@@ -57,14 +57,20 @@ const ctx = canvas.getContext('2d')
 const meta = document.getElementById('meta')
 const scriptline = document.getElementById('scriptline')
 const DPR = Math.min(window.devicePixelRatio || 1, 2)
-const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches
+// 四审 P2：运行中响应系统无障碍偏好变化，不只在 boot 读一次
+const rmQuery = matchMedia('(prefers-reduced-motion: reduce)')
+let REDUCED = rmQuery.matches
+rmQuery.addEventListener?.('change', (e) => { REDUCED = e.matches })
 
 // particles: layout 输出 + 呈现态（pr = presentation radius，迁移持久不回跳）
-// p.ring: null | 'credited'(完整潮痕) | 'blamed'(断裂侵蚀)——全页唯一 signature
 let particles = [], fadeR = fadeLineRadius(0.15)
 let ripples = []        // { theta, r, t0 }
 let drops = []          // { theta, r, t0, spawn }（spawn: 落滴结束后留存的新粒子）
 let tweens = []         // { p, from, to, t0, dur }（可中断：新 tween 从当前 pr 起算并顶掉旧的）
+// 四审 P1-3：潮痕是事件 signature 不是常驻编码——settle 后停留 RING_STAY 再淡出，
+// 半径终态持久；最新 outcome 状态属于 hover/drawer（本原型不实现）
+let rings = []          // { p, kind: 'credited'|'blamed', t0, until }
+const RING_STAY = 4500, RING_FADE = 800
 let rafActive = false
 
 const geo = () => {
@@ -88,7 +94,7 @@ const migrate = (p, to, dur = 1500) => {
   requestDraw()
 }
 
-const anyActive = () => tweens.length || ripples.length || drops.length
+const anyActive = () => tweens.length || ripples.length || drops.length || rings.length
 const requestDraw = () => {
   if (rafActive) return
   rafActive = true
@@ -111,18 +117,23 @@ const step = (now) => {
     if (now - d.t0 >= 900 && d.spawn) { particles.push(d.spawn); d.spawn = null }  // 落滴结束→粒子留存
   }
   drops = drops.filter(d => now - d.t0 < 900)
+  rings = rings.filter(rg => now < rg.until)          // 潮痕到期即清，不留常驻残影
 }
 
-const ringMark = (x, y, rad, kind) => {
+const ringMark = (x, y, rad, kind, alpha) => {
   ctx.lineWidth = 1.4
-  ctx.strokeStyle = kind === 'credited' ? 'rgba(170,215,255,.75)' : 'rgba(150,175,200,.6)'
-  ctx.beginPath()
-  if (kind === 'credited') { ctx.arc(x, y, rad, 0, 7); ctx.stroke() }        // 完整潮痕环
+  ctx.strokeStyle = kind === 'credited' ? `rgba(170,215,255,${0.75 * alpha})` : `rgba(150,175,200,${0.6 * alpha})`
+  if (kind === 'credited') { ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.stroke() }  // 完整潮痕环
   else {                                                                      // 断裂侵蚀环：三段缺口弧
     for (const [a, b] of [[0.1, 1.7], [2.3, 3.9], [4.5, 6.0]]) {
       ctx.beginPath(); ctx.arc(x, y, rad, a, b); ctx.stroke()
     }
   }
+}
+const addRing = (p, kind) => {
+  const now = performance.now()
+  rings = rings.filter(rg => rg.p !== p)              // 同粒子新 outcome 顶掉旧痕
+  rings.push({ p, kind, t0: now, until: now + RING_STAY + RING_FADE })
 }
 
 const draw = (now = 0) => {
@@ -143,7 +154,11 @@ const draw = (now = 0) => {
     const x = cx + p.pr * R * Math.cos(p.theta), y = cy + p.pr * R * Math.sin(p.theta)
     ctx.beginPath(); ctx.arc(x, y, p.markR * R, 0, 7)
     ctx.fillStyle = 'rgba(190,215,240,.85)'; ctx.fill()
-    if (p.ring) ringMark(x, y, (p.markR + 0.008) * R, p.ring)                // 潮痕留存在粒子上
+  }
+  for (const rg of rings) {                            // 潮痕：停留后淡出，跟随粒子当前呈现位
+    const x = cx + rg.p.pr * R * Math.cos(rg.p.theta), y = cy + rg.p.pr * R * Math.sin(rg.p.theta)
+    const alpha = now < rg.t0 + RING_STAY ? 1 : Math.max(0, 1 - (now - rg.t0 - RING_STAY) / RING_FADE)
+    ringMark(x, y, (rg.p.markR + 0.008) * R, rg.kind, alpha)
   }
   for (const rp of ripples) {
     const k = (now - rp.t0) / 1400
@@ -159,15 +174,47 @@ const draw = (now = 0) => {
   }
 }
 
+// 四审 P1-1：首屏请求有界退避（0/750/1500/3000ms 共 4 次），耗尽后给显式 retry
+// action，禁止无限重试——demo 白屏（server 瞬断返回 internal_error）已实测复现过
+const fetchSnapshot = async () => {
+  const delays = [0, 750, 1500, 3000]
+  let lastErr = null
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i]) await new Promise(r => setTimeout(r, delays[i]))
+    meta.textContent = i === 0 ? 'loading /viz/ocean …' : `重试 ${i}/${delays.length - 1} …`
+    try {
+      const res = await fetch('/viz/ocean')
+      const snap = await res.json()
+      if (snap.ok) return snap
+      lastErr = new Error(snap.error || 'snapshot failed')
+    } catch (e) { lastErr = e }
+  }
+  throw lastErr
+}
+
+const showRetry = (e) => {
+  const el = document.getElementById('err')
+  el.style.display = 'grid'
+  el.innerHTML = ''
+  const box = document.createElement('div')
+  box.style.textAlign = 'center'
+  const msg = document.createElement('div')
+  msg.textContent = `数据面暂不可用（4 次退避已耗尽）：${e.message}`
+  const btn = document.createElement('button')
+  btn.textContent = '重试'
+  btn.style.cssText = 'margin-top:12px;padding:6px 22px;background:#16202c;color:#b8c7d9;border:1px solid #2c3a4c;border-radius:4px;cursor:pointer'
+  btn.onclick = () => { el.style.display = 'none'; boot().catch(showRetry) }
+  box.append(msg, btn)
+  el.append(box)
+}
+
 const boot = async () => {
   resize()
-  const res = await fetch('/viz/ocean')
-  const snap = await res.json()
-  if (!snap.ok) throw new Error(snap.error || 'snapshot failed')
+  const snap = await fetchSnapshot()
   const memories = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
   fadeR = fadeLineRadius(snap.fade_threshold)
   const { placed, overflow } = layoutPool(memories)
-  particles = placed.map(p => ({ ...p, pr: p.r, ring: null }))
+  particles = placed.map(p => ({ ...p, pr: p.r }))
   meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
     (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
   draw(performance.now())
@@ -183,7 +230,7 @@ const boot = async () => {
     const seq = [
       ['remember：一滴雨落入潮池，新粒子生成并留下', (t) => {
         if (!spawnPlace) { scriptline.textContent += '（overflow——显式，跳过）'; return }
-        const spawn = { ...spawnPlace, pr: spawnPlace.r, ring: null }
+        const spawn = { ...spawnPlace, pr: spawnPlace.r }
         if (REDUCED) { particles.push(spawn); requestDraw(); return }
         drops.push({ theta: spawnPlace.theta, r: spawnPlace.r, t0: t, spawn })
       }],
@@ -192,14 +239,14 @@ const boot = async () => {
         if (REDUCED) return                                   // reduced：无位移事件无需演
         ripples.push({ theta: p.theta, r: p.pr, t0: t })
       }],
-      ['credited (applied)：留下完整潮痕，向中心迁移', () => {
+      ['credited (applied)：留下完整潮痕（停留后淡出），向中心迁移', () => {
         const p = particles[1]
-        p.ring = 'credited'                                    // 潮痕先落，位移随后——痕是 signature
+        addRing(p, 'credited')                                 // 痕先落，位移随后；痕淡出、半径持久
         migrate(p, Math.max(POOL_CFG.PIN_RING, p.pr - 0.15))
       }],
-      ['blamed (applied)：断裂侵蚀痕，向外迁移', () => {
+      ['blamed (applied)：断裂侵蚀痕（停留后淡出），向外迁移', () => {
         const p = particles[2]
-        p.ring = 'blamed'
+        addRing(p, 'blamed')
         migrate(p, Math.min(1 - POOL_CFG.OUTER_INSET, p.pr + 0.15))
       }],
       ['cancelled / late：什么都不发生（无粒子可动）', () => {}],
@@ -217,11 +264,7 @@ const boot = async () => {
     stepSeq()
   }
 }
-boot().catch(e => {
-  const el = document.getElementById('err')
-  el.style.display = 'grid'
-  el.textContent = `原型页需要 /viz 数据面（dev: vite 代理 → :3901）：${e.message}`
-})
+boot().catch(showRetry)
 </script>
 </body>
 </html>

@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs'
 
 assert.ok(existsSync('dist/pool.html'), 'dist/pool.html missing from production build')
 const html = readFileSync('dist/pool.html', 'utf8')
-assert.ok(/assets\/pool-.*\.js/.test(html) || /type="module"/.test(html), 'pool.html has no bundled module entry')
+// 四审 P2：只认实际 hashed bundle 入口——`type="module"` fallback 会放过未 bundle 的开发入口
+assert.ok(/assets\/pool-[\w-]+\.js/.test(html), 'pool.html has no hashed bundled entry (assets/pool-*.js)')
 assert.ok(existsSync('dist/index.html'), 'dist/index.html missing')
 console.log('ok - dist contains pool.html with module entry')

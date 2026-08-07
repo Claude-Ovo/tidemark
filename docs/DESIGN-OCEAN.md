@@ -69,8 +69,8 @@ item 级归因上。视觉语法 = 架构真相。
 |---|---|---|---|
 | remember | 一滴雨落入潮池，生成新粒子 | 落点即布局位 | activity 流 `kind=remember` |
 | recall | 一次扩散涟漪 | **零位移、零变大** | activity 流 `kind=recall`（persisted receipt） |
-| credited（applied） | 完整潮痕 | 下一快照向中心迁移 | `response_json.items[].applied === true` 且 role=credited |
-| blamed（applied） | 断裂侵蚀痕 | 下一快照向外迁移 | 同上，role=blamed |
+| credited（applied） | 完整潮痕（settle 后停留 3–6s 淡出，非常驻） | 下一快照向中心迁移（半径终态持久） | `response_json.items[].applied === true` 且 role=credited |
+| blamed（applied） | 断裂侵蚀痕（同上淡出） | 下一快照向外迁移（半径终态持久） | 同上，role=blamed |
 | cancelled | 无 | **无合法粒子可动**（attempt 级事件，零 attribution） | report-outcome 已规定 |
 | late / not applied | 无 | 零位移 | `applied === false`（reason 进抽屉，不进画面） |
 | passive decay | 随新快照缓慢外移（明暗不变——单编码通道，无第二条连续数值编码） | 快照间差值 | 服务端 effective_strength 实算 |
@@ -78,6 +78,9 @@ item 级归因上。视觉语法 = 架构真相。
 
 - 迁移动效：1.2–1.8s ease-in-out settle，**从当前 presentation value retarget**、
   可中断、不重启不弹跳；keyboard / reduced-motion 直达终态。
+- **潮痕不是常驻存量编码**（Codex 四审修正措辞）：outcome ring 在 settle 后
+  停留 3–6s 淡出；半径终态持久，最新 outcome 状态留给 hover/drawer。
+  事件残影不得累积成第二套长期分类图层。
 - 指针只扰动近场粒子（微幅、非数据性）；没有全场呼吸滤镜。
 - **事件诚实**：动画只消费持久化事件流，刷新可重放、轮询不漏不重；
   禁止 optimistic 假涟漪 / 假位移。
@@ -86,7 +89,8 @@ item 级归因上。视觉语法 = 架构真相。
 
 1. **Hover**（120–180ms 延迟）→ 固定位小卡（不跟鼠标）：一句概要、层级、年龄、
    保留度、最近一次 outcome。首屏不泄精确数值。
-2. **Click / Enter** → **右侧抽屉**：全文、来源 episode、衰减曲线、
+2. **Click / Enter** → **右侧抽屉**：内容（principal-aware：agent 键全文 /
+   viz viewer 键 content_preview，抽屉声明口径——与契约 D 同界）、来源 episode、衰减曲线、
    credited/blamed 归因、receipt 评分构成、关联记忆。
    〔v1 的水泡透镜 / "同一只泡五态" 退役——Codex 裁定它是旧表现层非架构地基，
    Owner 2026-08-07 确认收回 8/5 的五态签字。〕
