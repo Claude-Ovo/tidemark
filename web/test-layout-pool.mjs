@@ -1,6 +1,7 @@
 // 潮池布局回归（DESIGN-OCEAN.md v2「布局回归断言」全项 + Codex v2 一审 P1-3/P1-4/P2-7）
 // node web/test-layout-pool.mjs；真实 74-memory 快照验收在原型阶段接真实 API 入测。
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { layoutPool, radiusOf, layerOf, strengthOf, fadeLineRadius, POOL_CFG, stableHash } from './src/pool/layout-pool.mjs'
 
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -119,6 +120,19 @@ t('角向无聚簇退化（P1-3 转移到 angle，P2-7 加严）：拟真 74', (
 t('角向无聚簇退化：突发同刻批量写入（同 created_at 秒级 tie）', () => {
   const burst = Array.from({ length: 48 }, (_, i) => mem(800 + i, 0.3 + i * 0.01, { at: '2026-08-01T00:00:00.000Z' }))
   angularAudit(burst, { maxBinShare: 0.25, maxGapRad: Math.PI / 2, minPlacedShare: 0.9 })
+})
+
+t('真实 74-memory 快照（开工门第二步硬性门）：全部落位 + 角向无聚簇 + 不变量', () => {
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/real-74.json', import.meta.url), 'utf8'))
+  assert.equal(fx.memories.length, 74)
+  const { placed, overflow } = layoutPool(fx.memories)
+  assert.equal(overflow.length, 0, '74 条真实数据必须全部落位')
+  assert.equal(placed.length, 74)
+  angularAudit(fx.memories, { maxBinShare: 0.25, maxGapRad: Math.PI / 3, minPlacedShare: 1 })
+  // 校准记录（不断言、只报告）：三层占用——ANCHOR_MIN/RECEDING_MAX 版本化冻结的输入
+  const bands = { anchor: 0, active_tide: 0, receding_edge: 0 }
+  for (const p of placed) bands[p.layer]++
+  console.log(`  # real-74 层占用 anchor/active/receding: ${bands.anchor}/${bands.active_tide}/${bands.receding_edge}（阈值待校准的实测输入）`)
 })
 
 t('全高 / 全低 边界集不越层', () => {

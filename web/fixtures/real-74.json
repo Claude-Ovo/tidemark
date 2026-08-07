@@ -1,0 +1,452 @@
+{
+ "note": "content-free layout fixture dumped from real /viz/ocean snapshot (demo-tenant/demo-agent)",
+ "snapshot_at": "2026-08-07T15:22:18.372Z",
+ "fade_threshold": 0.15,
+ "total": 74,
+ "memories": [
+  {
+   "memory_id": "5181d07a-479a-4088-94a6-cafc40c68dd7",
+   "pinned": false,
+   "effective_strength": 0.2926455191051386,
+   "created_at": "2026-07-29T14:23:03.278Z"
+  },
+  {
+   "memory_id": "367c648a-f5a5-430c-9308-1fb9e165f496",
+   "pinned": false,
+   "effective_strength": 0.2926845644889726,
+   "created_at": "2026-07-29T14:24:28.090Z"
+  },
+  {
+   "memory_id": "0bcf8d0b-e74f-46e9-b030-3bda8c424929",
+   "pinned": false,
+   "effective_strength": 0.2927675474709999,
+   "created_at": "2026-07-29T14:27:28.303Z"
+  },
+  {
+   "memory_id": "23d14ead-4e06-4459-8111-945009ae249b",
+   "pinned": false,
+   "effective_strength": 0.24854717976083504,
+   "created_at": "2026-07-29T14:27:49.201Z"
+  },
+  {
+   "memory_id": "2fe9eb75-1afb-4cc4-898c-9a706434167e",
+   "pinned": false,
+   "effective_strength": 0.2927955112281755,
+   "created_at": "2026-07-29T14:28:29.020Z"
+  },
+  {
+   "memory_id": "1f9577fe-834e-45cc-845d-6a0aad0cb158",
+   "pinned": false,
+   "effective_strength": 0.24857214961880286,
+   "created_at": "2026-07-29T14:28:45.550Z"
+  },
+  {
+   "memory_id": "bd197824-054f-4f43-affc-ecc883276c72",
+   "pinned": false,
+   "effective_strength": 0.292864196045657,
+   "created_at": "2026-07-29T14:30:58.129Z"
+  },
+  {
+   "memory_id": "8dc27189-5099-4b3f-9f44-d96a68a445d6",
+   "pinned": false,
+   "effective_strength": 0.24864103899964127,
+   "created_at": "2026-07-29T14:31:20.982Z"
+  },
+  {
+   "memory_id": "28241f0f-c27c-4834-ad20-3f383ecf6553",
+   "pinned": false,
+   "effective_strength": 0.2931898777194065,
+   "created_at": "2026-07-29T14:42:44.681Z"
+  },
+  {
+   "memory_id": "606e1c27-d177-4095-8b31-cda97c698127",
+   "pinned": false,
+   "effective_strength": 0.2489579776538474,
+   "created_at": "2026-07-29T14:43:15.522Z"
+  },
+  {
+   "memory_id": "15da15a6-5d5c-48f9-89c5-da7831977f47",
+   "pinned": false,
+   "effective_strength": 0.2841757346245776,
+   "created_at": "2026-07-30T11:20:10.103Z"
+  },
+  {
+   "memory_id": "7eef0b61-2d6c-4fa6-ade7-03396c4e07c4",
+   "pinned": false,
+   "effective_strength": 0.2841770711031761,
+   "created_at": "2026-07-30T11:20:12.741Z"
+  },
+  {
+   "memory_id": "235a6c78-4ac3-47d2-a32c-66281ce41581",
+   "pinned": false,
+   "effective_strength": 0.3703607001314394,
+   "created_at": "2026-07-30T11:20:15.972Z"
+  },
+  {
+   "memory_id": "fa19b843-3b51-4104-abc7-08ddd2be15fe",
+   "pinned": false,
+   "effective_strength": 0.2841935379674946,
+   "created_at": "2026-07-30T11:20:45.243Z"
+  },
+  {
+   "memory_id": "fdefc01e-7a7d-4c79-95f7-7f7458f5b7d9",
+   "pinned": false,
+   "effective_strength": 0.15150375813535105,
+   "created_at": "2026-07-30T11:20:47.058Z"
+  },
+  {
+   "memory_id": "9a0507c3-0d4c-4430-bb61-48ff6a2564ab",
+   "pinned": false,
+   "effective_strength": 0.15150401378405504,
+   "created_at": "2026-07-30T11:20:47.689Z"
+  },
+  {
+   "memory_id": "fd238a68-0744-4778-97e4-3658fccd4c65",
+   "pinned": false,
+   "effective_strength": 0.15150434600647017,
+   "created_at": "2026-07-30T11:20:48.509Z"
+  },
+  {
+   "memory_id": "77515616-0e8b-4a76-8b73-68fb693e1cf1",
+   "pinned": false,
+   "effective_strength": 0.15150472806314824,
+   "created_at": "2026-07-30T11:20:49.452Z"
+  },
+  {
+   "memory_id": "5942eadf-6579-48b7-856f-a03b2cf2e3f0",
+   "pinned": false,
+   "effective_strength": 0.1515050627180396,
+   "created_at": "2026-07-30T11:20:50.278Z"
+  },
+  {
+   "memory_id": "a1d7f7b2-1622-4623-9159-4a23f05330f7",
+   "pinned": false,
+   "effective_strength": 0.15150529487011155,
+   "created_at": "2026-07-30T11:20:50.851Z"
+  },
+  {
+   "memory_id": "85c715bc-ea32-48c1-9207-14140a3737fa",
+   "pinned": false,
+   "effective_strength": 0.15150582156897605,
+   "created_at": "2026-07-30T11:20:52.151Z"
+  },
+  {
+   "memory_id": "eb386432-88da-4f9d-a473-08e96655c48c",
+   "pinned": false,
+   "effective_strength": 0.15150630086653397,
+   "created_at": "2026-07-30T11:20:53.334Z"
+  },
+  {
+   "memory_id": "986fbdf3-11e3-47e0-a97c-3c0b244a89a0",
+   "pinned": false,
+   "effective_strength": 0.15150680204404682,
+   "created_at": "2026-07-30T11:20:54.571Z"
+  },
+  {
+   "memory_id": "d798af80-ec1e-4099-afd2-c0e69944db6b",
+   "pinned": false,
+   "effective_strength": 0.15150718451207565,
+   "created_at": "2026-07-30T11:20:55.515Z"
+  },
+  {
+   "memory_id": "296ba0e9-20fe-4247-aa7b-fbfff2f04c84",
+   "pinned": false,
+   "effective_strength": 0.1515075657655951,
+   "created_at": "2026-07-30T11:20:56.456Z"
+  },
+  {
+   "memory_id": "7d27306d-d5bd-4c03-ad8e-b92cc2071682",
+   "pinned": false,
+   "effective_strength": 0.1515084931758765,
+   "created_at": "2026-07-30T11:20:58.745Z"
+  },
+  {
+   "memory_id": "04983fe9-d38e-465e-a712-2d48bde4920f",
+   "pinned": false,
+   "effective_strength": 0.1515098131955826,
+   "created_at": "2026-07-30T11:21:02.003Z"
+  },
+  {
+   "memory_id": "5bbfe001-1811-41e5-8923-5eca6ce7276a",
+   "pinned": false,
+   "effective_strength": 0.15151032248802804,
+   "created_at": "2026-07-30T11:21:03.260Z"
+  },
+  {
+   "memory_id": "fdf4b700-d002-402f-8c14-7aa7a3aedbb4",
+   "pinned": false,
+   "effective_strength": 0.1515108224633431,
+   "created_at": "2026-07-30T11:21:04.494Z"
+  },
+  {
+   "memory_id": "2aa8f0c1-4438-43b4-983d-e8af199758ed",
+   "pinned": false,
+   "effective_strength": 0.1515112952940285,
+   "created_at": "2026-07-30T11:21:05.661Z"
+  },
+  {
+   "memory_id": "0017365f-de5c-4330-ae95-763429382dcf",
+   "pinned": false,
+   "effective_strength": 0.1515121935548448,
+   "created_at": "2026-07-30T11:21:07.878Z"
+  },
+  {
+   "memory_id": "79fd7ca5-80db-4da2-9055-f6586d5a7d97",
+   "pinned": false,
+   "effective_strength": 0.15151269839839898,
+   "created_at": "2026-07-30T11:21:09.124Z"
+  },
+  {
+   "memory_id": "593c93e3-b0fa-4712-83b2-0239b80bc720",
+   "pinned": false,
+   "effective_strength": 0.15151374982356047,
+   "created_at": "2026-07-30T11:21:11.719Z"
+  },
+  {
+   "memory_id": "8095f47e-bc41-4faa-aab7-76b30e720fdb",
+   "pinned": false,
+   "effective_strength": 0.15151429681063378,
+   "created_at": "2026-07-30T11:21:13.069Z"
+  },
+  {
+   "memory_id": "6b0973a2-0c15-468d-9be9-edfc64bcd43b",
+   "pinned": false,
+   "effective_strength": 0.15151490457636457,
+   "created_at": "2026-07-30T11:21:14.569Z"
+  },
+  {
+   "memory_id": "8e28a853-29ec-45be-83e2-1aa08da4e61c",
+   "pinned": false,
+   "effective_strength": 0.15151536242815858,
+   "created_at": "2026-07-30T11:21:15.699Z"
+  },
+  {
+   "memory_id": "9ea30a56-99e0-4929-915b-13aba4823cd8",
+   "pinned": false,
+   "effective_strength": 0.1515158190657948,
+   "created_at": "2026-07-30T11:21:16.826Z"
+  },
+  {
+   "memory_id": "863040b6-5734-4801-b4fb-f94c2e0b76bb",
+   "pinned": false,
+   "effective_strength": 0.1515165167880707,
+   "created_at": "2026-07-30T11:21:18.548Z"
+  },
+  {
+   "memory_id": "5ebc28f7-be94-4342-9840-2445722c8b7c",
+   "pinned": false,
+   "effective_strength": 0.15151715981371017,
+   "created_at": "2026-07-30T11:21:20.135Z"
+  },
+  {
+   "memory_id": "a1d5328b-5637-436d-865b-d80b0abe5591",
+   "pinned": false,
+   "effective_strength": 0.1515179880120644,
+   "created_at": "2026-07-30T11:21:22.179Z"
+  },
+  {
+   "memory_id": "704dad0c-9991-46da-ad3e-8e46e17ffc71",
+   "pinned": false,
+   "effective_strength": 0.15151837050833145,
+   "created_at": "2026-07-30T11:21:23.123Z"
+  },
+  {
+   "memory_id": "30af6f3e-68f9-4b7d-98de-efce5048500b",
+   "pinned": false,
+   "effective_strength": 0.15151875219518762,
+   "created_at": "2026-07-30T11:21:24.065Z"
+  },
+  {
+   "memory_id": "1ed8ca1a-5b43-42a4-95de-3978db9b5829",
+   "pinned": false,
+   "effective_strength": 0.15151923396478956,
+   "created_at": "2026-07-30T11:21:25.254Z"
+  },
+  {
+   "memory_id": "66a6aee8-631e-4c86-bf8e-737e098239fe",
+   "pinned": false,
+   "effective_strength": 0.15151961686939258,
+   "created_at": "2026-07-30T11:21:26.199Z"
+  },
+  {
+   "memory_id": "cc087329-c261-4023-90a5-c979031115ff",
+   "pinned": false,
+   "effective_strength": 0.1515199244093458,
+   "created_at": "2026-07-30T11:21:26.958Z"
+  },
+  {
+   "memory_id": "39dc86bf-f683-418e-bf14-8dfce59bfbf3",
+   "pinned": false,
+   "effective_strength": 0.15152072588003582,
+   "created_at": "2026-07-30T11:21:28.936Z"
+  },
+  {
+   "memory_id": "4a75c8ad-c02a-45fa-b03b-c3094a9f8e8c",
+   "pinned": false,
+   "effective_strength": 0.1515213754066625,
+   "created_at": "2026-07-30T11:21:30.539Z"
+  },
+  {
+   "memory_id": "e474cc2c-cdb0-4b64-a865-640cafa595ec",
+   "pinned": false,
+   "effective_strength": 0.15152188392758056,
+   "created_at": "2026-07-30T11:21:31.794Z"
+  },
+  {
+   "memory_id": "507f78be-0826-4930-8d92-5331a93b54aa",
+   "pinned": false,
+   "effective_strength": 0.1515226805462503,
+   "created_at": "2026-07-30T11:21:33.760Z"
+  },
+  {
+   "memory_id": "e1cd63ed-425d-4547-aa4a-b3b4e2fd1187",
+   "pinned": false,
+   "effective_strength": 0.1515235035071684,
+   "created_at": "2026-07-30T11:21:35.791Z"
+  },
+  {
+   "memory_id": "6d4ed79a-7fc5-4595-ae8b-19e7e8149339",
+   "pinned": false,
+   "effective_strength": 0.15152432282572786,
+   "created_at": "2026-07-30T11:21:37.813Z"
+  },
+  {
+   "memory_id": "2a22635f-1664-49c2-be3d-09b99a6dcce2",
+   "pinned": false,
+   "effective_strength": 0.15152470574319085,
+   "created_at": "2026-07-30T11:21:38.758Z"
+  },
+  {
+   "memory_id": "8506c3fb-c122-4acd-a503-b63854527498",
+   "pinned": false,
+   "effective_strength": 0.151525013293473,
+   "created_at": "2026-07-30T11:21:39.517Z"
+  },
+  {
+   "memory_id": "b0bb2752-a0b2-4420-a656-99961b5d48b4",
+   "pinned": false,
+   "effective_strength": 0.15152551899015565,
+   "created_at": "2026-07-30T11:21:40.765Z"
+  },
+  {
+   "memory_id": "6190e84d-0080-4f7a-8d16-d71a2c961e6b",
+   "pinned": false,
+   "effective_strength": 0.15152626011438475,
+   "created_at": "2026-07-30T11:21:42.594Z"
+  },
+  {
+   "memory_id": "5132acb2-c9aa-4a51-9b72-ad8cafd195d9",
+   "pinned": false,
+   "effective_strength": 0.15152701056207624,
+   "created_at": "2026-07-30T11:21:44.446Z"
+  },
+  {
+   "memory_id": "9f61a20a-2abc-41dd-8514-f7f3f519789e",
+   "pinned": false,
+   "effective_strength": 0.1515275057299209,
+   "created_at": "2026-07-30T11:21:45.668Z"
+  },
+  {
+   "memory_id": "946fbe60-6f72-4f35-8e8a-ec5ae224ff72",
+   "pinned": false,
+   "effective_strength": 0.15152848877660718,
+   "created_at": "2026-07-30T11:21:48.094Z"
+  },
+  {
+   "memory_id": "04ebd78b-0fb0-404f-bd20-7466ea55a840",
+   "pinned": false,
+   "effective_strength": 0.15152894585901913,
+   "created_at": "2026-07-30T11:21:49.222Z"
+  },
+  {
+   "memory_id": "f9aeff10-617e-49a9-8bf5-4d6ee08cb7d1",
+   "pinned": false,
+   "effective_strength": 0.15152948722791484,
+   "created_at": "2026-07-30T11:21:50.558Z"
+  },
+  {
+   "memory_id": "81b8f5ff-480c-45fc-82ea-e0d50660aa05",
+   "pinned": false,
+   "effective_strength": 0.15152989122976562,
+   "created_at": "2026-07-30T11:21:51.555Z"
+  },
+  {
+   "memory_id": "93f76182-61c8-450a-9f31-4ca4c54a35bb",
+   "pinned": false,
+   "effective_strength": 0.151530197980135,
+   "created_at": "2026-07-30T11:21:52.312Z"
+  },
+  {
+   "memory_id": "a4994473-5c6a-4ce4-98f0-b347cbe6d8ed",
+   "pinned": false,
+   "effective_strength": 0.15153068262267116,
+   "created_at": "2026-07-30T11:21:53.508Z"
+  },
+  {
+   "memory_id": "e86998e0-819b-4987-922c-337622af41e7",
+   "pinned": false,
+   "effective_strength": 0.1515310914903641,
+   "created_at": "2026-07-30T11:21:54.517Z"
+  },
+  {
+   "memory_id": "0b1945d9-9b35-49f3-a337-007668cd5e46",
+   "pinned": false,
+   "effective_strength": 0.15153171229059562,
+   "created_at": "2026-07-30T11:21:56.049Z"
+  },
+  {
+   "memory_id": "5b947e48-d2d4-49a6-99d6-1ed6b4b6d2f1",
+   "pinned": false,
+   "effective_strength": 0.15153201944987527,
+   "created_at": "2026-07-30T11:21:56.807Z"
+  },
+  {
+   "memory_id": "e6b8d34f-1d03-492f-b6bb-80c864c6e022",
+   "pinned": false,
+   "effective_strength": 0.15153255718272543,
+   "created_at": "2026-07-30T11:21:58.134Z"
+  },
+  {
+   "memory_id": "2af747f9-5b2a-4d09-9316-5ab318b148b0",
+   "pinned": false,
+   "effective_strength": 0.1515331224728958,
+   "created_at": "2026-07-30T11:21:59.529Z"
+  },
+  {
+   "memory_id": "74952c8f-35af-4b2f-977a-72be6a8d7d18",
+   "pinned": false,
+   "effective_strength": 0.15153369384359805,
+   "created_at": "2026-07-30T11:22:00.939Z"
+  },
+  {
+   "memory_id": "54f1470b-6ef7-4e57-85ac-36362419894b",
+   "pinned": false,
+   "effective_strength": 0.15153419835356224,
+   "created_at": "2026-07-30T11:22:02.184Z"
+  },
+  {
+   "memory_id": "3a226522-add4-4d7c-b317-c69315698372",
+   "pinned": false,
+   "effective_strength": 0.15153517333902383,
+   "created_at": "2026-07-30T11:22:04.590Z"
+  },
+  {
+   "memory_id": "96fa1e2b-08cc-4fd1-a135-1af3baaa2eb0",
+   "pinned": false,
+   "effective_strength": 0.15153559721246523,
+   "created_at": "2026-07-30T11:22:05.636Z"
+  },
+  {
+   "memory_id": "7a35f785-8beb-40fd-836e-57a14bd3c013",
+   "pinned": false,
+   "effective_strength": 0.543734801251699,
+   "created_at": "2026-08-03T16:26:13.481Z"
+  },
+  {
+   "memory_id": "1020b716-117f-46b3-a9ff-395a9cbca4ea",
+   "pinned": false,
+   "effective_strength": 0.5438565125512159,
+   "created_at": "2026-08-03T16:28:19.025Z"
+  }
+ ]
+}

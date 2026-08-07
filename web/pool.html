@@ -1,0 +1,161 @@
+<!doctype html>
+<!-- P0-11 v2 静态原型（开工门第二步）：真实 /viz/ocean 快照 → 记忆潮池一屏。
+     零 React 零依赖：vite dev 直接服务本页（http://localhost:5173/pool.html），
+     /viz 走 vite 代理注入 viz key（浏览器零凭证，一审 P0-1 语义不变）。
+     ?script=1 播放 scripted 因果序列（DESIGN v2 动态语法演示——标注 SCRIPTED，
+     只演语法不冒充真实事件；真实动画只认 /viz/activity，本页不实现它）。 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tidemark · 记忆潮池（静态原型）</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07090c; color: #b8c7d9;
+    font: 13px/1.5 system-ui, sans-serif; }
+  #stage { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 16px; top: 14px; user-select: none; pointer-events: none; }
+  #hud h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: #dfe9f5; letter-spacing: .04em; }
+  #hud .sub { opacity: .55; font-size: 12px; }
+  #hud .script { color: #8fb8e8; font-size: 12px; margin-top: 6px; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; color: #d98c8c; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hud">
+  <h1>记忆潮池 <span style="opacity:.4;font-weight:400">static prototype</span></h1>
+  <div class="sub" id="meta">loading /viz/ocean …</div>
+  <div class="script" id="scriptline"></div>
+</div>
+<div id="err"></div>
+<script type="module">
+import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout-pool.mjs'
+
+const canvas = document.getElementById('stage')
+const ctx = canvas.getContext('2d')
+const meta = document.getElementById('meta')
+const scriptline = document.getElementById('scriptline')
+const DPR = Math.min(window.devicePixelRatio || 1, 2)
+
+let placed = [], overflow = [], fadeR = fadeLineRadius(0.15)
+let ripples = []     // scripted：{ theta, r, t0 }（recall 涟漪，零位移）
+let drops = []       // scripted：{ theta, r, t0 }（remember 落滴）
+let migrating = null // scripted：{ p, from, to, t0, dur }（applied credited/blamed 位移）
+
+const geo = () => {
+  const w = canvas.clientWidth, h = canvas.clientHeight
+  const cx = w / 2, cy = h / 2
+  const R = Math.min(w, h) * 0.46
+  return { w, h, cx, cy, R }
+}
+const resize = () => {
+  canvas.width = canvas.clientWidth * DPR
+  canvas.height = canvas.clientHeight * DPR
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0)
+}
+addEventListener('resize', () => { resize(); draw() })
+
+const LAYER_R = {
+  anchorOuter: () => radiusOf({ pinned: false, effective_strength: POOL_CFG.ANCHOR_MIN }),
+  activeOuter: () => radiusOf({ pinned: false, effective_strength: POOL_CFG.RECEDING_MAX }),
+}
+
+const draw = (nowMs = 0) => {
+  const { w, h, cx, cy, R } = geo()
+  ctx.clearRect(0, 0, w, h)
+  // 三层标尺：极淡同心环（分层背景标尺允许用明暗——非数据粒子通道）
+  const ring = (r, alpha) => {
+    ctx.beginPath(); ctx.arc(cx, cy, r * R, 0, 7)
+    ctx.strokeStyle = `rgba(140,170,205,${alpha})`; ctx.lineWidth = 1; ctx.stroke()
+  }
+  ring(POOL_CFG.PIN_RING, 0.10)
+  ring(LAYER_R.anchorOuter(), 0.10)
+  ring(LAYER_R.activeOuter(), 0.10)
+  // fade line：外缘警戒线（虚线）
+  ctx.setLineDash([4, 6])
+  ring(fadeR, 0.22)
+  ctx.setLineDash([])
+  // 层名标注（右侧径向）
+  ctx.fillStyle = 'rgba(160,185,210,.38)'
+  ctx.textBaseline = 'middle'
+  const label = (r, text) => ctx.fillText(text, cx + r * R + 8, cy)
+  label(POOL_CFG.PIN_RING, '锚定层')
+  label(LAYER_R.anchorOuter(), '活动潮带')
+  label(LAYER_R.activeOuter(), '退潮边缘')
+  label(fadeR, 'fade')
+
+  // 粒子：单编码通道——半径=retention；明暗恒定（近黑蓝白）
+  for (const p of placed) {
+    let pr = p.r, pth = p.theta
+    if (migrating && migrating.p === p) {
+      const k = Math.min(1, (nowMs - migrating.t0) / migrating.dur)
+      const e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2   // ease-in-out
+      pr = migrating.from + (migrating.to - migrating.from) * e
+    }
+    const x = cx + pr * R * Math.cos(pth), y = cy + pr * R * Math.sin(pth)
+    ctx.beginPath(); ctx.arc(x, y, p.markR * R, 0, 7)
+    ctx.fillStyle = 'rgba(190,215,240,.85)'
+    ctx.fill()
+  }
+  // scripted 涟漪（recall：扩散、零位移）
+  const T = 1400
+  ripples = ripples.filter(r => nowMs - r.t0 < T)
+  for (const rp of ripples) {
+    const k = (nowMs - rp.t0) / T
+    const x = cx + rp.r * R * Math.cos(rp.theta), y = cy + rp.r * R * Math.sin(rp.theta)
+    ctx.beginPath(); ctx.arc(x, y, (0.01 + k * 0.09) * R, 0, 7)
+    ctx.strokeStyle = `rgba(150,200,255,${(1 - k) * 0.5})`; ctx.lineWidth = 1.5; ctx.stroke()
+  }
+  // scripted 落滴（remember）
+  drops = drops.filter(d => nowMs - d.t0 < 900)
+  for (const d of drops) {
+    const k = (nowMs - d.t0) / 900
+    const x = cx + d.r * R * Math.cos(d.theta), y = cy + d.r * R * Math.sin(d.theta)
+    ctx.beginPath(); ctx.arc(x, y, (0.004 + (1 - k) * 0.012) * R, 0, 7)
+    ctx.fillStyle = `rgba(200,225,250,${0.9 - k * 0.6})`; ctx.fill()
+  }
+}
+
+const boot = async () => {
+  resize()
+  const res = await fetch('/viz/ocean')
+  const snap = await res.json()
+  if (!snap.ok) throw new Error(snap.error || 'snapshot failed')
+  const memories = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
+  fadeR = fadeLineRadius(snap.fade_threshold)
+  ;({ placed, overflow } = layoutPool(memories))
+  meta.textContent = `agent ${snap.agent_id} · ${snap.total_memories} memories · snapshot ${snap.snapshot_at}` +
+    (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
+  draw()
+
+  // scripted 因果序列（?script=1）：只演 DESIGN v2 动态语法，明示 SCRIPTED
+  if (new URLSearchParams(location.search).get('script') === '1' && placed.length > 2) {
+    const seq = [
+      ['remember：一滴雨落入潮池', (t) => { const p = placed[0]; drops.push({ theta: p.theta, r: p.r, t0: t }) }],
+      ['recall：只激起涟漪，粒子不移动', (t) => { const p = placed[1]; ripples.push({ theta: p.theta, r: p.r, t0: t }) }],
+      ['credited (applied)：留下潮痕，向中心迁移', (t) => { const p = placed[1]; migrating = { p, from: p.r, to: Math.max(POOL_CFG.PIN_RING, p.r - 0.15), t0: t, dur: 1500 } }],
+      ['blamed (applied)：断裂侵蚀，向外迁移', (t) => { const p = placed[2]; migrating = { p, from: p.r, to: Math.min(1 - POOL_CFG.OUTER_INSET, p.r + 0.15), t0: t, dur: 1500 } }],
+      ['cancelled / late：什么都不发生（无粒子可动）', () => {}],
+      ['passive decay：随新快照缓慢外移（此处不演——它属于快照差值）', () => {}],
+    ]
+    let i = 0
+    const step = () => {
+      if (i >= seq.length) { scriptline.textContent = 'SCRIPTED 序列结束（真实动画只认 /viz/activity）'; return }
+      const [label, fx] = seq[i++]
+      scriptline.textContent = `SCRIPTED ${i}/${seq.length} · ${label}`
+      fx(performance.now())
+      setTimeout(step, 2200)
+    }
+    step()
+    const loop = (t) => { draw(t); requestAnimationFrame(loop) }
+    requestAnimationFrame(loop)
+  }
+}
+boot().catch(e => {
+  const el = document.getElementById('err')
+  el.style.display = 'grid'
+  el.textContent = `原型页需要本地 dev server（:3901）与 vite 代理：${e.message}`
+})
+</script>
+</body>
+</html>
