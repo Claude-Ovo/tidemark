@@ -60,7 +60,17 @@ const DPR = Math.min(window.devicePixelRatio || 1, 2)
 // 四审 P2：运行中响应系统无障碍偏好变化，不只在 boot 读一次
 const rmQuery = matchMedia('(prefers-reduced-motion: reduce)')
 let REDUCED = rmQuery.matches
-rmQuery.addEventListener?.('change', (e) => { REDUCED = e.matches })
+// Gate 2 P2 债②：切到 reduce 不只影响后续事件——在跑动画当场 snap 到同一信息终态
+rmQuery.addEventListener?.('change', (e) => {
+  REDUCED = e.matches
+  if (!REDUCED) return
+  for (const tw of tweens) tw.p.pr = tw.to          // 迁移直落终态
+  tweens = []
+  for (const d of drops) { if (d.spawn) { particles.push(d.spawn); d.spawn = null } }  // 待生成粒子落下
+  drops = []
+  ripples = []                                       // 移动涟漪清除；潮痕静态标记保留
+  draw(performance.now())
+})
 
 // particles: layout 输出 + 呈现态（pr = presentation radius，迁移持久不回跳）
 let particles = [], fadeR = fadeLineRadius(0.15)
@@ -94,7 +104,11 @@ const migrate = (p, to, dur = 1500) => {
   requestDraw()
 }
 
-const anyActive = () => tweens.length || ripples.length || drops.length || rings.length
+// Gate 2 P2 债①：潮痕静态停留期不算 active（约 270 帧空转）——只有淡出窗口逐帧；
+// addRing 用 timer 在 fade 起点唤醒 rAF
+const ringFading = (now) => rings.some(rg => now >= rg.t0 + RING_STAY)
+const anyActive = (now = performance.now()) =>
+  tweens.length || ripples.length || drops.length || ringFading(now)
 const requestDraw = () => {
   if (rafActive) return
   rafActive = true
@@ -134,6 +148,7 @@ const addRing = (p, kind) => {
   const now = performance.now()
   rings = rings.filter(rg => rg.p !== p)              // 同粒子新 outcome 顶掉旧痕
   rings.push({ p, kind, t0: now, until: now + RING_STAY + RING_FADE })
+  setTimeout(() => requestDraw(), RING_STAY)          // fade 起点按时唤醒，停留期零帧
 }
 
 const draw = (now = 0) => {
@@ -183,7 +198,8 @@ const fetchSnapshot = async () => {
     if (delays[i]) await new Promise(r => setTimeout(r, delays[i]))
     meta.textContent = i === 0 ? 'loading /viz/ocean …' : `重试 ${i}/${delays.length - 1} …`
     try {
-      const res = await fetch('/viz/ocean')
+      // Gate 2 P2 债③：单次 attempt 硬超时——网络半开不再无限挂，错误走既有退避/手动重试
+      const res = await fetch('/viz/ocean', { signal: AbortSignal.timeout(6000) })
       const snap = await res.json()
       if (snap.ok) return snap
       lastErr = new Error(snap.error || 'snapshot failed')
