@@ -4,7 +4,7 @@
 //   attempt 必须与 receipt 绑定的 attempt 一致——它是 credited 的唯一合法证据，不能凭空捏造
 // - payload 卫生：大小上限；台账不得复制记忆正文（§12.5，注释性约束+大小闸门兜底）
 import { createHmac, randomUUID } from 'node:crypto'
-import { inSerializableTx } from '../lib/db.mjs'
+import { inWriteTx as inSerializableTx } from '../lib/db.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 

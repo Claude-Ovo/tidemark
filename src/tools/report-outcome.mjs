@@ -6,7 +6,7 @@
 // 幂等归属：outcomes 表自身（PK tenant/outcome_request_id + payload_hmac/response_json），
 // 不占用 tool_requests——SPEC §1.5 语义所有权（migrations 013-015）。
 import { createHmac } from 'node:crypto'
-import { inSerializableTx } from '../lib/db.mjs'
+import { inWriteTx as inSerializableTx } from '../lib/db.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext } from '../lib/scheduler.mjs'

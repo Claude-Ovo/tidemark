@@ -6,7 +6,7 @@
 // - 不改 source/utility/last_rewarded_at；转换才 materialize，重复 set 是无副作用 no-op
 // - reason 为操作代号（slug），不收散文——tool_requests 会长期保留，不给正文留后门
 import { createHmac } from 'node:crypto'
-import { inSerializableTx } from '../lib/db.mjs'
+import { inWriteTx as inSerializableTx } from '../lib/db.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'
 import { canonicalJson } from '../lib/canonical-json.mjs'
 import { scheduleNext } from '../lib/scheduler.mjs'

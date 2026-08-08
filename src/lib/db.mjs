@@ -61,3 +61,17 @@ export const runTxWithPool = async (pool, fn, label) => {
 }
 
 export const inSerializableTx = (fn, label) => runTxWithPool(getPool(), fn, label)
+
+// 写路径事务 wall-clock 上限（SPEC §14，Codex 四审有条件 GO）：15s 是**整个事务**上限
+// 而非单 statement——经 CRDB transaction_timeout 强制。activity 流的 closed watermark
+// （now - 30s）依赖它：任何带 now() 时间戳的行必须在 15s 内提交或整体 abort，
+// 保证 watermark 之前不再出现晚提交的"过去"。必须 < ACTIVITY_CFG.safety_grace_ms。
+export const WRITE_TX_TIMEOUT_MS = (() => {
+  const v = Number(process.env.TIDEMARK_WRITE_TX_TIMEOUT_MS || 15000)
+  if (!Number.isInteger(v) || v < 100 || v > 30000) throw new Error(`invalid TIDEMARK_WRITE_TX_TIMEOUT_MS "${process.env.TIDEMARK_WRITE_TX_TIMEOUT_MS}"`)
+  return v
+})()
+export const inWriteTx = (fn, label) => runTxWithPool(getPool(), async (c) => {
+  await c.query(`SET LOCAL transaction_timeout = '${WRITE_TX_TIMEOUT_MS}ms'`)
+  return fn(c)
+}, label)

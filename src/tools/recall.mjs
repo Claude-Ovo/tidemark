@@ -4,7 +4,7 @@
 // 持久化不变量（§12.5）：recall_requests.receipt_json 绝不含记忆正文——只存 ID 与分数组件。
 // 正文在响应时 hydrate；replay 时按 (tenant, agent) 重新 hydrate，已删除的返回 [deleted] 且不注入。
 import { createHmac, createHash, randomUUID } from 'node:crypto'
-import { inSerializableTx } from '../lib/db.mjs'
+import { inWriteTx as inSerializableTx } from '../lib/db.mjs'
 import { embed, embedProviderName, embedModelId } from '../lib/embed.mjs'
 import { toVectorLiteral } from '../lib/vector-canonical.mjs'
 import { resolveHmacKey } from '../lib/config.mjs'

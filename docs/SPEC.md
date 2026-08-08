@@ -359,3 +359,11 @@ v1.0 全部保留（移至 credited 路径），新增：
 ## 13. 文档同步义务（v1.1 起生效）
 
 SPEC 变更时同一提交内同步：CODEX_CHANNEL.md 结论区（decision log）、ARCHITECTURE.md（外化简述）、RESEARCH.md（若涉及叙事）。本次已同步：ARCHITECTURE.md 去除 reinforce-on-recall 与陪伴 agent 表述；RESEARCH.md 去除 KMS 表述。
+
+## 14. Viz activity 流（2026-08-08，Gate 2 后增补；契约详文见 DESIGN-OCEAN.md 契约 B）
+
+- `GET /viz/activity?after=<cursor>`：三源派生（memories.created_at / recall_requests.created_at / outcomes.reported_at），确定性全序 `(occurred_at 微秒, source_kind, source_id)`。
+- **closed watermark**：durable cursor 只推进到 `DB now() - SAFETY_GRACE`；hot-window（watermark 之后至 now）事件立即返回但会在后续轮重放，客户端按 `(source_kind, source_id)` 幂等去重。
+- **配置冻结**：`SAFETY_GRACE = 30s`（`src/viz/activity.mjs ACTIVITY_CFG`）；**写路径事务 wall-clock 上限 = 15s**（`TIDEMARK_WRITE_TX_TIMEOUT_MS`，经 CRDB `transaction_timeout` 强制，整事务而非单 statement）。SAFETY_GRACE 必须 > 写事务上限。
+- 消费规则：remember 生成粒子 / recall 只涟漪 / 仅 `applied=true` 的 credited/blamed item 触发位移 / cancelled 无 item / `applied=false` 的 reason 只进 drawer。
+- 回归五场景：<=15s 晚提交在 watermark 关闭后恰好一次；>15s 事务 abort 且无事件；hot-window 重放不重复消费；同微秒顺序稳定；remount/StrictMode 去重不失效。

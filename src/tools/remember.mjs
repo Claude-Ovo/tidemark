@@ -1,7 +1,7 @@
 // remember：写入卫生闸门 -> (accepted 时事务外 embedding) -> 单事务 claim tool_requests + INSERT memories
 // SPEC §4/§5/§12 + 结论 21/23/28。source 由 server 按调用路径分配（agent tool = agent_inferred）。
 import { createHmac, randomUUID } from 'node:crypto'
-import { inSerializableTx } from '../lib/db.mjs'
+import { inWriteTx as inSerializableTx } from '../lib/db.mjs'
 import { runAdmissionGate, QUARANTINE_TTL_HOURS } from '../lib/admission.mjs'
 import { embed } from '../lib/embed.mjs'
 import { canonicalDigest, toVectorLiteral } from '../lib/vector-canonical.mjs'

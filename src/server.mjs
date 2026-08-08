@@ -14,6 +14,7 @@ import { reportOutcomeTool } from './tools/report-outcome.mjs'
 import { pinTool } from './tools/pin.mjs'
 import { forgetMemory } from './admin/forget.mjs'
 import { vizOcean, vizWaves } from './viz/ocean.mjs'
+import { vizActivity } from './viz/activity.mjs'
 import { embedModelId } from './lib/embed.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
@@ -98,6 +99,12 @@ app.get('/viz/waves', async (req, res) => {
   const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
   try { res.json(await vizWaves({ principal, after: req.query.after, limit: req.query.limit })) }
   catch (e) { console.error(JSON.stringify({ evt: 'viz_waves_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
+})
+// P0-11 v2 活动流（契约 B + SPEC §14）：closed watermark + hot-window 重放，客户端去重
+app.get('/viz/activity', async (req, res) => {
+  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
+  try { res.json(await vizActivity({ principal, after: req.query.after, limit: req.query.limit })) }
+  catch (e) { console.error(JSON.stringify({ evt: 'viz_activity_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
 })
 
 // P0-08 forget：owner/admin HTTP 面（非 agent 工具，冻结 §12 五工具不变）。
