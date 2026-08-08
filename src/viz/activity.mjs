@@ -25,24 +25,42 @@ const decodeCursor = (after) => {
   if (!at || Number.isNaN(new Date(at).getTime())) throw new Error('bad')
   return { at, kind: kind ?? '', id: id ?? '' }
 }
+// snapshot-bounded page token（Codex 二审 P1-1）：ephemeral 翻页必须冻结
+// {起点元组, checkpoint(=首响应的 durable cursor), upper_bound(=首响应 server_now)}——
+// 每页查询限定 <= upper_bound、durable cursor 恒回冻结 checkpoint，不随页推进。
+// 否则慢 drain 期间合法晚提交（<=15s）的行会被"越过 token 起点 + 新 watermark"永久跳过。
+const encodePageToken = (t) => 'P.' + Buffer.from(JSON.stringify(t)).toString('base64')
+const decodePageToken = (s) => {
+  const t = JSON.parse(Buffer.from(String(s).slice(2), 'base64').toString('utf8'))
+  if (!t.at || !t.checkpoint || !t.upper) throw new Error('bad')
+  return t
+}
 // 确定性全序：(occurred_at exact, kind, id)——exact 串字典序即时间序
 const tupleCmp = (a, b) =>
   (a.at_exact < b.at_exact ? -1 : a.at_exact > b.at_exact ? 1 : 0) ||
   (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) ||
   (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0)
-export const vizActivity = async ({ principal, after, limit }) => {
+// graceMs 仅测试注入（加速"watermark 越过晚提交"场景，免等真实 30s）；生产路由不传
+export const vizActivity = async ({ principal, after, limit, graceMs }) => {
   if (!principal) return { ok: false, error: 'unauthorized' }
   const { tenant_id, agent_id } = principal
   let cur = { at: '1970-01-01 00:00:00+00', kind: '', id: '' }
+  let page = null   // 冻结 page token（翻页模式）
   if (after) {
-    try { cur = decodeCursor(after) } catch { return { ok: false, error: 'cursor_invalid' } }
+    try {
+      if (String(after).startsWith('P.')) {
+        page = decodePageToken(after)
+        cur = { at: page.at, kind: page.kind ?? '', id: page.id ?? '' }
+      } else cur = decodeCursor(after)
+    } catch { return { ok: false, error: 'cursor_invalid' } }
   }
   const n = Math.min(Math.max(1, Number(limit) || ACTIVITY_CFG.default_limit), ACTIVITY_CFG.max_limit)
+  const grace = Number.isFinite(graceMs) ? Number(graceMs) : ACTIVITY_CFG.safety_grace_ms
 
   return inSerializableTx(async (c) => {
     const wm = (await c.query(
       `SELECT (now() - $1::INTERVAL)::STRING AS wm_exact, now()::STRING AS now_exact`,
-      [`${ACTIVITY_CFG.safety_grace_ms} milliseconds`])).rows[0]
+      [`${grace} milliseconds`])).rows[0]
 
     // Codex activity 一审 P1-1：完整三元组 keyset **下推 SQL**——JS 过滤 SQL LIMIT 截过
     // 的行会永久跳行（170 条同微秒反例）。固定 kind 的源，谓词按 kind 与 cur.kind 的
@@ -56,11 +74,14 @@ export const vizActivity = async ({ principal, after, limit }) => {
     }
     const q = async (kind, sql, baseParams, mapRow) => {
       const pred = srcPredicate(kind, sql.col, sql.id)
+      // 翻页模式：查询窗口冻结在 token 的 upper_bound——drain 只吐首响应快照内的事件，
+      // 期间的新写/迟提交留给下一轮从冻结 checkpoint 重放
+      const ub = page ? ` AND ${sql.col} <= $${3 + pred.params.length}::TIMESTAMPTZ` : ''
       return (await c.query(
         `SELECT ${sql.select}, ${sql.col}::STRING AS at_exact FROM ${sql.from}
-         WHERE tenant_id=$1 AND agent_id=$2 ${sql.extra ?? ''} AND ${pred.sql}
+         WHERE tenant_id=$1 AND agent_id=$2 ${sql.extra ?? ''} AND ${pred.sql}${ub}
          ORDER BY ${sql.col}, ${sql.id} LIMIT ${fetchN}`,
-        [...baseParams, ...pred.params])).rows.map(mapRow)
+        [...baseParams, ...pred.params, ...(page ? [page.upper] : [])])).rows.map(mapRow)
     }
     const remembers = await q('remember',
       { select: 'memory_id, created_at', col: 'created_at', id: 'memory_id', from: 'memories', extra: `AND admission='accepted'` },
@@ -91,15 +112,23 @@ export const vizActivity = async ({ principal, after, limit }) => {
     // durable cursor：backlog 截断（最后返回事件 <= watermark，含恰等边界——P1-1 修订，
     // 恰等 watermark 的大组不得被 ~|~ 哨兵跳过）→ 停在最后返回事件；否则推进到 watermark。
     // hot-window 事件永远不入 durable cursor——下轮重放，客户端 (kind,id) 去重。
-    const backlogTruncated = hasMore && last && last.at_exact <= wm.wm_exact
-    // durable cursor 永远不越 watermark：客户端用 ephemeral page_cursor（可能在 hot 区）
-    // 翻页时，durable 也只回 watermark 哨兵——绝不把 ephemeral token 回流成 checkpoint
-    const cursor = backlogTruncated
-      ? encodeCursor(last.at_exact, last.kind, last.event_id)
-      : encodeCursor(wm.wm_exact, '~', '~')
-    // Codex 一审 P1-4：hot-window 截断也要能当轮 drain——ephemeral page token 指向
-    // 最后返回事件，只用于本轮连续翻页，durable checkpoint 仍是 cursor
-    const pageCursor = hasMore && last ? encodeCursor(last.at_exact, last.kind, last.event_id) : null
+    let cursor, pageCursor
+    if (page) {
+      // 翻页模式：durable 恒回冻结 checkpoint（Codex 二审 P1-1——绝不随页重算 watermark）
+      cursor = page.checkpoint
+      pageCursor = hasMore && last
+        ? encodePageToken({ at: last.at_exact, kind: last.kind, id: last.event_id, checkpoint: page.checkpoint, upper: page.upper })
+        : null
+    } else {
+      const backlogTruncated = hasMore && last && last.at_exact <= wm.wm_exact
+      cursor = backlogTruncated
+        ? encodeCursor(last.at_exact, last.kind, last.event_id)
+        : encodeCursor(wm.wm_exact, '~', '~')
+      // 首响应铸造冻结 token：{起点=最后返回事件, checkpoint=本轮 durable, upper=本轮 server_now}
+      pageCursor = hasMore && last
+        ? encodePageToken({ at: last.at_exact, kind: last.kind, id: last.event_id, checkpoint: cursor, upper: wm.now_exact })
+        : null
+    }
 
     const hotReplay = events.some(ev => ev.at_exact >= wm.wm_exact)
     return {

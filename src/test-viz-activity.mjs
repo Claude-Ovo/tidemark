@@ -178,6 +178,47 @@ try {
     assert.ok(durAt <= r2.watermark_at)
   })
 
+  await t('A10 冻结 page token：drain 期间合法晚提交绝不被永久越过（Codex 二审反例）', async () => {
+    // 1) 推进 durable 到稳态
+    let D0, guard = 0
+    for (let after; guard < 20; guard++) {
+      const r = await vizActivity({ principal, after, limit: 200 })
+      D0 = r.cursor
+      if (!r.has_more) break
+      after = r.cursor
+    }
+    const pool = getPool()
+    const c1 = await pool.connect()
+    const lateId = randomUUID()
+    const hotIds = Array.from({ length: 6 }, () => randomUUID())
+    try {
+      await c1.query('BEGIN')
+      await insRecall(c1, lateId)                                    // T1 @t0 未提交
+      await new Promise(r => setTimeout(r, 400))
+      await inWriteTx(async (c) => insRecallBatch(c, hotIds), 'act-a10-hot')  // H > t0 已提交
+      const r1 = await vizActivity({ principal, after: D0, limit: 2 })
+      assert.equal(r1.has_more, true)
+      assert.ok(r1.page_cursor?.startsWith('P.'), '翻页 token 必须是冻结形态')
+      await c1.query('COMMIT')                                       // T1 合法晚提交（<15s）
+      // 2) drain 整条 token 链：durable 恒等冻结 checkpoint，绝不随页重算
+      const dedupe = makeDedupe()
+      dedupe(r1.events)
+      let lateSeen = r1.events.filter(e => e.event_id === lateId).length
+      let pa = r1.page_cursor
+      for (let i = 0; i < 30 && pa; i++) {
+        const r = await vizActivity({ principal, after: pa, limit: 50 })
+        assert.equal(r.cursor, r1.cursor, '翻页期间 durable cursor 必须恒等冻结 checkpoint')
+        lateSeen += dedupe(r.events).filter(e => e.event_id === lateId).length
+        pa = r.has_more ? r.page_cursor : null
+      }
+      // 3) 下一轮从冻结 checkpoint 起步；graceMs 注入让 watermark 越过 t0（免等 30s）——
+      //    无论 drain 期间是否撞见过 T1，全程去重后必须恰好一次，绝不为零（永久漏 = 旧 bug）
+      const r2 = await vizActivity({ principal, after: r1.cursor, graceMs: 200, limit: 500 })
+      lateSeen += dedupe(r2.events).filter(e => e.event_id === lateId).length
+      assert.equal(lateSeen, 1, `晚提交行去重后必须恰好一次（实际 ${lateSeen}——0 即永久漏）`)
+    } finally { c1.release() }
+  })
+
   await t('A9 配置守卫：29999 接受 / 30000 拒绝（严格不等式）', async () => {
     const { execSync } = await import('node:child_process')
     const probe = (v) => {
