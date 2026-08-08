@@ -100,7 +100,7 @@ rmQuery.addEventListener?.('change', (e) => {
   if (!REDUCED) return
   for (const tw of tweens) tw.p.pr = tw.to          // 迁移直落终态
   tweens = []
-  for (const d of drops) { if (d.spawn) { particles.push(d.spawn); addOverlayButton(d.spawn); d.spawn = null } }  // 待生成粒子落下
+  for (const d of drops) { if (d.spawn) { attachParticle(d.spawn); d.spawn = null } }  // 待生成粒子落下
   drops = []
   ripples = []                                       // 移动涟漪清除；潮痕静态标记保留
   draw(performance.now())
@@ -147,7 +147,14 @@ const requestDraw = () => {
   if (rafActive) return
   rafActive = true
   const loop = (t) => {
-    step(t); draw(t)
+    // 异常护栏：draw 一旦抛错不得把 rafActive 卡死在 true（否则后续 requestDraw 全部
+    // 空操作、step 永不再跑——spawn 不 attach、过期 drop 不清的连锁事故，实测抓获）
+    try {
+      step(t); draw(t)
+    } catch (e) {
+      rafActive = false
+      throw e
+    }
     if (anyActive()) requestAnimationFrame(loop)
     else rafActive = false                         // 三审：无活跃动画即停帧，不空转
   }
@@ -162,7 +169,7 @@ const step = (now) => {
   tweens = tweens.filter(tw => now - tw.t0 < tw.dur)
   ripples = ripples.filter(r => now - r.t0 < 1400)
   for (const d of drops) {
-    if (now - d.t0 >= 900 && d.spawn) { particles.push(d.spawn); addOverlayButton(d.spawn); d.spawn = null }  // 落滴结束→粒子+按钮留存
+    if (now - d.t0 >= 900 && d.spawn) { attachParticle(d.spawn); d.spawn = null }  // 落滴结束→粒子+按钮留存
   }
   drops = drops.filter(d => now - d.t0 < 900)
   rings = rings.filter(rg => now < rg.until)          // 潮痕到期即清，不留常驻残影
@@ -218,7 +225,7 @@ const draw = (now = 0) => {
   for (const d of drops) {
     const k = (now - d.t0) / 900
     const x = cx + d.r * R * Math.cos(d.theta), y = cy + d.r * R * Math.sin(d.theta)
-    ctx.beginPath(); ctx.arc(x, y, (0.004 + (1 - k) * 0.012) * R, 0, 7)
+    ctx.beginPath(); ctx.arc(x, y, Math.max(0, 0.004 + (1 - k) * 0.012) * R, 0, 7)   // 防负半径（过期 drop 防御）
     ctx.fillStyle = `rgba(200,225,250,${0.9 - k * 0.6})`; ctx.fill()
   }
   if (typeof syncOverlay === 'function') syncOverlay()   // 按钮与 painted anchor 同帧
@@ -234,7 +241,7 @@ const fetchSnapshot = async () => {
     meta.textContent = i === 0 ? 'loading /viz/ocean …' : `重试 ${i}/${delays.length - 1} …`
     try {
       // Gate 2 P2 债③：单次 attempt 硬超时——网络半开不再无限挂，错误走既有退避/手动重试
-      const res = await fetch('/viz/ocean', { signal: AbortSignal.timeout(6000) })
+      const res = await fetch('/viz/ocean', { signal: AbortSignal.timeout(20000) })  // CRDB 冷唤醒实测可达 20s+
       const snap = await res.json()
       if (snap.ok) return snap
       lastErr = new Error(snap.error || 'snapshot failed')
@@ -360,7 +367,9 @@ const openDrawer = async (p, opener) => {
       <div class="meta">${esc(String(a.reported_at).slice(0, 19))} · ${esc(a.episode_id ?? '')}</div></div>`).join('') || '<div class="meta">尚无 outcome——只被召回过的记忆不会移动</div>'}
     ${d.related.length ? `<div class="sec">关联</div>` + d.related.map(r => `<div class="attr">${r.kind} · ${esc(r.memory_id.slice(0, 8))}</div>`).join('') : ''}
   `
-  drawer.querySelector('.close').onclick = closeDrawer
+  const newClose = drawer.querySelector('.close')
+  newClose.onclick = closeDrawer
+  newClose.focus()          // 二审 P1-1a：innerHTML 重写销毁了持焦的旧 close——稳定详情态显式移焦
 }
 const closeDrawer = () => {
   guard.close()
@@ -377,6 +386,9 @@ const placeBtn = (b, p) => {
   const [x, y] = anchorXY(p)
   b.style.transform = `translate(${(x - 11).toFixed(1)}px, ${(y - 11).toFixed(1)}px)`
 }
+// 二审 P1-2：粒子入场收口成一个函数——三条路径（drop 完成/切 reduce flush/初始 reduce 直落）
+// 共用，粒子与按钮永远同步
+const attachParticle = (p) => { particles.push(p); addOverlayButton(p) }
 const addOverlayButton = (p) => {
   const m = memIndex.get(p.memory_id)
   const b = document.createElement('button')
@@ -398,9 +410,9 @@ const syncOverlay = () => {           // draw 帧末调用：迁移中的粒子�
   for (const [p, b] of btnOf) placeBtn(b, p)
 }
 let resizeRaf = 0
-addEventListener('resize', () => {    // rAF 合并重建
-  cancelAnimationFrame(resizeRaf)
-  resizeRaf = requestAnimationFrame(() => buildOverlay())
+addEventListener('resize', () => {    // 二审 P1-1b：resize 不重建（重建会把 drawerOpener 变孤儿节点，
+  cancelAnimationFrame(resizeRaf)     // 焦点归还失效）——按钮成员只随 particle 生命周期变，位置 rAF 同步
+  resizeRaf = requestAnimationFrame(() => syncOverlay())
 })
 
 const boot = async () => {
@@ -428,7 +440,7 @@ const boot = async () => {
       ['remember：一滴雨落入潮池，新粒子生成并留下', (t) => {
         if (!spawnPlace) { scriptline.textContent += '（overflow——显式，跳过）'; return }
         const spawn = { ...spawnPlace, pr: spawnPlace.r }
-        if (REDUCED) { particles.push(spawn); requestDraw(); return }
+        if (REDUCED) { attachParticle(spawn); requestDraw(); return }   // 初始 reduce 支同样得按钮（二审 P1-2）
         drops.push({ theta: spawnPlace.theta, r: spawnPlace.r, t0: t, spawn })
       }],
       ['recall：只激起涟漪，粒子不移动', (t) => {
@@ -451,7 +463,7 @@ const boot = async () => {
     ]
     let i = 0
     const stepSeq = () => {
-      if (i >= seq.length) { scriptline.textContent = 'SCRIPTED 序列结束（真实动画只认 /viz/activity）'; draw(performance.now()); return }
+      if (i >= seq.length) { scriptline.textContent = 'SCRIPTED 序列结束（真实动画只认 /viz/activity）'; requestDraw(); return }   // 走 step→draw，不裸 draw
       const [label, fx] = seq[i++]
       scriptline.textContent = `SCRIPTED ${i}/${seq.length} · ${label}`
       fx(performance.now())
