@@ -29,9 +29,39 @@
   #legend .swatch.dash { border-top-style: dashed; }
   #legend .dir { opacity: .6; margin-top: 2px; }
   #err { position: fixed; inset: 0; display: none; place-items: center; color: #d98c8c; }
+  /* hover 固定卡：不跟鼠标（GPT 稿采纳项），120-180ms 延迟出现 */
+  #hovercard { position: fixed; right: 16px; top: 64px; width: 260px; padding: 10px 12px;
+    background: rgba(13,18,24,.92); border: 1px solid #223042; border-radius: 6px;
+    font-size: 12px; line-height: 1.6; display: none; pointer-events: none; z-index: 5; }
+  #hovercard .k { opacity: .5; margin-right: 6px; }
+  #hovercard .preview { margin-top: 6px; opacity: .8; }
+  /* 右侧抽屉：detail 真源；reduced-motion 下无过渡 */
+  #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 92vw);
+    background: #0b0f14; border-left: 1px solid #223042; padding: 18px 20px;
+    transform: translateX(105%); transition: transform .28s ease; overflow-y: auto;
+    z-index: 10; font-size: 13px; line-height: 1.65; }
+  #drawer.open { transform: translateX(0); }
+  @media (prefers-reduced-motion: reduce) { #drawer { transition: none; } }
+  #drawer h2 { font-size: 13px; margin: 0 0 4px; color: #dfe9f5; }
+  #drawer .meta { font-size: 11px; opacity: .5; margin-bottom: 12px; }
+  #drawer .content { white-space: pre-wrap; background: rgba(140,170,205,.05);
+    padding: 10px; border-radius: 4px; margin-bottom: 4px; }
+  #drawer .scope { font-size: 11px; opacity: .45; margin-bottom: 12px; }
+  #drawer .sec { font-size: 11px; letter-spacing: .1em; opacity: .5; margin: 14px 0 6px; }
+  #drawer .attr { padding: 6px 0; border-top: 1px solid rgba(140,170,205,.08); font-size: 12px; }
+  #drawer .attr .amt { float: right; opacity: .7; }
+  #drawer button.close { position: absolute; top: 12px; right: 14px; background: none;
+    border: 1px solid #2c3a4c; color: #b8c7d9; border-radius: 4px; padding: 2px 10px; cursor: pointer; }
+  #curve { width: 100%; height: 72px; margin: 4px 0; }
+  /* a11y overlay：每粒子一个真实可聚焦 button（canvas 命中配同步 DOM，契约） */
+  #overlay { position: fixed; inset: 0; pointer-events: none; }
+  #overlay button { position: absolute; transform: translate(-50%, -50%); width: 22px; height: 22px;
+    background: transparent; border: none; border-radius: 50%; pointer-events: auto; cursor: pointer; padding: 0; }
+  #overlay button:focus-visible { outline: 1.5px solid rgba(170,215,255,.9); outline-offset: 2px; }
   @media (max-width: 480px) {
     #hud .thesis { font-size: 13px; }
     #legend { font-size: 10px; line-height: 1.7; }
+    #hovercard { right: 8px; left: 8px; width: auto; }
   }
 </style>
 </head>
@@ -49,6 +79,9 @@
   <div class="dir">半径 = 保留强度（越靠中心越稳定）</div>
 </div>
 <div id="err"></div>
+<div id="hovercard" role="status"></div>
+<div id="drawer" role="dialog" aria-modal="false" aria-label="记忆详情"></div>
+<div id="overlay"></div>
 <script type="module">
 import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout-pool.mjs'
 
@@ -224,13 +257,114 @@ const showRetry = (e) => {
   el.append(box)
 }
 
+// ---- 交互层（契约 D + V-6：hover 固定卡吃快照数据零请求，drawer 打 detail 端点；
+//      hover/focus/click/drawer 全部从 layout 最终 painted anchor 展开——唯一坐标源）----
+const hovercard = document.getElementById('hovercard')
+const drawer = document.getElementById('drawer')
+const overlay = document.getElementById('overlay')
+const memIndex = new Map()      // memory_id -> 快照 memory 行
+let drawerOpener = null         // ESC 后焦点归还
+const LAYER_ZH = { anchor: '锚定层', active_tide: '活动潮带', receding_edge: '退潮边缘' }
+
+const anchorXY = (p) => {
+  const { cx, cy, R } = geo()
+  return [cx + p.pr * R * Math.cos(p.theta), cy + p.pr * R * Math.sin(p.theta)]
+}
+const ageDays = (iso) => Math.max(0, (Date.now() - Date.parse(iso)) / 864e5).toFixed(1)
+
+let hoverTimer = null
+const showHover = (p) => {
+  const m = memIndex.get(p.memory_id)
+  if (!m) return
+  hovercard.innerHTML = ''
+  const rows = [
+    ['kind', m.kind ?? '—'], ['层', (m.pinned ? 'pinned · ' : '') + LAYER_ZH[p.layer]],
+    ['年龄', `${ageDays(m.created_at)} 天`], ['保留', `${(p.s * 100).toFixed(1)}%`],
+    ['结果', `credited ${m.credited} / blamed ${m.blamed}`],
+  ]
+  for (const [k, v] of rows) {
+    const d = document.createElement('div')
+    const ks = document.createElement('span'); ks.className = 'k'; ks.textContent = k
+    d.append(ks, document.createTextNode(String(v)))
+    hovercard.append(d)
+  }
+  const pv = document.createElement('div'); pv.className = 'preview'
+  pv.textContent = (m.content_preview ?? '').slice(0, 80)
+  hovercard.append(pv)
+  hovercard.style.display = 'block'
+}
+const hideHover = () => { clearTimeout(hoverTimer); hovercard.style.display = 'none' }
+const hoverIntent = (p) => { clearTimeout(hoverTimer); hoverTimer = setTimeout(() => showHover(p), 150) }
+
+const esc = (s) => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML }
+const openDrawer = async (p, opener) => {
+  drawerOpener = opener ?? null
+  drawer.innerHTML = '<button class="close" aria-label="关闭">ESC</button><div class="meta">loading…</div>'
+  drawer.classList.add('open')
+  drawer.querySelector('.close').onclick = closeDrawer
+  let d
+  try {
+    const res = await fetch(`/viz/memory/${p.memory_id}`, { signal: AbortSignal.timeout(6000) })
+    d = await res.json()
+  } catch (e) { d = { ok: false, error: e.message } }
+  if (!d.ok) { drawer.querySelector('.meta').textContent = `加载失败：${d.error}（ESC 关闭后重试）`; return }
+  const m = d.memory
+  const curvePts = d.curve.filter(c => c.s != null)
+  const svgPts = curvePts.map((c, i) => `${(i / Math.max(1, curvePts.length - 1) * 100).toFixed(2)},${(64 - c.s * 60).toFixed(2)}`).join(' ')
+  const fadeY = (64 - d.fade_threshold * 60).toFixed(2)
+  drawer.innerHTML = `
+    <button class="close" aria-label="关闭">ESC</button>
+    <h2>${esc(m.kind ?? 'memory')} · ${m.pinned ? 'pinned' : esc(m.state)}</h2>
+    <div class="meta">${esc(m.memory_id.slice(0, 8))} · ${esc(m.episode_id ?? 'loose')} · ${ageDays(m.created_at)} 天前 · 保留 ${(m.effective_strength * 100).toFixed(1)}%</div>
+    <div class="content">${esc(m.content)}</div>
+    <div class="scope">${m.content_scope === 'full' ? '全文' : '预览口径（viewer 键）'}${m.content_truncated ? ' · 已截断' : ''}</div>
+    <div class="sec">衰减曲线（服务端采样 ±96h）</div>
+    <svg id="curve" viewBox="0 0 100 68" preserveAspectRatio="none">
+      <line x1="0" y1="${fadeY}" x2="100" y2="${fadeY}" stroke="rgba(150,175,200,.3)" stroke-dasharray="2 2" stroke-width=".5"/>
+      <polyline points="${svgPts}" fill="none" stroke="rgba(170,215,255,.85)" stroke-width="1"/>
+    </svg>
+    <div class="sec">归因（最近 ${d.attributions.length} 条）</div>
+    ${d.attributions.map(a => `<div class="attr">${a.role === 'credited' ? '潮痕 credited' : '侵蚀 blamed'}${a.applied ? '' : `（未应用：${esc(a.reason ?? '')}）`}
+      <span class="amt">${a.plasticity ? `${a.plasticity.effective_before} → ${a.plasticity.strength_anchor_after}` : ''}</span>
+      <div class="meta">${esc(String(a.reported_at).slice(0, 19))} · ${esc(a.episode_id ?? '')}</div></div>`).join('') || '<div class="meta">尚无 outcome——只被召回过的记忆不会移动</div>'}
+    ${d.related.length ? `<div class="sec">关联</div>` + d.related.map(r => `<div class="attr">${r.kind} · ${esc(r.memory_id.slice(0, 8))}</div>`).join('') : ''}
+  `
+  drawer.querySelector('.close').onclick = closeDrawer
+}
+const closeDrawer = () => {
+  drawer.classList.remove('open')
+  if (drawerOpener) { drawerOpener.focus(); drawerOpener = null }
+}
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDrawer(); hideHover() } })
+
+// a11y overlay：每粒子一个真实 button（Tab 巡航/Enter 原生获得；canvas 命中配同步 DOM）
+const buildOverlay = () => {
+  overlay.innerHTML = ''
+  for (const p of particles) {
+    const m = memIndex.get(p.memory_id)
+    const b = document.createElement('button')
+    const [x, y] = anchorXY(p)
+    b.style.left = `${x}px`; b.style.top = `${y}px`
+    b.setAttribute('aria-label', `${LAYER_ZH[p.layer]} 记忆：${(m?.content_preview ?? '').slice(0, 40)}`)
+    b.addEventListener('mouseenter', () => hoverIntent(p))
+    b.addEventListener('mouseleave', hideHover)
+    b.addEventListener('focus', () => showHover(p))
+    b.addEventListener('blur', hideHover)
+    b.addEventListener('click', (ev) => openDrawer(p, ev.currentTarget))
+    overlay.append(b)
+  }
+}
+addEventListener('resize', () => buildOverlay())
+
 const boot = async () => {
   resize()
   const snap = await fetchSnapshot()
   const memories = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
+  for (const m of memories) memIndex.set(m.memory_id, m)
   fadeR = fadeLineRadius(snap.fade_threshold)
   const { placed, overflow } = layoutPool(memories)
   particles = placed.map(p => ({ ...p, pr: p.r }))
+  buildOverlay()
   meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
     (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
   draw(performance.now())
