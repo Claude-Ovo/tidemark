@@ -13,6 +13,10 @@
 import { inSerializableTx } from '../lib/db.mjs'
 import { decayEffective } from '../lib/decay.mjs'
 import { TRANSITION_CFG } from '../lib/scheduler.mjs'
+import { SAFETY_GRACE_MS } from '../lib/viz-config.mjs'
+import { encodeCursor } from './activity.mjs'
+
+const BASELINE_KEY_CAP = 400   // 每源热窗口 key 上限（30s 窗口远够；触顶声明 truncated）
 
 const PREVIEW_CHARS = 140
 export const MAX_SNAPSHOT_MEMORIES = 2000   // demo 规模远低于此；触顶取最新、total 照报
@@ -64,6 +68,25 @@ export const vizOcean = async ({ principal, cap = MAX_SNAPSHOT_MEMORIES }) => {
       if (!grouped.has(r.episode_id)) grouped.set(r.episode_id, [])
       grouped.get(r.episode_id).push(memoryView(r, nowMs))
     }
+    // activity_baseline（live 环二审 P1-1）：与本快照【同一事务=同一可见性边界】的
+    // 消费基线——closed watermark cursor + 快照已见的热窗口事件 key。客户端以此起搏：
+    // 已表示的热事件不重演；快照之后的晚提交仍会被 poll 的 hot 重放接住。
+    // 任一源触顶 BASELINE_KEY_CAP → truncated=true，另附 snapshot_at 哨兵 cursor 供
+    // fail-closed 降级（跳过整个热窗口——零假重演，代价是丢过载边缘的晚提交动画）。
+    const wm = (await c.query(
+      `SELECT (now() - $1::INTERVAL)::STRING AS wm_exact, now()::STRING AS now_exact`,
+      [`${SAFETY_GRACE_MS} milliseconds`])).rows[0]
+    const hotKeys = []
+    let truncated = false
+    for (const src of [
+      { kind: 'remember', sql: `SELECT memory_id AS id FROM memories WHERE tenant_id=$1 AND agent_id=$2 AND admission='accepted' AND created_at > $3::TIMESTAMPTZ ORDER BY created_at, memory_id LIMIT ${BASELINE_KEY_CAP + 1}` },
+      { kind: 'recall', sql: `SELECT request_id AS id FROM recall_requests WHERE tenant_id=$1 AND agent_id=$2 AND created_at > $3::TIMESTAMPTZ ORDER BY created_at, request_id LIMIT ${BASELINE_KEY_CAP + 1}` },
+      { kind: 'outcome', sql: `SELECT outcome_request_id AS id FROM outcomes WHERE tenant_id=$1 AND agent_id=$2 AND reported_at > $3::TIMESTAMPTZ ORDER BY reported_at, outcome_request_id LIMIT ${BASELINE_KEY_CAP + 1}` },
+    ]) {
+      const r = (await c.query(src.sql, [tenant_id, agent_id, wm.wm_exact])).rows
+      if (r.length > BASELINE_KEY_CAP) { truncated = true; r.length = BASELINE_KEY_CAP }
+      for (const row of r) hotKeys.push(`${src.kind}|${row.id}`)
+    }
     return {
       ok: true, snapshot_at: snapshotAt,
       fade_threshold: TRANSITION_CFG.fade_threshold,
@@ -74,6 +97,12 @@ export const vizOcean = async ({ principal, cap = MAX_SNAPSHOT_MEMORIES }) => {
       episodes: [...grouped.entries()].map(([episode_id, memories]) => ({ episode_id, memories })),
       // NULL episode 不是一个共同气泡：每条散粒独立漂（前端不画膜、按 memory_id 布局）
       loose,
+      activity_baseline: {
+        cursor: encodeCursor(wm.wm_exact, '~', '~'),
+        cursor_snapshot: encodeCursor(wm.now_exact, '~', '~'),   // truncated 降级用
+        seen_keys: hotKeys,
+        truncated,
+      },
     }
   }, 'viz-ocean')
 }

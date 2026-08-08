@@ -19,7 +19,7 @@ export const ACTIVITY_CFG = {
   max_limit: 500,
 }
 
-const encodeCursor = (at, kind, id) => Buffer.from(`${at}|${kind}|${id}`).toString('base64')
+export const encodeCursor = (at, kind, id) => Buffer.from(`${at}|${kind}|${id}`).toString('base64')
 const decodeCursor = (after) => {
   const [at, kind, id] = Buffer.from(String(after), 'base64').toString('utf8').split('|')
   if (!at || Number.isNaN(new Date(at).getTime())) throw new Error('bad')
@@ -49,21 +49,11 @@ const tupleCmp = (a, b) =>
   (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) ||
   (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0)
 // graceMs 仅测试注入（加速"watermark 越过晚提交"场景，免等真实 30s）；生产路由不传。
-// head=true：bootstrap 专用——零扫描返回当前 closed watermark 哨兵 cursor（live 消费环
-// 一审 P1-2：首挂载不得把历史事件当新事件重演，动画基线由初始 snapshot 对齐 head cursor）
-export const vizActivity = async ({ principal, after, limit, graceMs, head }) => {
+// bootstrap 基线不在本端点——由 /viz/ocean 同事务返回 activity_baseline（同一可见性边界，
+// live 环二审 P1-1：head-only 对齐时间不对齐可见性，快照已表示的热窗口事件会重演）
+export const vizActivity = async ({ principal, after, limit, graceMs }) => {
   if (!principal) return { ok: false, error: 'unauthorized' }
   const { tenant_id, agent_id } = principal
-  if (head) {
-    const grace0 = Number.isFinite(graceMs) ? Number(graceMs) : ACTIVITY_CFG.safety_grace_ms
-    return inSerializableTx(async (c) => {
-      const wm = (await c.query(
-        `SELECT (now() - $1::INTERVAL)::STRING AS wm_exact, now()::STRING AS now_exact`,
-        [`${grace0} milliseconds`])).rows[0]
-      return { ok: true, events: [], cursor: encodeCursor(wm.wm_exact, '~', '~'), has_more: false,
-        page_cursor: null, watermark_at: wm.wm_exact, server_now: wm.now_exact }
-    }, 'viz-activity-head')
-  }
   let cur = { at: '1970-01-01 00:00:00+00', kind: '', id: '' }
   let page = null   // 冻结 page token（翻页模式）
   if (after) {

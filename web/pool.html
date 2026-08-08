@@ -85,7 +85,7 @@
 <script type="module">
 import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout-pool.mjs'
 import { makeDrawerGuard } from '/src/pool/drawer-guard.mjs'
-import { makeLiveCoordinator, outcomeActions } from '/src/pool/live-coordinator.mjs'
+import { makeLiveCoordinator, outcomeActions, eventCausesRefresh, diffSnapshot } from '/src/pool/live-coordinator.mjs'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -389,7 +389,7 @@ const placeBtn = (b, p) => {
 }
 // 二审 P1-2：粒子入场收口成一个函数——三条路径（drop 完成/切 reduce flush/初始 reduce 直落）
 // 共用，粒子与按钮永远同步
-const attachParticle = (p) => { particles.push(p); addOverlayButton(p) }
+const attachParticle = (p) => { particles.push(p); addOverlayButton(p); live?.clearPending(p.memory_id) }
 const addOverlayButton = (p) => {
   const m = memIndex.get(p.memory_id)
   const b = document.createElement('button')
@@ -425,7 +425,7 @@ const boot = async () => {
   // 真实 activity 消费环（DESIGN v2 契约 B 消费规则）：scripted 模式（?script=1）只演语法，
   // live 模式（默认）只认持久化事件——remember 生成粒子 / recall 只涟漪 /
   // applied credited·blamed 潮痕+迁移 / cancelled·late·未 applied 零动作
-  if (new URLSearchParams(location.search).get('script') !== '1') startActivityLoop()
+  if (new URLSearchParams(location.search).get('script') !== '1') startActivityLoop(snap)
 
   if (new URLSearchParams(location.search).get('script') === '1' && particles.length > 2) {
     // remember 演示走正常 layout target：把 scripted 记忆并入 fixture 重跑 layout，
@@ -486,23 +486,24 @@ function applySnapshot(snap, { initial = false } = {}) {
     buildOverlay()
     return { memories, added: [], removed: [] }
   }
-  // 增量：已有粒子 → 目标半径变了就 migrate（可中断 settle）；新粒子 → 落滴入场
-  //（落滴在途的 id 由 coordinator pendingSpawn 记账，相邻快照不重复生成）；消失 → 移除
+  // 增量：已有粒子 → 目标半径变了就 migrate（可中断 settle）；新增/移除由 diffSnapshot
+  // 纯函数裁决（pending 记账：落滴在途不重复生成也不误删——L7 集成判别）
   const byId = new Map(particles.map(p => [p.memory_id, p]))
-  const added = [], seen = new Set()
   for (const np of placed) {
-    seen.add(np.memory_id)
     const old = byId.get(np.memory_id)
     if (old) {
       old.s = np.s; old.layer = np.layer; old.theta = np.theta; old.markR = np.markR
       if (Math.abs(np.r - old.r) > 1e-6) { old.r = np.r; migrate(old, np.r) }
-    } else if (!live || !live.isPending(np.memory_id)) added.push(np)
+    }
   }
-  const removed = particles.filter(p => !seen.has(p.memory_id) && !(live && live.isPending(p.memory_id)))
-  for (const p of removed) { btnOf.get(p)?.remove(); btnOf.delete(p) }
-  const keep = new Set(particles.filter(p => seen.has(p.memory_id) || (live && live.isPending(p.memory_id))).map(p => p.memory_id))
-  particles = particles.filter(p => keep.has(p.memory_id))
-  return { memories, added, removed }
+  const isPending = (id) => !!(live && live.isPending(id))
+  const d = diffSnapshot(placed.map(p => p.memory_id), particles.map(p => p.memory_id), isPending)
+  const placedById = new Map(placed.map(p => [p.memory_id, p]))
+  const added = d.added.map(id => placedById.get(id))
+  const removedSet = new Set(d.removedIds)
+  for (const p of particles) if (removedSet.has(p.memory_id)) { btnOf.get(p)?.remove(); btnOf.delete(p) }
+  particles = particles.filter(p => !removedSet.has(p.memory_id))
+  return { memories, added, removed: d.removedIds }
 }
 
 // ---- activity 消费环：协调器承担全部状态语义（bootstrap head/持久边界/单飞/续排/
@@ -517,7 +518,7 @@ const scheduleSnapshotRefresh = (delay = 1500) => {
   clearTimeout(refreshTimer)
   refreshTimer = setTimeout(() => live?.refreshSnapshot(), delay)
 }
-function startActivityLoop() {
+function startActivityLoop(bootSnap) {
   live = makeLiveCoordinator({
     storage: sessionStore,
     fetchActivity: async ({ head, after } = {}) => {
@@ -540,16 +541,15 @@ function startActivityLoop() {
         // recall 只涟漪不移动（契约）：涟漪自池心扩散——事件不携带 memory 集，receipt 属抽屉
         ripples.push({ theta: 0, r: 0, t0: performance.now() })
         requestDraw()
-      } else if (e.kind === 'remember') {
-        scheduleSnapshotRefresh()
       } else if (e.kind === 'outcome') {
         for (const act of outcomeActions(e)) {          // 零动作规则集中在纯函数（L6）
           const p = particles.find(x => x.memory_id === act.memory_id)
           if (p) addRing(p, act.role)
         }
-        scheduleSnapshotRefresh()
-        requestDraw()
+        if (outcomeActions(e).length) requestDraw()
       }
+      // cancelled/late/未 applied：连快照 fetch 都不触发（二审 P1-5，eventCausesRefresh 集中裁决）
+      if (eventCausesRefresh(e)) scheduleSnapshotRefresh()
     },
     onSnapshot: (snap) => {
       const { added } = applySnapshot(snap)
@@ -563,10 +563,10 @@ function startActivityLoop() {
     },
   })
   ;(async () => {
-    await live.bootstrap()                               // head 对齐：历史不重演（L1/L2）
+    await live.bootstrap(bootSnap)                       // 复用 boot 快照：同一可见性边界（B1）
     await live.poll()
   })()
-  setInterval(() => live.poll(), 5000)                   // poll 自带单飞（L3），interval 只是节拍
+  setInterval(() => live.poll(), 5000)                   // 单飞 + 未就绪自愈（L3/B5），interval 只是节拍
   setInterval(() => live.refreshSnapshot(), 60000)       // 周期兜底：decay 缓慢外移来自快照差值
 }
 
