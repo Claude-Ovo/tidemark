@@ -228,6 +228,24 @@ try {
     assert.deepEqual({ ok: r2.ok, error: r2.error }, { ok: false, error: 'cursor_invalid' }, '坏 checkpoint 不得 ok:true 回流')
   })
 
+  await t('A12 baseline 无损协议（真库）：分页取全热 keys；超总界诚实报错不跳窗', async () => {
+    const { vizOcean } = await import('./viz/ocean.mjs')
+    const vp = { tenant_id: T, agent_id: A, capabilities: [], scope: 'viz' }
+    const hot = Array.from({ length: 5 }, () => randomUUID())
+    await inWriteTx(async (c) => insRecallBatch(c, hot), 'act-a12-ins')     // now()——热窗口内
+    // 小页强制分页（page=2 → 3 轮取全），总界宽松：必须一条不落
+    const ok1 = await vizOcean({ principal: vp, _baselineCfg: { page: 2, total_cap: 100 } })
+    assert.equal(ok1.ok, true)
+    const keys = new Set(ok1.activity_baseline.seen_keys)
+    for (const id of hot) assert.ok(keys.has(`recall|${id}`), `分页取全：缺 ${id.slice(0, 8)}`)
+    assert.ok(ok1.activity_baseline.cursor, '正常路径必须给 cursor')
+    // 超总界：整个 baseline 诚实报错，无 cursor 无 keys——绝不跳窗丢晚提交
+    const ov = await vizOcean({ principal: vp, _baselineCfg: { page: 2, total_cap: 3 } })
+    assert.equal(ov.ok, true)
+    assert.equal(ov.activity_baseline.error, 'hot_window_overflow')
+    assert.equal(ov.activity_baseline.cursor, undefined, '越界不得给任何可推进的 cursor')
+  })
+
   await t('A9 配置守卫：29999 接受 / 30000 拒绝（严格不等式）', async () => {
     const { execSync } = await import('node:child_process')
     const probe = (v) => {

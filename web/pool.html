@@ -538,9 +538,8 @@ function startActivityLoop(bootSnap) {
     },
     onEvent: (e) => {
       if (e.kind === 'recall') {
-        // recall 只涟漪不移动（契约）：涟漪自池心扩散——事件不携带 memory 集，receipt 属抽屉
-        ripples.push({ theta: 0, r: 0, t0: performance.now() })
-        requestDraw()
+        // recall 只涟漪不移动（契约）；REDUCED 下零位移动画——与 scripted 同一 gate（三审 P1-2）
+        if (!REDUCED) { ripples.push({ theta: 0, r: 0, t0: performance.now() }); requestDraw() }
       } else if (e.kind === 'outcome') {
         for (const act of outcomeActions(e)) {          // 零动作规则集中在纯函数（L6）
           const p = particles.find(x => x.memory_id === act.memory_id)
@@ -563,7 +562,8 @@ function startActivityLoop(bootSnap) {
     },
   })
   ;(async () => {
-    await live.bootstrap(bootSnap)                       // 复用 boot 快照：同一可见性边界（B1）
+    const v = await live.bootstrap(bootSnap)             // 复用 boot 快照：同一可见性边界（B1）
+    if (v === 'error') meta.textContent += ' · live 流降级（bootstrap 失败，自动重试中）'   // 三审 P1-3：降级可见
     await live.poll()
   })()
   setInterval(() => live.poll(), 5000)                   // 单飞 + 未就绪自愈（L3/B5），interval 只是节拍

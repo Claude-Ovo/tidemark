@@ -10,6 +10,10 @@
 //   快照单飞 + 单调门：in-flight 合并，`snapshot_at <= 已应用` 拒收
 //   pendingSpawn：落滴在途 id 记账；attach/abort 统一清账（不清=幽灵粒子，二审 P1-3）
 const LEGACY_KEYS = ['tm_cursor', 'tm_page', 'tm_snap_at', 'tm_seen']
+// 命名空间分量无碰撞编码（三审 P1-4：'a.b'+'c' 与 'a'+'b.c' 不得同键）——base64url 无 '.'
+const b64u = (x) => typeof Buffer !== 'undefined'
+  ? Buffer.from(String(x), 'utf8').toString('base64url')
+  : btoa(unescape(encodeURIComponent(String(x)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 
 export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onEvent, onSnapshot, maxPages = 10, seenCap = 2000 }) => {
   let ns = null                 // `tm.${tenant}.${agent}.` —— bootstrap 后才有
@@ -45,26 +49,24 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
       try {
         const snap = snapMaybe ?? await fetchSnapshot()
         if (!snap?.ok || !snap.activity_baseline) return 'error'
-        ns = `tm.${snap.tenant_id}.${snap.agent_id}.`
-        for (const k of LEGACY_KEYS) storage.set(k, '')          // 无 scope 旧键 fail-closed 清除
-        const stored = storage.get(K('cursor'))
-        if (stored) {                                             // remount：沿用本 principal 持久边界
-          durable = stored
-          pendingPage = storage.get(K('page')) || null
-          lastSnapAt = storage.get(K('snap_at')) || ''
-          seen = new Set(JSON.parse(storage.get(K('seen')) || '[]'))
-          ready = true
-          return 'restored'
-        }
         const b = snap.activity_baseline
-        durable = b.truncated ? b.cursor_snapshot : b.cursor      // truncated：跳过热窗口（fail-closed）
-        seen = new Set(b.truncated ? [] : (b.seen_keys ?? []))    // 快照已表示的热事件不重演
+        if (b.error) return 'error'                               // 热窗口越界：诚实失败，poll 自愈重试
+        ns = `tm.${b64u(snap.tenant_id)}.${b64u(snap.agent_id)}.`
+        for (const k of LEGACY_KEYS) storage.set(k, '')           // 无 scope 旧键 fail-closed 清除
+        // 三审 P1-1：新 boot snapshot 的 baseline 永远是最新可见性边界——旧 cursor 不得压过它
+        //（离线间隙事件已被新快照表示，restore 旧 cursor 会把它们当新事件重演）。
+        // 持久 seen 与 baseline seen_keys 做并集（合并语义：两边都是"已表示"证据），旧 page 作废。
+        const persisted = new Set(JSON.parse(storage.get(K('seen')) || '[]'))
+        durable = b.cursor
+        pendingPage = null
+        storage.set(K('page'), '')
+        seen = new Set([...persisted, ...(b.seen_keys ?? [])])
         lastSnapAt = String(snap.snapshot_at)
         storage.set(K('cursor'), durable)
         storage.set(K('snap_at'), lastSnapAt)
         persistSeen()
         ready = true
-        return b.truncated ? 'baseline-truncated' : 'baseline'
+        return persisted.size ? 'baseline-merged' : 'baseline'
       } finally { bootstrapping = false }
     },
     async poll() {
