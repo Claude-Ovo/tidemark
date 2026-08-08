@@ -91,6 +91,8 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
       if (polling) return 'busy'
       polling = true
       try {
+        const startedFromDurable = pendingPage == null
+        let first = true
         let after = pendingPage ?? durable
         for (let page = 0; page < maxPages; page++) {
           const r = await fetchActivity({ after })
@@ -98,7 +100,13 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
           durable = r.cursor                                      // 串行链内推进——不可能被旧链覆盖
           storage.set(K('cursor'), durable)
           for (const e of r.events) if (dedupe(e)) onEvent(e)
-          evictByWatermark(r.watermark_at)                        // 安全淘汰：只丢重放窗口外的 key
+          // 五审 P1：淘汰只许在【本轮从 durable cursor 开始且首响应 has_more=false】时做——
+          // 此时 durable 已真推进到该响应的 watermark，早于它的 key 不可能再被重放。
+          // 分页链内每页的 watermark_at 是新鲜事务值、与冻结 checkpoint 不对齐，
+          // 用它淘汰会把"已动画但 durable 未覆盖"的后页事件踢出 seen → 下轮复活重演；
+          // backlog 截断首响应（cursor 停在最后事件、watermark 更靠后）同理禁止。
+          if (startedFromDurable && first && !r.has_more) evictByWatermark(r.watermark_at)
+          first = false
           persistSeen()
           if (halted) return 'halted-overloaded'
           if (!r.has_more) { pendingPage = null; storage.set(K('page'), ''); return 'done' }

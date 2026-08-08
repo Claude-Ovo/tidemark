@@ -146,12 +146,47 @@ await t('B6 watermark 淘汰（四审等比反例）：淘汰只随 watermark，
   await c.poll()                                       // 第二轮：只有 fresh2
   await c.poll()                                       // 第三轮：只有 fresh3——olds 永不复活
   assert.deepEqual(got, ['fresh2', 'fresh3'], `旧热事件复活即四审反例重现：${got}`)
-  // watermark 推过 olds 时间 → 安全淘汰（重放窗口已不含它们）
-  const before = c._debug().seenSize
-  await (async () => {
-    const c2poll = c.poll                              // 下一轮 mock watermark 前进
-  })()
-  assert.ok(before >= 3)
+  assert.ok(c._debug().seenSize >= 3, 'watermark 未推进前 olds 必须还在 seen 里')
+})
+
+await t('B6b watermark 真推进后安全淘汰（五审点名 B6 假覆盖的真实版）', async () => {
+  let wm = '2026-08-08T09:59:30.000Z'
+  const c = makeLiveCoordinator({
+    storage: makeStorage(),
+    fetchActivity: async () => ({ ok: true, events: [], cursor: 'WM', has_more: false, watermark_at: wm }),
+    fetchSnapshot: async () => SNAP({ activity_baseline: BL({ seen: ['old0', 'old1', 'old2'].map(k => ({ k: `recall|${k}`, at: '2026-08-08T09:59:50.000Z' })) }) }),
+    onEvent: () => {}, onSnapshot: () => {},
+  })
+  await c.bootstrap()
+  await c.poll()
+  assert.equal(c._debug().seenSize, 3, 'watermark(09:59:30) 未过 olds(09:59:50)：不淘汰')
+  wm = '2026-08-08T10:00:10.000Z'                       // watermark 真推过 olds
+  await c.poll()                                        // 干净轮（从 durable 起、无分页）→ 安全淘汰
+  assert.equal(c._debug().seenSize, 0, 'watermark 推过后 olds 安全淘汰（重放窗口已不含它们）')
+})
+
+await t('B8 冻结分页不淘汰（五审反例）：后页事件下轮重放不复活', async () => {
+  // 首响应 e1/cursor=D1/has_more/P1；末页 e2/cursor=D1；下一轮从 D1 重放 e2——
+  // onEvent 必须恰 [e1, e2]（分页链内若按每页新鲜 watermark 淘汰，e2 会被踢出 seen 复活）
+  const got = []
+  let round = 0
+  const c = makeLiveCoordinator({
+    storage: makeStorage(), maxPages: 1,
+    fetchActivity: async ({ after }) => {
+      round++
+      if (after === 'WM') return { ok: true, events: [ev('recall', 'e1', '2026-08-08T10:00:01.000Z')], cursor: 'D1', has_more: true, page_cursor: 'P1', watermark_at: '2026-08-08T10:00:05.000Z' }
+      if (after === 'P1') return { ok: true, events: [ev('recall', 'e2', '2026-08-08T10:00:02.000Z')], cursor: 'D1', has_more: false, watermark_at: '2026-08-08T10:00:06.000Z' }
+      // 下一轮从 D1（冻结 checkpoint）：服务端重放 e2
+      return { ok: true, events: [ev('recall', 'e2', '2026-08-08T10:00:02.000Z')], cursor: 'WM3', has_more: false, watermark_at: '2026-08-08T10:00:07.000Z' }
+    },
+    fetchSnapshot: async () => SNAP({ activity_baseline: BL({ seen: [] }) }),
+    onEvent: (e) => got.push(e.event_id), onSnapshot: () => {},
+  })
+  await c.bootstrap()
+  assert.equal(await c.poll(), 'paged-out')             // e1
+  assert.equal(await c.poll(), 'done')                  // e2（末页——不得按其 watermark 淘汰）
+  assert.equal(await c.poll(), 'done')                  // 从 D1 重放 e2：seen 必须拦下
+  assert.deepEqual(got, ['e1', 'e2'], `后页事件复活即五审反例重现：${got}`)
 })
 
 await t('B7 过载停流：seen 超硬界显式 halted，绝不静默重演', async () => {
