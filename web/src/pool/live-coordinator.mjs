@@ -34,12 +34,14 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
   const persistSeen = () => storage.set(K('seen'), JSON.stringify([...seen]))
   // watermark 淘汰：重放只覆盖 > watermark 的事件——时间早于 watermark 的 key 永不可能
   // 再被重放，淘汰绝对安全。计数淘汰会让旧热事件复活重演（Codex 四审等比判别抓获）。
-  const evictByWatermark = (wmAt) => {
+  const evictByWatermark = (wmAt) => {                  // 纯淘汰——封顶检查独立（六审 P1）
     const wmMs = atMs(wmAt)
     if (!wmMs) return
     for (const [k, v] of seen) if (v < wmMs) seen.delete(k)
-    if (seen.size > seenHardCap) halted = true          // 无法安全保住完整 hot set：显式停流
   }
+  // hard-cap 无条件检查（六审 P1：不许绑在淘汰上被分页禁淘汰连带绕过）；
+  // 超界即停流且【不把超界集合写进 storage】（sessionStorage quota 也一并防）
+  const checkCap = () => { if (seen.size > seenHardCap) halted = true; return halted }
   const dedupe = (e) => {
     const k = `${e.kind}|${e.event_id}`
     if (seen.has(k)) return false
@@ -72,6 +74,7 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
         lastSnapAt = String(snap.snapshot_at)
         storage.set(K('cursor'), durable)
         storage.set(K('snap_at'), lastSnapAt)
+        if (checkCap()) { ready = true; return 'halted-overloaded' }   // baseline 路径同守封顶
         persistSeen()
         // 四审 P1-2：自愈路径拿到的 snapshot 必须【原子交给画面】再 ready——
         // 消费边界与画面绝不分离（初始路径由页面自己 applySnapshot，不双重应用）
@@ -107,8 +110,8 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
           // backlog 截断首响应（cursor 停在最后事件、watermark 更靠后）同理禁止。
           if (startedFromDurable && first && !r.has_more) evictByWatermark(r.watermark_at)
           first = false
+          if (checkCap()) return 'halted-overloaded'    // 无条件封顶：分页链每页都查，且不持久化超界集合
           persistSeen()
-          if (halted) return 'halted-overloaded'
           if (!r.has_more) { pendingPage = null; storage.set(K('page'), ''); return 'done' }
           after = r.page_cursor
           pendingPage = after

@@ -189,6 +189,28 @@ await t('B8 冻结分页不淘汰（五审反例）：后页事件下轮重放�
   assert.deepEqual(got, ['e1', 'e2'], `后页事件复活即五审反例重现：${got}`)
 })
 
+await t('B7b 分页链封顶（六审反例）：首页即 halted、不持久化超界集合、fetch 恰一次', async () => {
+  let fetches = 0
+  const storage = makeStorage()
+  const c = makeLiveCoordinator({
+    storage, seenHardCap: 2, maxPages: 1,
+    fetchActivity: async () => {
+      fetches++
+      return { ok: true, events: [ev('recall', 'x1'), ev('recall', 'x2'), ev('recall', 'x3')],
+        cursor: 'D1', has_more: true, page_cursor: 'P1', watermark_at: '2026-08-08T10:00:05.000Z' }
+    },
+    fetchSnapshot: async () => SNAP({ activity_baseline: BL({ seen: [] }) }),
+    onEvent: () => {}, onSnapshot: () => {},
+  })
+  await c.bootstrap()
+  assert.equal(await c.poll(), 'halted-overloaded', '分页首页超界必须立即停流（旧实现 paged-out+seenSize=3 不停）')
+  assert.equal(await c.poll(), 'halted-overloaded', '停流态持续')
+  assert.equal(fetches, 1, '停流后 activity fetch 不再发生')
+  const seenKey = [...storage._m.keys()].find(k => k.startsWith('tm.') && k.endsWith('.seen'))
+  const persistedSeen = JSON.parse((seenKey && storage.get(seenKey)) || '[]')
+  assert.ok(persistedSeen.length <= 2, `超界集合不得写进 storage（实际 ${persistedSeen.length}）`)
+})
+
 await t('B7 过载停流：seen 超硬界显式 halted，绝不静默重演', async () => {
   const c = makeLiveCoordinator({
     storage: makeStorage(), seenHardCap: 2,
