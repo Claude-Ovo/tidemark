@@ -15,28 +15,35 @@ const b64u = (x) => typeof Buffer !== 'undefined'
   ? Buffer.from(String(x), 'utf8').toString('base64url')
   : btoa(unescape(encodeURIComponent(String(x)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 
-export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onEvent, onSnapshot, maxPages = 10, seenCap = 2000 }) => {
-  let ns = null                 // `tm.${tenant}.${agent}.` —— bootstrap 后才有
+export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onEvent, onSnapshot, maxPages = 10, seenHardCap = 20000 }) => {
+  let ns = null                 // `tm.${b64u(tenant)}.${b64u(agent)}.` —— bootstrap 后才有
   let durable = null
   let pendingPage = null
   let lastSnapAt = ''
-  let seen = new Set()
+  let seen = new Map()          // key -> atMs（四审 P1-1：淘汰按 watermark 时间，不按计数）
   const pendingSpawn = new Set()
   let ready = false
+  let halted = false            // 显式停流（seen 超硬界仍无法安全淘汰时——绝不静默重演）
+  let hadError = false          // 首次 bootstrap 失败标记：恢复时向页面报 degraded
   let polling = false
   let bootstrapping = false
   let snapInFlight = false, snapQueued = false
 
   const K = (k) => ns + k
-  const persistSeen = () => {
-    const arr = [...seen]
-    storage.set(K('seen'), JSON.stringify(arr.slice(Math.max(0, arr.length - seenCap))))
+  const atMs = (x) => { const v = Date.parse(x); return Number.isNaN(v) ? 0 : v }
+  const persistSeen = () => storage.set(K('seen'), JSON.stringify([...seen]))
+  // watermark 淘汰：重放只覆盖 > watermark 的事件——时间早于 watermark 的 key 永不可能
+  // 再被重放，淘汰绝对安全。计数淘汰会让旧热事件复活重演（Codex 四审等比判别抓获）。
+  const evictByWatermark = (wmAt) => {
+    const wmMs = atMs(wmAt)
+    if (!wmMs) return
+    for (const [k, v] of seen) if (v < wmMs) seen.delete(k)
+    if (seen.size > seenHardCap) halted = true          // 无法安全保住完整 hot set：显式停流
   }
   const dedupe = (e) => {
     const k = `${e.kind}|${e.event_id}`
     if (seen.has(k)) return false
-    if (seen.size > seenCap) { let i = 0; for (const x of seen) { seen.delete(x); if (++i > seenCap / 2) break } }
-    seen.add(k)
+    seen.set(k, atMs(e.occurred_at))
     return true
   }
 
@@ -48,31 +55,38 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
       bootstrapping = true
       try {
         const snap = snapMaybe ?? await fetchSnapshot()
-        if (!snap?.ok || !snap.activity_baseline) return 'error'
+        if (!snap?.ok || !snap.activity_baseline) { hadError = true; return 'error' }
         const b = snap.activity_baseline
-        if (b.error) return 'error'                               // 热窗口越界：诚实失败，poll 自愈重试
+        if (b.error) { hadError = true; return 'error' }          // 热窗口越界：诚实失败，poll 自愈重试
         ns = `tm.${b64u(snap.tenant_id)}.${b64u(snap.agent_id)}.`
         for (const k of LEGACY_KEYS) storage.set(k, '')           // 无 scope 旧键 fail-closed 清除
-        // 三审 P1-1：新 boot snapshot 的 baseline 永远是最新可见性边界——旧 cursor 不得压过它
-        //（离线间隙事件已被新快照表示，restore 旧 cursor 会把它们当新事件重演）。
-        // 持久 seen 与 baseline seen_keys 做并集（合并语义：两边都是"已表示"证据），旧 page 作废。
-        const persisted = new Set(JSON.parse(storage.get(K('seen')) || '[]'))
+        // 三审 P1-1：新 boot snapshot 的 baseline 永远是最新可见性边界——旧 cursor 不得压过它。
+        // 持久 seen 与 baseline seen 并集（都是"已表示"证据），随后按 baseline watermark 淘汰。
+        const persisted = new Map(JSON.parse(storage.get(K('seen')) || '[]'))
         durable = b.cursor
         pendingPage = null
         storage.set(K('page'), '')
-        seen = new Set([...persisted, ...(b.seen_keys ?? [])])
+        seen = new Map(persisted)
+        for (const it of (b.seen ?? [])) seen.set(it.k, atMs(it.at))
+        evictByWatermark(b.watermark_at)
         lastSnapAt = String(snap.snapshot_at)
         storage.set(K('cursor'), durable)
         storage.set(K('snap_at'), lastSnapAt)
         persistSeen()
+        // 四审 P1-2：自愈路径拿到的 snapshot 必须【原子交给画面】再 ready——
+        // 消费边界与画面绝不分离（初始路径由页面自己 applySnapshot，不双重应用）
+        if (!snapMaybe) onSnapshot(snap)
         ready = true
+        if (hadError) { hadError = false; return 'recovered-degraded' }   // 四审 P1-3：显式降级口径
         return persisted.size ? 'baseline-merged' : 'baseline'
       } finally { bootstrapping = false }
     },
     async poll() {
+      if (halted) return 'halted-overloaded'                      // 显式停流，绝不静默重演
       if (!ready) {                                               // 自愈：瞬断后的 tick 重新 bootstrap
         const v = await this.bootstrap()
         if (!ready) return `not-ready(${v})`
+        if (v === 'recovered-degraded') return v                  // 把降级信号透给页面
       }
       if (polling) return 'busy'
       polling = true
@@ -84,7 +98,9 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
           durable = r.cursor                                      // 串行链内推进——不可能被旧链覆盖
           storage.set(K('cursor'), durable)
           for (const e of r.events) if (dedupe(e)) onEvent(e)
+          evictByWatermark(r.watermark_at)                        // 安全淘汰：只丢重放窗口外的 key
           persistSeen()
+          if (halted) return 'halted-overloaded'
           if (!r.has_more) { pendingPage = null; storage.set(K('page'), ''); return 'done' }
           after = r.page_cursor
           pendingPage = after
@@ -116,7 +132,7 @@ export const makeLiveCoordinator = ({ fetchActivity, fetchSnapshot, storage, onE
     markPending(id) { pendingSpawn.add(id) },
     clearPending(id) { pendingSpawn.delete(id) },
     isPending(id) { return pendingSpawn.has(id) },
-    _debug() { return { ns, durable, pendingPage, lastSnapAt, seenSize: seen.size, polling, ready, pendingCount: pendingSpawn.size } },
+    _debug() { return { ns, durable, pendingPage, lastSnapAt, seenSize: seen.size, polling, ready, halted, pendingCount: pendingSpawn.size } },
   }
 }
 

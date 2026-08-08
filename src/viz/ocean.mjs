@@ -72,11 +72,10 @@ export const vizOcean = async ({ principal, cap = MAX_SNAPSHOT_MEMORIES, _baseli
       if (!grouped.has(r.episode_id)) grouped.set(r.episode_id, [])
       grouped.get(r.episode_id).push(memoryView(r, nowMs))
     }
-    // activity_baseline（live 环二审 P1-1）：与本快照【同一事务=同一可见性边界】的
-    // 消费基线——closed watermark cursor + 快照已见的热窗口事件 key。客户端以此起搏：
-    // 已表示的热事件不重演；快照之后的晚提交仍会被 poll 的 hot 重放接住。
-    // 任一源触顶 BASELINE_KEY_CAP → truncated=true，另附 snapshot_at 哨兵 cursor 供
-    // fail-closed 降级（跳过整个热窗口——零假重演，代价是丢过载边缘的晚提交动画）。
+    // activity_baseline（live 环二审 P1-1 + 四审修订）：与本快照【同一事务=同一可见性
+    // 边界】的消费基线——closed watermark cursor + 快照已见热窗口事件 {k, at}。
+    // 客户端以此起搏：已表示的热事件不重演（按 watermark 时间淘汰而非计数——四审 P1-1）；
+    // 快照之后的晚提交仍被 poll 的 hot 重放接住。越界 → 整体报错，客户端走显式降级恢复。
     const wm = (await c.query(
       `SELECT (now() - $1::INTERVAL)::STRING AS wm_exact, now()::STRING AS now_exact`,
       [`${SAFETY_GRACE_MS} milliseconds`])).rows[0]
@@ -98,7 +97,7 @@ export const vizOcean = async ({ principal, cap = MAX_SNAPSHOT_MEMORIES, _baseli
            WHERE tenant_id=$1 AND agent_id=$2 ${src.extra} AND (${src.at}, ${src.id}::STRING) > ($3::TIMESTAMPTZ, $4)
            ORDER BY ${src.at}, ${src.id}::STRING LIMIT ${bl.page}`,
           [tenant_id, agent_id, curAt, curId])).rows
-        for (const row of r) hotKeys.push(`${src.kind}|${row.id}`)
+        for (const row of r) hotKeys.push({ k: `${src.kind}|${row.id}`, at: row.at_exact })   // 带时间：客户端按 watermark 淘汰
         if (hotKeys.length > bl.total_cap) { overflow = true; break }
         if (r.length < bl.page) break
         curAt = r[r.length - 1].at_exact; curId = r[r.length - 1].id
@@ -116,8 +115,8 @@ export const vizOcean = async ({ principal, cap = MAX_SNAPSHOT_MEMORIES, _baseli
       // NULL episode 不是一个共同气泡：每条散粒独立漂（前端不画膜、按 memory_id 布局）
       loose,
       activity_baseline: overflow
-        ? { error: 'hot_window_overflow' }                        // 诚实失败：不跳窗不丢晚提交，客户端重试
-        : { cursor: encodeCursor(wm.wm_exact, '~', '~'), seen_keys: hotKeys },
+        ? { error: 'hot_window_overflow' }                        // 诚实失败：客户端按显式降级协议恢复
+        : { cursor: encodeCursor(wm.wm_exact, '~', '~'), watermark_at: wm.wm_exact, seen: hotKeys },
     }
   }, 'viz-ocean')
 }

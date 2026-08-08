@@ -561,12 +561,26 @@ function startActivityLoop(bootSnap) {
       requestDraw()
     },
   })
+  // 降级状态常驻上屏（四审 P1-3：显式降级口径，不称 no-loss）
+  // retrying 是暂态（恢复后清除）；degraded/halted 常驻（persist=true 不被后续覆盖）
+  let liveNote = null, livePersist = false
+  const renderLiveNote = (text, persistent = false) => {
+    if (livePersist) return
+    if (!liveNote) { liveNote = document.createElement('span'); meta.append(liveNote) }
+    liveNote.textContent = text ? ` · ${text}` : ''
+    livePersist = persistent
+  }
+  const liveStatus = (v) => {
+    if (v === 'error' || String(v).startsWith('not-ready')) renderLiveNote('live 流重连中')
+    else if (v === 'recovered-degraded') renderLiveNote('live 流曾降级：间隙事件仅位置更新、无动效标记', true)
+    else if (v === 'halted-overloaded') renderLiveNote('live 流过载停止（避免错误重演），刷新页面恢复', true)
+    else renderLiveNote('')                              // done/baseline*：清除暂态提示
+  }
   ;(async () => {
-    const v = await live.bootstrap(bootSnap)             // 复用 boot 快照：同一可见性边界（B1）
-    if (v === 'error') meta.textContent += ' · live 流降级（bootstrap 失败，自动重试中）'   // 三审 P1-3：降级可见
-    await live.poll()
+    liveStatus(await live.bootstrap(bootSnap))           // 复用 boot 快照：同一可见性边界（B1）
+    liveStatus(await live.poll())
   })()
-  setInterval(() => live.poll(), 5000)                   // 单飞 + 未就绪自愈（L3/B5），interval 只是节拍
+  setInterval(async () => liveStatus(await live.poll()), 5000)   // 单飞 + 自愈（L3/B5），interval 只是节拍
   setInterval(() => live.refreshSnapshot(), 60000)       // 周期兜底：decay 缓慢外移来自快照差值
 }
 
