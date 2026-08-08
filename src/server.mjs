@@ -110,7 +110,7 @@ app.get('/viz/memory/:memory_id', async (req, res) => {
 // P0-11 v2 活动流（契约 B + SPEC §14）：closed watermark + hot-window 重放，客户端去重
 app.get('/viz/activity', async (req, res) => {
   const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
-  try { res.json(await vizActivity({ principal, after: req.query.after, limit: req.query.limit })) }
+  try { res.json(await vizActivity({ principal, after: req.query.after, limit: req.query.limit, head: req.query.head === '1' })) }
   catch (e) { console.error(JSON.stringify({ evt: 'viz_activity_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
 })
 
