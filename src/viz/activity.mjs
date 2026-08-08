@@ -30,9 +30,17 @@ const decodeCursor = (after) => {
 // 每页查询限定 <= upper_bound、durable cursor 恒回冻结 checkpoint，不随页推进。
 // 否则慢 drain 期间合法晚提交（<=15s）的行会被"越过 token 起点 + 新 watermark"永久跳过。
 const encodePageToken = (t) => 'P.' + Buffer.from(JSON.stringify(t)).toString('base64')
+// 三审 P2：token 字段逐项校验——坏 at/upper 不许变成 CRDB 22007→500，
+// 坏 checkpoint 不许 ok:true 原样回流；一律 cursor_invalid。tenant-scoped 只读 token，不上 HMAC。
+const tsOk = (s) => typeof s === 'string' && s.length <= 64 && !Number.isNaN(new Date(s).getTime())
 const decodePageToken = (s) => {
+  if (String(s).length > 2048) throw new Error('bad')
   const t = JSON.parse(Buffer.from(String(s).slice(2), 'base64').toString('utf8'))
-  if (!t.at || !t.checkpoint || !t.upper) throw new Error('bad')
+  if (!tsOk(t.at) || !tsOk(t.upper)) throw new Error('bad')
+  if (typeof t.id !== 'string' || t.id.length > 128 || typeof (t.kind ?? '') !== 'string') throw new Error('bad')
+  if (new Date(t.at).getTime() > new Date(t.upper).getTime()) throw new Error('bad')
+  const cp = decodeCursor(t.checkpoint)             // checkpoint 必须能被 durable 解码
+  if (new Date(cp.at).getTime() > new Date(t.upper).getTime()) throw new Error('bad')
   return t
 }
 // 确定性全序：(occurred_at exact, kind, id)——exact 串字典序即时间序

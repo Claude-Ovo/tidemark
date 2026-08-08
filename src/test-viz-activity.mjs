@@ -219,6 +219,15 @@ try {
     } finally { c1.release() }
   })
 
+  await t('A11 page token 输入边界：坏时间与坏 checkpoint 一律 cursor_invalid（不 500 不回流）', async () => {
+    const mk = (t) => 'P.' + Buffer.from(JSON.stringify(t)).toString('base64')
+    const r1 = await vizActivity({ principal, after: mk({ at: 'bogus', kind: '', id: 'x', checkpoint: 'x', upper: 'bogus' }) })
+    assert.deepEqual({ ok: r1.ok, error: r1.error }, { ok: false, error: 'cursor_invalid' })
+    const goodAt = '2026-08-08 00:00:00+00'
+    const r2 = await vizActivity({ principal, after: mk({ at: goodAt, kind: '', id: 'x', checkpoint: 'bogus-not-base64-cursor', upper: goodAt }) })
+    assert.deepEqual({ ok: r2.ok, error: r2.error }, { ok: false, error: 'cursor_invalid' }, '坏 checkpoint 不得 ok:true 回流')
+  })
+
   await t('A9 配置守卫：29999 接受 / 30000 拒绝（严格不等式）', async () => {
     const { execSync } = await import('node:child_process')
     const probe = (v) => {

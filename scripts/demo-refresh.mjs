@@ -29,8 +29,14 @@ const arg = (name, dflt) => (process.argv.find(a => a.startsWith(`--${name}=`))?
 const TENANT = arg('tenant', 'demo-tenant')
 const AGENT = arg('agent', 'demo-agent')
 const PHASE = arg('phase', 'all')
+// 三审 P1：稳定 run-key——所有 episode/request/attempt/task/outcome ID 从
+// (tenant, agent, run-key, 步骤标签) 确定性派生。中途失败后【同 key 重跑】走各工具
+// 幂等层原路返回，remember 行数与塑性计数都不二次增加；final agent 固定 --run-key=final-v1，
+// 新演练显式换 key。崩溃注入 seam：TIDEMARK_DEMO_CRASH_AFTER=<label> 在该步后强退（判别测试用）。
+const RUNKEY = arg('run-key', 'v1')
 if (!['all', 'seed', 'finalize'].includes(PHASE)) { console.error(`invalid --phase=${PHASE}`); process.exit(1) }
 
+const { createHash } = await import('node:crypto')
 const { rememberTool } = await import('../src/tools/remember.mjs')
 const { recallTool } = await import('../src/tools/recall.mjs')
 const { logEventTool } = await import('../src/tools/log-event.mjs')
@@ -40,22 +46,32 @@ const { getPool } = await import('../src/lib/db.mjs')
 const { vizOcean } = await import('../src/viz/ocean.mjs')
 
 const principal = { tenant_id: TENANT, agent_id: AGENT, capabilities: ['memory:pin'] }
-const run = randomUUID().slice(0, 8)
-const ep = (n) => `demo-${run}-ep${n}`
+// 确定性 UUID（RFC4122 形状）：sha256(tenant|agent|runkey|label) 打版本/变体位
+const did = (label) => {
+  const h = createHash('sha256').update(`${TENANT}|${AGENT}|${RUNKEY}|${label}`).digest('hex')
+  return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`
+}
+const crashAfter = process.env.TIDEMARK_DEMO_CRASH_AFTER || null
+const maybeCrash = (label) => { if (crashAfter === label) { console.error(`[crash seam] exiting after ${label}`); process.exit(9) } }
+const ep = (n) => `demo-${RUNKEY}-ep${n}`
 const die = (label, r) => { if (!r?.ok) { console.error(`FAIL ${label}:`, JSON.stringify(r).slice(0, 400)); process.exit(1) } return r }
 const fail = (msg) => { console.error(`FAIL ${msg}`); process.exit(1) }
 
 // 单一真相源：只读服务端快照（同一 decayEffective、同一 snapshot_at）
 const snap = die('viz-ocean-preflight', await vizOcean({ principal }))
+if (snap.capped) fail('preflight fail closed: 快照 capped=true，截断计数不可作 occupancy 依据')   // 三审 P2
 const rows = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
-const ANCHOR_MIN = 0.70, ANCHOR_CAPACITY = 28   // 容量为 layout 实测保守值
+// 阈值单一来源：与 UI 同一份待校准视觉参数，禁止手抄漂移（三审 P2）
+const { POOL_CFG } = await import('../web/src/pool/layout-pool.mjs')
+const ANCHOR_MIN = POOL_CFG.ANCHOR_MIN
+const ANCHOR_CAPACITY = 28   // 容量为 layout 实测保守值
 const seedAdd = PHASE !== 'finalize' ? 8 : 0
 const finAdd = PHASE !== 'seed' ? 4 : 0          // finalize 语料也计入 preflight（二审修正）
 const anchorProjected = rows.filter(r => r.pinned || r.effective_strength >= ANCHOR_MIN).length + seedAdd + finAdd
 if (anchorProjected > ANCHOR_CAPACITY) {
   fail(`occupancy preflight: anchor 带投影 ${anchorProjected} > 容量 ${ANCHOR_CAPACITY}——拒绝往拥挤池灌数据。换 --agent= 干净 agent，或等自然衰减`)
 }
-console.log(`demo refresh run=${run} tenant=${TENANT} agent=${AGENT} phase=${PHASE}（快照 ${snap.snapshot_at}：${rows.length} 条，anchor 投影 ${anchorProjected}/${ANCHOR_CAPACITY}）`)
+console.log(`demo refresh run-key=${RUNKEY} tenant=${TENANT} agent=${AGENT} phase=${PHASE}（快照 ${snap.snapshot_at}：${rows.length} 条，anchor 投影 ${anchorProjected}/${ANCHOR_CAPACITY}）`)
 
 const SEED = [
   ['fact', '用户 Chen 的订单 #8821 已升级为加急配送，承诺 48 小时内送达'],
@@ -77,52 +93,54 @@ const FINALIZE = [
 const BLAME_IDX = 2   // finalize 语料中的盗刷决策——blamed 锁这条（未 pin）
 const BLAME_QUERY = '疑似盗刷工单 冻结订单 人工核验'   // 近原文措辞——onnx 中文向量下短关键词串排不进 top-5
 
-const remember = async (corpus, episode) => {
+const remember = async (corpus, episode, tag) => {
   const ids = []
   for (let i = 0; i < corpus.length; i++) {
     const [kind, content] = corpus[i]
-    const r = die(`remember#${i}`, await rememberTool({
-      principal, content, kind, episode_id: episode, request_id: randomUUID(),
+    const r = die(`remember#${tag}${i}`, await rememberTool({
+      principal, content, kind, episode_id: episode, request_id: did(`rem-${tag}-${i}`),
       importance: 0.5 + (i % 4) * 0.1,
     }))
     ids.push(r.memory_id)
+    maybeCrash(`rem-${tag}-${i}`)
   }
   return ids
 }
 
 if (PHASE !== 'finalize') {
-  const seedIds = await remember(SEED, ep('seed'))
+  const seedIds = await remember(SEED, ep('seed'), 'seed')
   console.log(`seed remember x${seedIds.length} -> anchor band`)
   const pinnedNow = rows.filter(r => r.pinned).length
   const pinN = Math.min(2, Math.max(0, 4 - pinnedNow))   // 二审 P2：守卫要真实，3 时只补 1
-  for (const id of seedIds.slice(0, pinN)) {
-    die('pin', await pinTool({ principal, memory_id: id, pinned: true, reason: 'demo-core-policy', request_id: randomUUID() }))
+  for (const [i, id] of seedIds.slice(0, pinN).entries()) {
+    die('pin', await pinTool({ principal, memory_id: id, pinned: true, reason: 'demo-core-policy', request_id: did(`pin-${i}`) }))
   }
   console.log(pinN ? `pin x${pinN} -> pin ring` : `pin skipped（已有 ${pinnedNow}）`)
 }
 if (PHASE === 'seed') { console.log('seed 完成。让它衰减几天，录制前跑 --phase=finalize'); await getPool().end(); process.exit(0) }
 
 // finalize：新 fresh 批（时间模型正确的 blamed 目标——1.0 起点，不拿衰减旧 seed 冒充）
-const finIds = await remember(FINALIZE, ep('fin'))
+const finIds = await remember(FINALIZE, ep('fin'), 'fin')
 console.log(`finalize remember x${finIds.length} -> anchor band`)
 const blameTarget = finIds[BLAME_IDX]
 
-const evidenceRound = async ({ query, episode, role, status, targetId }) => {
-  const attempt = randomUUID(), task = randomUUID()
+const evidenceRound = async ({ query, episode, role, status, targetId, tag }) => {
+  const attempt = did(`att-${tag}`), task = did(`task-${tag}`)
   const rec = die('recall', await recallTool({
     principal, query, purpose: 'demo evidence round', episode_id: episode,
-    attempt_id: attempt, request_id: randomUUID(),
+    attempt_id: attempt, request_id: did(`rec-${tag}`),
   }))
   const rrId = rec.receipt.request_id
   const item = (rec.receipt?.items ?? []).find(i => i.injected && i.memory_id === targetId)
   if (!item) fail(`${role} 目标 ${targetId.slice(0, 8)} 未被 recall 注入（query="${query}"）——不静默换目标`)
   const evid = die('log_event', await logEventTool({
     principal, episode_id: episode, task_instance_id: task, attempt_id: attempt,
-    event_type: 'memory_used', request_id: randomUUID(),
+    event_type: 'memory_used', request_id: did(`evt-${tag}`),
     payload: { recall_request_id: rrId, receipt_item_id: item.receipt_item_id, memory_id: item.memory_id },
   }))
+  maybeCrash(`evt-${tag}`)
   const out = die('report_outcome', await reportOutcomeTool({
-    principal, outcome_request_id: randomUUID(), episode_id: episode,
+    principal, outcome_request_id: did(`out-${tag}`), episode_id: episode,
     task_instance_id: task, attempt_id: attempt, status,
     attributions: [{
       recall_request_id: rrId, receipt_item_id: item.receipt_item_id,
@@ -146,7 +164,7 @@ const evidenceRound = async ({ query, episode, role, status, targetId }) => {
 console.log('blamed rounds（锁定 finalize fresh，断言穿进 Active）:')
 let lastP = null
 for (let round = 0; round < 2; round++) {
-  lastP = await evidenceRound({ query: BLAME_QUERY, episode: ep(`blame${round}`), role: 'blamed', status: 'failure', targetId: blameTarget })
+  lastP = await evidenceRound({ query: BLAME_QUERY, episode: ep(`blame${round}`), role: 'blamed', status: 'failure', targetId: blameTarget, tag: `blame${round}` })
 }
 if (!(lastP.strength_anchor_after > 0.35 && lastP.strength_anchor_after < ANCHOR_MIN)) {
   fail(`blamed 终态 ${lastP.strength_anchor_after} 不在 Active 带 (0.35, 0.70)——时间模型错误，不得宣称穿层`)
@@ -162,10 +180,10 @@ if (oldRows.length) {
   console.log('credited round（锁定旧记忆，断言 gain>0）:')
   await evidenceRound({
     query: credTarget.content_preview.slice(0, 40), episode: ep('credit'),
-    role: 'credited', status: 'success', targetId: credTarget.memory_id,
+    role: 'credited', status: 'success', targetId: credTarget.memory_id, tag: 'credit',
   })
-  console.log(`done. run=${run}：blamed ×2 穿进 Active + credited 上浮全部实证`)
+  console.log(`done. run-key=${RUNKEY}：blamed ×2 穿进 Active + credited 上浮全部实证`)
 } else {
-  console.log(`done（credited SKIPPED：无 effective 0.05~0.5 的旧记忆——fresh agent 无衰减历史，等 seed 衰减后跑 --phase=finalize）。run=${run}：blamed ×2 穿进 Active 已实证`)
+  console.log(`done（credited SKIPPED：无 effective 0.05~0.5 的旧记忆——fresh agent 无衰减历史，等 seed 衰减后跑 --phase=finalize）。run-key=${RUNKEY}：blamed ×2 穿进 Active 已实证`)
 }
 await getPool().end()
