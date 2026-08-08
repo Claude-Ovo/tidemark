@@ -42,7 +42,9 @@ export const vizMemoryDetail = async ({ principal, memory_id }) => {
       [tenant_id, agent_id, memory_id])).rows[0]
     if (!row) return { ok: false, error: 'not_found' }
 
-    // 衰减曲线：服务端采样（同一 decayEffective；pinned 冻结为水平线）
+    // 衰减曲线：服务端采样（同一 decayEffective）。time-travel 禁区统一先判——
+    // 锚点之前的采样点一律 null（含 pinned：pin 冻结从 pin 时刻起，不虚构 pin 前历史，
+    // 交互层一审 P1-1）；锚点之后 pinned 为水平线、非 pinned 走衰减。
     const stepMs = (DETAIL_CFG.curve_past_hours + DETAIL_CFG.curve_future_hours) * 3600e3 / (DETAIL_CFG.curve_points - 1)
     const t0 = nowMs - DETAIL_CFG.curve_past_hours * 3600e3
     const anchorMs = new Date(row.strength_anchor_at).getTime()
@@ -50,34 +52,64 @@ export const vizMemoryDetail = async ({ principal, memory_id }) => {
       const t = t0 + i * stepMs
       return {
         at: new Date(t).toISOString(),
-        // 锚点之前的历史不回放（time-travel 契约禁历史回放）——采样点早于 anchor_at 记 null
-        s: row.pinned ? decayEffective(row, nowMs)
-          : t < anchorMs ? null
-          : +decayEffective(row, t).toFixed(6),
+        s: t < anchorMs ? null : +decayEffective(row, t).toFixed(6),
       }
     })
 
-    // 归因：引用本 memory 的最近 outcome items（含 applied 与 plasticity 三段式，展示用）
-    const attributions = (await c.query(
-      `SELECT outcome_request_id, status, reported_at, episode_id,
-              item AS item_json
-       FROM outcomes, jsonb_array_elements(response_json->'items') AS item
-       WHERE tenant_id=$1 AND agent_id=$2 AND item->>'memory_id'=$3
-       ORDER BY reported_at DESC LIMIT ${DETAIL_CFG.max_attributions}`,
-      [tenant_id, agent_id, memory_id])).rows.map(r => ({
+    // 归因：引用本 memory 的最近 outcome items。attributions 数组与 response_json.items
+    // 按 ordinality 对齐（同一 attribution 的写入序），借 attribution 的
+    // recall_request_id/receipt_item_id 回读原 receipt item → content-free 评分构成
+    //（契约 D 的 receipt 评分构成，交互层一审 P1-3）
+    const attrRows = (await c.query(
+      `SELECT o.outcome_request_id, o.status, o.reported_at, o.episode_id,
+              item.value AS item_json, attr.value AS attr_json
+       FROM outcomes o,
+            jsonb_array_elements(o.response_json->'items') WITH ORDINALITY AS item(value, ord),
+            jsonb_array_elements(o.attributions) WITH ORDINALITY AS attr(value, ord2)
+       WHERE o.tenant_id=$1 AND o.agent_id=$2 AND item.value->>'memory_id'=$3 AND item.ord=attr.ord2
+       ORDER BY o.reported_at DESC LIMIT ${DETAIL_CFG.max_attributions}`,
+      [tenant_id, agent_id, memory_id])).rows
+    // 批量回读 receipt items（content-free 数值投影：similarity/effective/utility/importance/final_score/rank）
+    const rrIds = [...new Set(attrRows.map(r => r.attr_json?.recall_request_id).filter(Boolean))]
+    const receiptItems = new Map()
+    if (rrIds.length) {
+      for (const rr of (await c.query(
+        `SELECT request_id, receipt_json->'receipt'->'items' AS items
+         FROM recall_requests WHERE tenant_id=$1 AND agent_id=$2 AND request_id = ANY($3::STRING[])`,
+        [tenant_id, agent_id, rrIds])).rows) {
+        for (const it of (Array.isArray(rr.items) ? rr.items : [])) {
+          receiptItems.set(`${rr.request_id}|${it.receipt_item_id}`, it)
+        }
+      }
+    }
+    const attributions = attrRows.map(r => {
+      const ri = receiptItems.get(`${r.attr_json?.recall_request_id}|${r.attr_json?.receipt_item_id}`)
+      return {
         outcome_request_id: r.outcome_request_id, status: r.status,
         reported_at: r.reported_at, episode_id: r.episode_id,
         role: r.item_json.role, applied: r.item_json.applied === true,
         reason: r.item_json.reason ?? null,
         plasticity: r.item_json.plasticity ?? null,
-      }))
+        receipt_scores: ri ? {
+          rank: ri.rank, similarity: ri.similarity, effective_strength: ri.effective_strength,
+          utility: ri.utility, importance: ri.importance, final_score: ri.final_score,
+        } : null,
+      }
+    })
 
-    // 关联薄边：derived_from（双向）
+    // 关联薄边：derived_from（双向）——两端 join memories 强制同 agent + accepted
+    //（交互层一审 P1-2：memory_derivations 只保证 tenant，不保证两端 agent；
+    // 不把"producer 恰好同 agent"当授权不变量，跨 agent 边一律不出）
     const derived = (await c.query(
-      `SELECT derived_memory_id, source_memory_id FROM memory_derivations
-       WHERE tenant_id=$1 AND (derived_memory_id=$2 OR source_memory_id=$2)
+      `SELECT d.derived_memory_id, d.source_memory_id
+       FROM memory_derivations d
+       JOIN memories md ON md.tenant_id=d.tenant_id AND md.memory_id=d.derived_memory_id
+         AND md.agent_id=$3 AND md.admission='accepted'
+       JOIN memories ms ON ms.tenant_id=d.tenant_id AND ms.memory_id=d.source_memory_id
+         AND ms.agent_id=$3 AND ms.admission='accepted'
+       WHERE d.tenant_id=$1 AND (d.derived_memory_id=$2 OR d.source_memory_id=$2)
        LIMIT ${DETAIL_CFG.max_related}`,
-      [tenant_id, memory_id])).rows.map(r => ({
+      [tenant_id, memory_id, agent_id])).rows.map(r => ({
         kind: r.derived_memory_id === memory_id ? 'derived_from' : 'source_of',
         memory_id: r.derived_memory_id === memory_id ? r.source_memory_id : r.derived_memory_id,
       }))

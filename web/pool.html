@@ -38,7 +38,7 @@
   /* 右侧抽屉：detail 真源；reduced-motion 下无过渡 */
   #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 92vw);
     background: #0b0f14; border-left: 1px solid #223042; padding: 18px 20px;
-    transform: translateX(105%); transition: transform .28s ease; overflow-y: auto;
+    transform: translateX(105%); transition: transform 280ms cubic-bezier(0.32, 0.72, 0, 1); overflow-y: auto;
     z-index: 10; font-size: 13px; line-height: 1.65; }
   #drawer.open { transform: translateX(0); }
   @media (prefers-reduced-motion: reduce) { #drawer { transition: none; } }
@@ -55,7 +55,7 @@
   #curve { width: 100%; height: 72px; margin: 4px 0; }
   /* a11y overlay：每粒子一个真实可聚焦 button（canvas 命中配同步 DOM，契约） */
   #overlay { position: fixed; inset: 0; pointer-events: none; }
-  #overlay button { position: absolute; transform: translate(-50%, -50%); width: 22px; height: 22px;
+  #overlay button { position: absolute; left: 0; top: 0; width: 22px; height: 22px;
     background: transparent; border: none; border-radius: 50%; pointer-events: auto; cursor: pointer; padding: 0; }
   #overlay button:focus-visible { outline: 1.5px solid rgba(170,215,255,.9); outline-offset: 2px; }
   @media (max-width: 480px) {
@@ -80,10 +80,11 @@
 </div>
 <div id="err"></div>
 <div id="hovercard" role="status"></div>
-<div id="drawer" role="dialog" aria-modal="false" aria-label="记忆详情"></div>
+<div id="drawer" role="dialog" aria-modal="false" aria-label="记忆详情" inert aria-hidden="true"></div>
 <div id="overlay"></div>
 <script type="module">
 import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout-pool.mjs'
+import { makeDrawerGuard } from '/src/pool/drawer-guard.mjs'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -99,7 +100,7 @@ rmQuery.addEventListener?.('change', (e) => {
   if (!REDUCED) return
   for (const tw of tweens) tw.p.pr = tw.to          // 迁移直落终态
   tweens = []
-  for (const d of drops) { if (d.spawn) { particles.push(d.spawn); d.spawn = null } }  // 待生成粒子落下
+  for (const d of drops) { if (d.spawn) { particles.push(d.spawn); addOverlayButton(d.spawn); d.spawn = null } }  // 待生成粒子落下
   drops = []
   ripples = []                                       // 移动涟漪清除；潮痕静态标记保留
   draw(performance.now())
@@ -161,7 +162,7 @@ const step = (now) => {
   tweens = tweens.filter(tw => now - tw.t0 < tw.dur)
   ripples = ripples.filter(r => now - r.t0 < 1400)
   for (const d of drops) {
-    if (now - d.t0 >= 900 && d.spawn) { particles.push(d.spawn); d.spawn = null }  // 落滴结束→粒子留存
+    if (now - d.t0 >= 900 && d.spawn) { particles.push(d.spawn); addOverlayButton(d.spawn); d.spawn = null }  // 落滴结束→粒子+按钮留存
   }
   drops = drops.filter(d => now - d.t0 < 900)
   rings = rings.filter(rg => now < rg.until)          // 潮痕到期即清，不留常驻残影
@@ -220,6 +221,7 @@ const draw = (now = 0) => {
     ctx.beginPath(); ctx.arc(x, y, (0.004 + (1 - k) * 0.012) * R, 0, 7)
     ctx.fillStyle = `rgba(200,225,250,${0.9 - k * 0.6})`; ctx.fill()
   }
+  if (typeof syncOverlay === 'function') syncOverlay()   // 按钮与 painted anchor 同帧
 }
 
 // 四审 P1-1：首屏请求有界退避（0/750/1500/3000ms 共 4 次），耗尽后给显式 retry
@@ -297,20 +299,48 @@ const hideHover = () => { clearTimeout(hoverTimer); hovercard.style.display = 'n
 const hoverIntent = (p) => { clearTimeout(hoverTimer); hoverTimer = setTimeout(() => showHover(p), 150) }
 
 const esc = (s) => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML }
+// 请求生命周期守卫（P1-4）：A→B 竞态与 close 后迟到响应统一由 guard 判废；
+// 打开即移交焦点，关闭 inert+aria-hidden 移出可访问树并归还 opener
+const guard = makeDrawerGuard()
 const openDrawer = async (p, opener) => {
-  drawerOpener = opener ?? null
+  drawerOpener = opener ?? drawerOpener
+  const token = guard.begin()
+  drawer.removeAttribute('inert'); drawer.setAttribute('aria-hidden', 'false')
   drawer.innerHTML = '<button class="close" aria-label="关闭">ESC</button><div class="meta">loading…</div>'
   drawer.classList.add('open')
   drawer.querySelector('.close').onclick = closeDrawer
+  drawer.querySelector('.close').focus()
   let d
   try {
-    const res = await fetch(`/viz/memory/${p.memory_id}`, { signal: AbortSignal.timeout(6000) })
+    const res = await fetch(`/viz/memory/${p.memory_id}`,
+      { signal: AbortSignal.any([token.signal, AbortSignal.timeout(6000)].filter(Boolean)) })
     d = await res.json()
   } catch (e) { d = { ok: false, error: e.message } }
-  if (!d.ok) { drawer.querySelector('.meta').textContent = `加载失败：${d.error}（ESC 关闭后重试）`; return }
+  if (!guard.isCurrent(token)) return          // 迟到响应：已被更新的 open 或 close 判废
+  if (!d.ok) {
+    drawer.querySelector('.meta').innerHTML = ''
+    const msg = document.createElement('span')
+    msg.textContent = `加载失败：${d.error} `
+    const retry = document.createElement('button')
+    retry.textContent = '重试'
+    retry.style.cssText = 'margin-left:8px;padding:2px 12px;background:#16202c;color:#b8c7d9;border:1px solid #2c3a4c;border-radius:4px;cursor:pointer'
+    retry.onclick = () => openDrawer(p, drawerOpener)
+    drawer.querySelector('.meta').append(msg, retry)
+    retry.focus()
+    return
+  }
   const m = d.memory
-  const curvePts = d.curve.filter(c => c.s != null)
-  const svgPts = curvePts.map((c, i) => `${(i / Math.max(1, curvePts.length - 1) * 100).toFixed(2)},${(64 - c.s * 60).toFixed(2)}`).join(' ')
+  // x 轴保真：按原 curve index 铺 0..100，null（锚点前禁区）断段绘制——
+  // 不把合法曲线伪装成覆盖完整 ±96h（一审 P1-1 前端半）
+  const N = d.curve.length
+  const segs = []
+  let cur = []
+  d.curve.forEach((c, i) => {
+    if (c.s == null) { if (cur.length) { segs.push(cur); cur = [] }; return }
+    cur.push(`${(i / (N - 1) * 100).toFixed(2)},${(64 - c.s * 60).toFixed(2)}`)
+  })
+  if (cur.length) segs.push(cur)
+  const curveSvg = segs.map(pts => `<polyline points="${pts.join(' ')}" fill="none" stroke="rgba(170,215,255,.85)" stroke-width="1"/>`).join('')
   const fadeY = (64 - d.fade_threshold * 60).toFixed(2)
   drawer.innerHTML = `
     <button class="close" aria-label="关闭">ESC</button>
@@ -321,40 +351,57 @@ const openDrawer = async (p, opener) => {
     <div class="sec">衰减曲线（服务端采样 ±96h）</div>
     <svg id="curve" viewBox="0 0 100 68" preserveAspectRatio="none">
       <line x1="0" y1="${fadeY}" x2="100" y2="${fadeY}" stroke="rgba(150,175,200,.3)" stroke-dasharray="2 2" stroke-width=".5"/>
-      <polyline points="${svgPts}" fill="none" stroke="rgba(170,215,255,.85)" stroke-width="1"/>
+      ${curveSvg}
     </svg>
     <div class="sec">归因（最近 ${d.attributions.length} 条）</div>
     ${d.attributions.map(a => `<div class="attr">${a.role === 'credited' ? '潮痕 credited' : '侵蚀 blamed'}${a.applied ? '' : `（未应用：${esc(a.reason ?? '')}）`}
       <span class="amt">${a.plasticity ? `${a.plasticity.effective_before} → ${a.plasticity.strength_anchor_after}` : ''}</span>
+      ${a.receipt_scores ? `<div class="meta">receipt #${a.receipt_scores.rank} · sim ${a.receipt_scores.similarity} · eff ${a.receipt_scores.effective_strength} · util ${a.receipt_scores.utility} · imp ${a.receipt_scores.importance} · score ${a.receipt_scores.final_score}</div>` : ''}
       <div class="meta">${esc(String(a.reported_at).slice(0, 19))} · ${esc(a.episode_id ?? '')}</div></div>`).join('') || '<div class="meta">尚无 outcome——只被召回过的记忆不会移动</div>'}
     ${d.related.length ? `<div class="sec">关联</div>` + d.related.map(r => `<div class="attr">${r.kind} · ${esc(r.memory_id.slice(0, 8))}</div>`).join('') : ''}
   `
   drawer.querySelector('.close').onclick = closeDrawer
 }
 const closeDrawer = () => {
+  guard.close()
   drawer.classList.remove('open')
+  drawer.setAttribute('inert', ''); drawer.setAttribute('aria-hidden', 'true')  // 关闭态移出 Tab/可访问树
   if (drawerOpener) { drawerOpener.focus(); drawerOpener = null }
 }
 addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDrawer(); hideHover() } })
 
-// a11y overlay：每粒子一个真实 button（Tab 巡航/Enter 原生获得；canvas 命中配同步 DOM）
-const buildOverlay = () => {
-  overlay.innerHTML = ''
-  for (const p of particles) {
-    const m = memIndex.get(p.memory_id)
-    const b = document.createElement('button')
-    const [x, y] = anchorXY(p)
-    b.style.left = `${x}px`; b.style.top = `${y}px`
-    b.setAttribute('aria-label', `${LAYER_ZH[p.layer]} 记忆：${(m?.content_preview ?? '').slice(0, 40)}`)
-    b.addEventListener('mouseenter', () => hoverIntent(p))
-    b.addEventListener('mouseleave', hideHover)
-    b.addEventListener('focus', () => showHover(p))
-    b.addEventListener('blur', hideHover)
-    b.addEventListener('click', (ev) => openDrawer(p, ev.currentTarget))
-    overlay.append(b)
-  }
+// a11y overlay：按钮与 particle 生命周期同步（P1-5）——新粒子即时得按钮，
+// 位置用 transform 在【同一 draw 帧】跟随 presentation pr（不写 layout 属性）
+const btnOf = new Map()   // particle -> button
+const placeBtn = (b, p) => {
+  const [x, y] = anchorXY(p)
+  b.style.transform = `translate(${(x - 11).toFixed(1)}px, ${(y - 11).toFixed(1)}px)`
 }
-addEventListener('resize', () => buildOverlay())
+const addOverlayButton = (p) => {
+  const m = memIndex.get(p.memory_id)
+  const b = document.createElement('button')
+  b.setAttribute('aria-label', `${LAYER_ZH[p.layer]} 记忆：${(m?.content_preview ?? '').slice(0, 40)}`)
+  b.addEventListener('mouseenter', () => hoverIntent(p))
+  b.addEventListener('mouseleave', hideHover)
+  b.addEventListener('focus', () => showHover(p))
+  b.addEventListener('blur', hideHover)
+  b.addEventListener('click', (ev) => openDrawer(p, ev.currentTarget))
+  placeBtn(b, p)
+  overlay.append(b)
+  btnOf.set(p, b)
+}
+const buildOverlay = () => {
+  overlay.innerHTML = ''; btnOf.clear()
+  for (const p of particles) addOverlayButton(p)
+}
+const syncOverlay = () => {           // draw 帧末调用：迁移中的粒子按钮同帧跟随
+  for (const [p, b] of btnOf) placeBtn(b, p)
+}
+let resizeRaf = 0
+addEventListener('resize', () => {    // rAF 合并重建
+  cancelAnimationFrame(resizeRaf)
+  resizeRaf = requestAnimationFrame(() => buildOverlay())
+})
 
 const boot = async () => {
   resize()

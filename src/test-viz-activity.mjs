@@ -245,3 +245,5 @@ try {
   await getPool().end()
 }
 console.log(`\n${passed} 场景全过`)
+
+process.exit(0)
