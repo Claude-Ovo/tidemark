@@ -38,6 +38,15 @@ const insRecall = (c, id, backdateSec = null) => c.query(
      ${backdateSec == null ? 'now()' : `now() - INTERVAL '${Number(backdateSec)} seconds'`})`,
   [T, id, A, `at-${id}`, bytes])
 
+// 大批量单语句插入（同一 now() → 同微秒；逐条 INSERT 会撞 15s 写事务上限——上限在工作）
+const insRecallBatch = (c, ids, backdateSec = null) => c.query(
+  `INSERT INTO recall_requests (tenant_id, request_id, agent_id, episode_id, attempt_id,
+     query_hmac, pipeline_version, receipt_json, serialization_checksum, created_at)
+   SELECT $1, id, $2, 'ep-act', 'at-' || id, $3, 'test', '{"receipt":{"items":[]}}', $3,
+     ${backdateSec == null ? 'now()' : `now() - INTERVAL '${Number(backdateSec)} seconds'`}
+   FROM unnest($4::STRING[]) AS id`,
+  [T, A, bytes, ids])
+
 // 客户端去重器（pool 前端将用同一规则）：(kind, event_id) 幂等
 const makeDedupe = () => {
   const seen = new Set()
@@ -131,6 +140,55 @@ try {
     }
     assert.equal(got.length, 5, `分页应拼出全部 5 条回填行，实际 ${got.length}`)
     // 回填行早于既有行 90s，必须按时间序先于它们出现（keyset 全序）
+  })
+  await t('A7 同微秒 170 条大组：SQL 元组 keyset 分页恰好 170/170 无重复（Codex 反例）', async () => {
+    const big = Array.from({ length: 170 }, () => randomUUID())
+    await inWriteTx(async (c) => insRecallBatch(c, big, 90), 'act-a7-ins')  // 单语句同微秒 backlog
+    const mine = new Set(big)
+    const seen = []
+    let cursor
+    for (let i = 0; i < 8; i++) {
+      const r = await vizActivity({ principal, after: cursor, limit: 100 })
+      seen.push(...r.events.filter(e => mine.has(e.event_id)).map(e => e.event_id))
+      if (!r.has_more && seen.length >= 170) break
+      cursor = r.page_cursor ?? r.cursor
+    }
+    assert.equal(seen.length, 170, `同微秒大组必须恰好 170/170，实际 ${seen.length}`)
+    assert.equal(new Set(seen).size, 170, '且无重复')
+  })
+
+  await t('A8 hot burst > limit：page_cursor 当轮 drain，最后一条不等 grace', async () => {
+    const burst = Array.from({ length: 130 }, () => randomUUID())
+    await inWriteTx(async (c) => insRecallBatch(c, burst), 'act-a8-ins')  // 单语句 now()——hot
+    const mine = new Set(burst)
+    const got = new Set()
+    let after, durable
+    for (let i = 0; i < 5; i++) {
+      const r = await vizActivity({ principal, after, limit: 100 })
+      for (const e of r.events) if (mine.has(e.event_id)) got.add(e.event_id)
+      durable = r.cursor
+      if (!r.has_more) break
+      after = r.page_cursor
+      assert.ok(r.page_cursor, 'has_more 时必须给 page_cursor')
+    }
+    assert.equal(got.size, 130, `hot burst 必须当轮 drain 完，实际 ${got.size}——不等 30s grace`)
+    // durable checkpoint 不得越过 watermark（hot 事件下轮仍重放，由客户端去重）
+    const durAt = Buffer.from(durable, 'base64').toString('utf8').split('|')[0]
+    const r2 = await vizActivity({ principal, limit: 1 })
+    assert.ok(durAt <= r2.watermark_at)
+  })
+
+  await t('A9 配置守卫：29999 接受 / 30000 拒绝（严格不等式）', async () => {
+    const { execSync } = await import('node:child_process')
+    const probe = (v) => {
+      try {
+        execSync(`node --input-type=module -e "process.env.TIDEMARK_WRITE_TX_TIMEOUT_MS='${v}'; const m = await import('./src/lib/viz-config.mjs'); console.log(m.WRITE_TX_TIMEOUT_MS)"`,
+          { cwd: fileURLToPath(new URL('..', import.meta.url)), stdio: 'pipe' })
+        return true
+      } catch { return false }
+    }
+    assert.equal(probe(29999), true, '29999 必须接受')
+    assert.equal(probe(30000), false, '30000（= SAFETY_GRACE）必须拒绝')
   })
 } finally {
   await cleanup()

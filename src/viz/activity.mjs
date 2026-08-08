@@ -11,9 +11,10 @@
 //   小数尾零截断不破坏比较：整数部分定宽，'+'(0x2b) < '.'(0x2e)）。
 // 只读：全程 SELECT，绝不产生 receipt/不触发塑性。
 import { inSerializableTx } from '../lib/db.mjs'
+import { SAFETY_GRACE_MS } from '../lib/viz-config.mjs'
 
 export const ACTIVITY_CFG = {
-  safety_grace_ms: 30000,   // SPEC §14 冻结：必须 > TIDEMARK_WRITE_TX_TIMEOUT_MS
+  safety_grace_ms: SAFETY_GRACE_MS,   // 单一真相源 viz-config.mjs；严格不等式在那里守
   default_limit: 100,
   max_limit: 500,
 }
@@ -29,10 +30,6 @@ const tupleCmp = (a, b) =>
   (a.at_exact < b.at_exact ? -1 : a.at_exact > b.at_exact ? 1 : 0) ||
   (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) ||
   (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0)
-const afterCursor = (ev, cur) =>
-  ev.at_exact > cur.at ? true : ev.at_exact < cur.at ? false :
-    ev.kind > cur.kind ? true : ev.kind < cur.kind ? false : ev.event_id > cur.id
-
 export const vizActivity = async ({ principal, after, limit }) => {
   if (!principal) return { ok: false, error: 'unauthorized' }
   const { tenant_id, agent_id } = principal
@@ -47,61 +44,70 @@ export const vizActivity = async ({ principal, after, limit }) => {
       `SELECT (now() - $1::INTERVAL)::STRING AS wm_exact, now()::STRING AS now_exact`,
       [`${ACTIVITY_CFG.safety_grace_ms} milliseconds`])).rows[0]
 
-    // 三源各取 >= 游标时间（同刻不同 kind/id 由 JS 全序过滤），带 buffer 防同刻挤压
-    const fetchN = n + 32
-    const remembers = (await c.query(
-      `SELECT memory_id, created_at, created_at::STRING AS at_exact
-       FROM memories
-       WHERE tenant_id=$1 AND agent_id=$2 AND admission='accepted' AND created_at >= $3::TIMESTAMPTZ
-       ORDER BY created_at, memory_id LIMIT ${fetchN}`,
-      [tenant_id, agent_id, cur.at])).rows.map(r => ({
-        kind: 'remember', event_id: r.memory_id, occurred_at: r.created_at, at_exact: r.at_exact,
-        memory_ids: [r.memory_id],
-      }))
-    const recalls = (await c.query(
-      `SELECT request_id, episode_id, attempt_id, created_at, created_at::STRING AS at_exact,
-              jsonb_array_length(receipt_json->'receipt'->'items') AS items_count
-       FROM recall_requests
-       WHERE tenant_id=$1 AND agent_id=$2 AND created_at >= $3::TIMESTAMPTZ
-       ORDER BY created_at, request_id LIMIT ${fetchN}`,
-      [tenant_id, agent_id, cur.at])).rows.map(r => ({
-        kind: 'recall', event_id: r.request_id, occurred_at: r.created_at, at_exact: r.at_exact,
-        episode_id: r.episode_id, attempt_id: r.attempt_id, items_count: Number(r.items_count ?? 0),
-      }))
-    const outcomes = (await c.query(
-      `SELECT outcome_request_id, status, reported_at, reported_at::STRING AS at_exact,
-              response_json->'items' AS items
-       FROM outcomes
-       WHERE tenant_id=$1 AND agent_id=$2 AND reported_at >= $3::TIMESTAMPTZ
-       ORDER BY reported_at, outcome_request_id LIMIT ${fetchN}`,
-      [tenant_id, agent_id, cur.at])).rows.map(r => ({
-        kind: 'outcome', event_id: r.outcome_request_id, occurred_at: r.reported_at, at_exact: r.at_exact,
+    // Codex activity 一审 P1-1：完整三元组 keyset **下推 SQL**——JS 过滤 SQL LIMIT 截过
+    // 的行会永久跳行（170 条同微秒反例）。固定 kind 的源，谓词按 kind 与 cur.kind 的
+    // 序关系化简：kind > cur.kind → at >= cur.at；kind = cur.kind → (at,id) > (cur.at,cur.id)；
+    // kind < cur.kind → at > cur.at。每源取 n+1（判断 has_more 够用，不再靠 buffer 撞运气）。
+    const fetchN = n + 1
+    const srcPredicate = (kind, col, idCol) => {
+      if (kind > cur.kind) return { sql: `${col} >= $3::TIMESTAMPTZ`, params: [cur.at] }
+      if (kind === cur.kind) return { sql: `(${col}, ${idCol}) > ($3::TIMESTAMPTZ, $4)`, params: [cur.at, cur.id] }
+      return { sql: `${col} > $3::TIMESTAMPTZ`, params: [cur.at] }
+    }
+    const q = async (kind, sql, baseParams, mapRow) => {
+      const pred = srcPredicate(kind, sql.col, sql.id)
+      return (await c.query(
+        `SELECT ${sql.select}, ${sql.col}::STRING AS at_exact FROM ${sql.from}
+         WHERE tenant_id=$1 AND agent_id=$2 ${sql.extra ?? ''} AND ${pred.sql}
+         ORDER BY ${sql.col}, ${sql.id} LIMIT ${fetchN}`,
+        [...baseParams, ...pred.params])).rows.map(mapRow)
+    }
+    const remembers = await q('remember',
+      { select: 'memory_id, created_at', col: 'created_at', id: 'memory_id', from: 'memories', extra: `AND admission='accepted'` },
+      [tenant_id, agent_id],
+      r => ({ kind: 'remember', event_id: r.memory_id, occurred_at: r.created_at, at_exact: r.at_exact, memory_ids: [r.memory_id] }))
+    const recalls = await q('recall',
+      { select: `request_id, episode_id, attempt_id, created_at, jsonb_array_length(receipt_json->'receipt'->'items') AS items_count`,
+        col: 'created_at', id: 'request_id', from: 'recall_requests' },
+      [tenant_id, agent_id],
+      r => ({ kind: 'recall', event_id: r.request_id, occurred_at: r.created_at, at_exact: r.at_exact,
+        episode_id: r.episode_id, attempt_id: r.attempt_id, items_count: Number(r.items_count ?? 0) }))
+    const outcomes = await q('outcome',
+      { select: `outcome_request_id, status, reported_at, response_json->'items' AS items`,
+        col: 'reported_at', id: 'outcome_request_id', from: 'outcomes' },
+      [tenant_id, agent_id],
+      r => ({ kind: 'outcome', event_id: r.outcome_request_id, occurred_at: r.reported_at, at_exact: r.at_exact,
         status: r.status,
-        // items 为 null（response_json 尚是 '{}' 占位——事务 B 未完成）时给空数组：
-        // 占位行随后被同事务 UPDATE，正常提交后重放会带上完整 items
+        // items 为 null（response_json '{}' 占位——事务 B 未完成）时给空数组；提交后重放补全
         items: Array.isArray(r.items)
           ? r.items.map(i => ({ memory_id: i.memory_id, role: i.role, applied: i.applied === true, reason: i.reason ?? null }))
-          : [],
-      }))
+          : [] }))
 
-    const merged = [...remembers, ...recalls, ...outcomes]
-      .filter(ev => afterCursor(ev, cur))
-      .sort(tupleCmp)
+    const merged = [...remembers, ...recalls, ...outcomes].sort(tupleCmp)   // SQL 已保证 > cursor
     const events = merged.slice(0, n)
     const last = events[events.length - 1]
+    const hasMore = merged.length > n
 
-    // cursor 语义：pre-watermark backlog 被截断 → 停在最后返回事件；否则推进到 watermark。
-    // hot-window（> watermark）事件永远不入 cursor——下轮重放，客户端去重。
-    const truncated = merged.length > n && last && last.at_exact < wm.wm_exact
-    const cursor = truncated
+    // durable cursor：backlog 截断（最后返回事件 <= watermark，含恰等边界——P1-1 修订，
+    // 恰等 watermark 的大组不得被 ~|~ 哨兵跳过）→ 停在最后返回事件；否则推进到 watermark。
+    // hot-window 事件永远不入 durable cursor——下轮重放，客户端 (kind,id) 去重。
+    const backlogTruncated = hasMore && last && last.at_exact <= wm.wm_exact
+    // durable cursor 永远不越 watermark：客户端用 ephemeral page_cursor（可能在 hot 区）
+    // 翻页时，durable 也只回 watermark 哨兵——绝不把 ephemeral token 回流成 checkpoint
+    const cursor = backlogTruncated
       ? encodeCursor(last.at_exact, last.kind, last.event_id)
-      : (wm.wm_exact > cur.at ? encodeCursor(wm.wm_exact, '~', '~') : (after ?? null))
+      : encodeCursor(wm.wm_exact, '~', '~')
+    // Codex 一审 P1-4：hot-window 截断也要能当轮 drain——ephemeral page token 指向
+    // 最后返回事件，只用于本轮连续翻页，durable checkpoint 仍是 cursor
+    const pageCursor = hasMore && last ? encodeCursor(last.at_exact, last.kind, last.event_id) : null
 
     const hotReplay = events.some(ev => ev.at_exact >= wm.wm_exact)
     return {
       ok: true,
       events: events.map(({ at_exact, ...ev }) => ev),
       cursor,
+      has_more: hasMore,
+      page_cursor: pageCursor,     // has_more 时非空：当轮 drain 用；不要持久化它
       watermark_at: wm.wm_exact,
       server_now: wm.now_exact,
       hot_replay: hotReplay || undefined,
