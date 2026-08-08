@@ -418,15 +418,13 @@ addEventListener('resize', () => {    // 二审 P1-1b：resize 不重建（重�
 const boot = async () => {
   resize()
   const snap = await fetchSnapshot()
-  const memories = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
-  for (const m of memories) memIndex.set(m.memory_id, m)
-  fadeR = fadeLineRadius(snap.fade_threshold)
-  const { placed, overflow } = layoutPool(memories)
-  particles = placed.map(p => ({ ...p, pr: p.r }))
-  buildOverlay()
-  meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
-    (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
+  applySnapshot(snap, { initial: true })
   draw(performance.now())
+
+  // 真实 activity 消费环（DESIGN v2 契约 B 消费规则）：scripted 模式（?script=1）只演语法，
+  // live 模式（默认）只认持久化事件——remember 生成粒子 / recall 只涟漪 /
+  // applied credited·blamed 潮痕+迁移 / cancelled·late·未 applied 零动作
+  if (new URLSearchParams(location.search).get('script') !== '1') startActivityLoop()
 
   if (new URLSearchParams(location.search).get('script') === '1' && particles.length > 2) {
     // remember 演示走正常 layout target：把 scripted 记忆并入 fixture 重跑 layout，
@@ -473,6 +471,106 @@ const boot = async () => {
     stepSeq()
   }
 }
+// ---- 快照应用与增量迁移：radiusOf 是唯一半径真相，快照差值驱动 migrate（credited 内移/
+//      blamed 外移/decay 缓慢外移全部由此表达——动画消费事件，位置消费快照，互不冒充）----
+function applySnapshot(snap, { initial = false } = {}) {
+  const memories = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
+  for (const m of memories) memIndex.set(m.memory_id, m)
+  fadeR = fadeLineRadius(snap.fade_threshold)
+  const { placed, overflow } = layoutPool(memories)
+  meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
+    (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
+  if (initial) {
+    particles = placed.map(p => ({ ...p, pr: p.r }))
+    buildOverlay()
+    return { added: [], removed: [] }
+  }
+  // 增量：已有粒子 → 目标半径变了就 migrate（可中断 settle）；新粒子 → 落滴入场；消失 → 移除
+  const byId = new Map(particles.map(p => [p.memory_id, p]))
+  const added = [], seen = new Set()
+  for (const np of placed) {
+    seen.add(np.memory_id)
+    const old = byId.get(np.memory_id)
+    if (old) {
+      old.s = np.s; old.layer = np.layer; old.theta = np.theta; old.markR = np.markR
+      if (Math.abs(np.r - old.r) > 1e-6) { old.r = np.r; migrate(old, np.r) }
+    } else added.push(np)
+  }
+  const removed = particles.filter(p => !seen.has(p.memory_id))
+  for (const p of removed) { btnOf.get(p)?.remove(); btnOf.delete(p) }
+  particles = particles.filter(p => seen.has(p.memory_id))
+  return { added, removed }
+}
+
+// ---- activity 消费环（契约 B 消费规则逐条落地）----
+const seenEvents = new Set()          // (kind|event_id) 幂等去重
+const EVENT_CAP = 5000                // 去重集有界：超限清半（重放窗口只有 30s，远够）
+const dedupeEvent = (e) => {
+  const k = `${e.kind}|${e.event_id}`
+  if (seenEvents.has(k)) return false
+  if (seenEvents.size > EVENT_CAP) { let i = 0; for (const x of seenEvents) { seenEvents.delete(x); if (++i > EVENT_CAP / 2) break } }
+  seenEvents.add(k)
+  return true
+}
+let durableCursor = null
+let refreshTimer = null
+const scheduleSnapshotRefresh = (delay = 1500) => {   // 事件后 debounce 刷新（迁移的位置真相）
+  clearTimeout(refreshTimer)
+  refreshTimer = setTimeout(async () => {
+    try {
+      const res = await fetch('/viz/ocean', { signal: AbortSignal.timeout(20000) })
+      const snap = await res.json()
+      if (!snap.ok) return
+      const { added } = applySnapshot(snap)
+      for (const np of added) {                        // remember：落滴后粒子留存（同 scripted 语法）
+        const spawn = { ...np, pr: np.r }
+        if (REDUCED) { attachParticle(spawn); continue }
+        drops.push({ theta: np.theta, r: np.r, t0: performance.now(), spawn })
+      }
+      requestDraw()
+    } catch {}                                          // 刷新失败由周期兜底，不打断消费环
+  }, delay)
+}
+async function pollActivity() {
+  let after = durableCursor
+  for (let page = 0; page < 10; page++) {              // page_cursor 当轮 drain（有界）
+    let r
+    try {
+      const q = new URLSearchParams(); if (after) q.set('after', after)
+      const res = await fetch(`/viz/activity?${q}`, { signal: AbortSignal.timeout(20000) })
+      r = await res.json()
+    } catch { return }
+    if (!r.ok) return
+    durableCursor = r.cursor                           // durable checkpoint（唯一持久化的）
+    let sawMutation = false
+    for (const e of r.events) {
+      if (!dedupeEvent(e)) continue
+      if (e.kind === 'recall') {
+        // recall 只涟漪不移动（契约）：涟漪自池心扩散——事件不携带 memory 集，receipt 属抽屉
+        ripples.push({ theta: 0, r: 0, t0: performance.now() })
+      } else if (e.kind === 'remember') {
+        sawMutation = true                             // 粒子生成走快照 diff（layout 唯一真相）
+      } else if (e.kind === 'outcome') {
+        for (const it of (e.items ?? [])) {
+          if (it.applied !== true) continue            // cancelled/late/未 applied：零动作
+          const p = particles.find(x => x.memory_id === it.memory_id)
+          if (p) addRing(p, it.role)                   // 潮痕先落；位移由随后的快照差值 settle
+          sawMutation = true
+        }
+      }
+    }
+    if (r.events.length) requestDraw()
+    if (sawMutation) scheduleSnapshotRefresh()
+    if (!r.has_more) break
+    after = r.page_cursor                              // ephemeral：只在本轮链内用，不持久化
+  }
+}
+function startActivityLoop() {
+  pollActivity()
+  setInterval(pollActivity, 5000)
+  setInterval(() => scheduleSnapshotRefresh(0), 60000) // 周期兜底：decay 的缓慢外移同样来自快照差值
+}
+
 boot().catch(showRetry)
 </script>
 </body>
