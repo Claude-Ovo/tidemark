@@ -14,7 +14,7 @@
 // 塑性断言：applied=true 且 blamed after<before（终轮加 Active 带断言）/ credited gain>0 且
 // after>before，任何一条不成立 exit 1——"applied"不冒充"迁移"。
 // 运行：node scripts/demo-refresh.mjs [--tenant=demo-tenant] [--agent=demo-agent] [--phase=all|seed|finalize]
-import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 if (!process.env.COCKROACH_DATABASE_URL) {
@@ -33,10 +33,14 @@ const PHASE = arg('phase', 'all')
 // (tenant, agent, run-key, 步骤标签) 确定性派生。中途失败后【同 key 重跑】走各工具
 // 幂等层原路返回，remember 行数与塑性计数都不二次增加；final agent 固定 --run-key=final-v1，
 // 新演练显式换 key。崩溃注入 seam：TIDEMARK_DEMO_CRASH_AFTER=<label> 在该步后强退（判别测试用）。
-const RUNKEY = arg('run-key', 'v1')
+// final agent 硬 guard（四审 P2）：不是注释，是代码——run-key 强制 final-v1、只许 finalize，
+// 已播种的 8 条 seed 绝不能重播
+const IS_FINAL = AGENT === 'tidemark-final'
+const RUNKEY = arg('run-key', IS_FINAL ? 'final-v1' : 'v1')
 if (!['all', 'seed', 'finalize'].includes(PHASE)) { console.error(`invalid --phase=${PHASE}`); process.exit(1) }
+if (IS_FINAL && RUNKEY !== 'final-v1') { console.error(`FAIL tidemark-final 强制 --run-key=final-v1（收到 ${RUNKEY}）`); process.exit(1) }
+if (IS_FINAL && PHASE !== 'finalize') { console.error(`FAIL tidemark-final 只许 --phase=finalize（seed 已播，不得重播）`); process.exit(1) }
 
-const { createHash } = await import('node:crypto')
 const { rememberTool } = await import('../src/tools/remember.mjs')
 const { recallTool } = await import('../src/tools/recall.mjs')
 const { logEventTool } = await import('../src/tools/log-event.mjs')
@@ -63,7 +67,7 @@ if (snap.capped) fail('preflight fail closed: 快照 capped=true，截断计数�
 const rows = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
 // 阈值单一来源：与 UI 同一份待校准视觉参数，禁止手抄漂移（三审 P2）
 const { POOL_CFG } = await import('../web/src/pool/layout-pool.mjs')
-const ANCHOR_MIN = POOL_CFG.ANCHOR_MIN
+const ANCHOR_MIN = POOL_CFG.ANCHOR_MIN, RECEDING_MAX = POOL_CFG.RECEDING_MAX   // 两个都取，零手抄（四审 P2）
 const ANCHOR_CAPACITY = 28   // 容量为 layout 实测保守值
 const seedAdd = PHASE !== 'finalize' ? 8 : 0
 const finAdd = PHASE !== 'seed' ? 4 : 0          // finalize 语料也计入 preflight（二审修正）
@@ -124,12 +128,19 @@ const finIds = await remember(FINALIZE, ep('fin'), 'fin')
 console.log(`finalize remember x${finIds.length} -> anchor band`)
 const blameTarget = finIds[BLAME_IDX]
 
-const evidenceRound = async ({ query, episode, role, status, targetId, tag }) => {
+const evidenceRound = async ({ query, episode, role, status, targetId, tag, windowCheck = null }) => {
   const attempt = did(`att-${tag}`), task = did(`task-${tag}`)
   const rec = die('recall', await recallTool({
     principal, query, purpose: 'demo evidence round', episode_id: episode,
     attempt_id: attempt, request_id: did(`rec-${tag}`),
   }))
+  // 可演示窗口只在首次执行校验：replay=true 说明同 key 重跑，target 已锁定、无条件沿用
+  if (windowCheck && rec.replay !== true) {
+    const { min, max, effective } = windowCheck
+    if (!(effective > min && effective < max)) {
+      fail(`${role} 目标当前 effective=${effective} 不在可演示窗口 (${min}, ${max})——等它衰减，或显式换 --credit-memory-id=`)
+    }
+  }
   const rrId = rec.receipt.request_id
   const item = (rec.receipt?.items ?? []).find(i => i.injected && i.memory_id === targetId)
   if (!item) fail(`${role} 目标 ${targetId.slice(0, 8)} 未被 recall 注入（query="${query}"）——不静默换目标`)
@@ -166,24 +177,36 @@ let lastP = null
 for (let round = 0; round < 2; round++) {
   lastP = await evidenceRound({ query: BLAME_QUERY, episode: ep(`blame${round}`), role: 'blamed', status: 'failure', targetId: blameTarget, tag: `blame${round}` })
 }
-if (!(lastP.strength_anchor_after > 0.35 && lastP.strength_anchor_after < ANCHOR_MIN)) {
-  fail(`blamed 终态 ${lastP.strength_anchor_after} 不在 Active 带 (0.35, 0.70)——时间模型错误，不得宣称穿层`)
+if (!(lastP.strength_anchor_after > RECEDING_MAX && lastP.strength_anchor_after < ANCHOR_MIN)) {
+  fail(`blamed 终态 ${lastP.strength_anchor_after} 不在 Active 带 (${RECEDING_MAX}, ${ANCHOR_MIN})——时间模型错误，不得宣称穿层`)
 }
 console.log(`  -> Active 带断言通过（${lastP.strength_anchor_after}）`)
 
-// credited 锁一条旧记忆（服务端快照选材：未 pin、effective 0.05~0.5——衰减后的 seed 正是候选）
-const oldRows = rows
-  .filter(r => !r.pinned && r.effective_strength < 0.5 && r.effective_strength > 0.05)
-  .sort((a, b) => a.effective_strength - b.effective_strength)
-if (oldRows.length) {
-  const credTarget = oldRows[Math.floor(oldRows.length / 2)]
-  console.log('credited round（锁定旧记忆，断言 gain>0）:')
-  await evidenceRound({
-    query: credTarget.content_preview.slice(0, 40), episode: ep('credit'),
-    role: 'credited', status: 'success', targetId: credTarget.memory_id, tag: 'credit',
-  })
-  console.log(`done. run-key=${RUNKEY}：blamed ×2 穿进 Active + credited 上浮全部实证`)
+// credited target 是 run manifest 的稳定输入（四审 P1）——绝不从 mutable effective 中
+// 每轮重选（首轮 credited 会改排序/过滤，次轮同 key 换目标 → 幂等 ID 撞车）。
+// 优先级：--credit-memory-id 显式传入 > 不可变 seed 语料按 CREDIT_IDX 的 preview 前缀
+// 定位（seed 单轮播种时唯一，多副本=污染 agent 直接 fail）。可演示窗口（0.05~0.5）
+// 只在首次执行校验——recall replay=true 即重跑，无条件沿用同一 target 走幂等 replay。
+const CREDIT_IDX = 2   // seed 语料[2]：退货保修 decision（[0][1] 会被 pin，pinned 不参与塑性）
+const explicitCredit = arg('credit-memory-id', null)
+let credTarget = null
+if (explicitCredit) {
+  credTarget = rows.find(r => r.memory_id === explicitCredit)
+  if (!credTarget) fail(`--credit-memory-id ${explicitCredit} 不在快照中`)
 } else {
-  console.log(`done（credited SKIPPED：无 effective 0.05~0.5 的旧记忆——fresh agent 无衰减历史，等 seed 衰减后跑 --phase=finalize）。run-key=${RUNKEY}：blamed ×2 穿进 Active 已实证`)
+  const matches = rows.filter(r => !r.pinned && r.content_preview.startsWith(SEED[CREDIT_IDX][1].slice(0, 20)))
+  if (matches.length > 1) fail(`credited 定位到 ${matches.length} 份同语料副本——污染 agent，请显式 --credit-memory-id=`)
+  credTarget = matches[0] ?? null
+}
+if (credTarget) {
+  console.log('credited round（manifest 稳定目标，断言 gain>0）:')
+  const p = await evidenceRound({
+    query: SEED[CREDIT_IDX][1].slice(0, 40), episode: ep('credit'),
+    role: 'credited', status: 'success', targetId: credTarget.memory_id, tag: 'credit',
+    windowCheck: { min: 0.05, max: 0.5, effective: credTarget.effective_strength },
+  })
+  console.log(`done. run-key=${RUNKEY}：blamed ×2 穿进 Active + credited 上浮（gain ${p.reinforcement_gain}）全部实证`)
+} else {
+  console.log(`done（credited SKIPPED：快照中未定位到 seed 语料[${CREDIT_IDX}]——先跑 seed 或显式 --credit-memory-id=）。run-key=${RUNKEY}：blamed ×2 穿进 Active 已实证`)
 }
 await getPool().end()
