@@ -22,7 +22,9 @@ const { recallTool } = await import('../src/tools/recall.mjs')
 const { logEventTool } = await import('../src/tools/log-event.mjs')
 const { reportOutcomeTool } = await import('../src/tools/report-outcome.mjs')
 const { getPool } = await import('../src/lib/db.mjs')
-const { runArm, ARMS } = await import('../src/ab/harness.mjs')
+const { runArm, ARMS, experimentIdentity } = await import('../src/ab/harness.mjs')
+const { embedModelId } = await import('../src/lib/embed.mjs')
+const { CFG: RECALL_CFG } = await import('../src/lib/recall-config.mjs')
 
 const tools = {
   remember: rememberTool, recall: recallTool,
@@ -32,19 +34,23 @@ const tools = {
 const traces = new Map(ARMS.map(a => [a, []]))
 const trace = (arm, obj) => traces.get(arm).push(obj)
 
-console.log(`A/B run-key=${RUNKEY} seed=${SEED} tenant-base=${TENANT_BASE}（三臂同任务/同 seed/同 embedding；oracle=确定性哨兵匹配）`)
+// canonical experiment identity（预审 P1-2）：seed/语料/embedding/召回配置任一变化 = 新身份新 tenant
+const identity = experimentIdentity({ seed: SEED, embeddingId: embedModelId(), recallCfg: RECALL_CFG })
+console.log(`A/B exp_id=${identity.exp_id} seed=${SEED}（agent_policy=deterministic-v1, model=null；指标=injection hit / lifecycle ablation）`)
+console.log(`  identity: ${JSON.stringify(identity.components)}`)
 const summary = []
 for (const arm of ARMS) {
-  const r = await runArm({ arm, runKey: RUNKEY, tenantBase: TENANT_BASE, tools, seed: SEED, trace })
+  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, seed: SEED, trace })
   summary.push(r)
-  console.log(`  ${arm.padEnd(12)} score=${r.score}  probes=${r.probes}`)
+  console.log(`  ${arm.padEnd(12)} score=${r.score}  task_success=${r.task_success_rate}  probes=${r.probes}`)
 }
 
 mkdirSync(new URL('../traces/', import.meta.url), { recursive: true })
 for (const arm of ARMS) {
-  const p = fileURLToPath(new URL(`../traces/ab-${RUNKEY}-${arm}.jsonl`, import.meta.url))
+  const p = fileURLToPath(new URL(`../traces/ab-${identity.exp_id}-${arm}.jsonl`, import.meta.url))
   writeFileSync(p, traces.get(arm).map(x => JSON.stringify(x)).join('\n') + '\n')
 }
-console.log(`traces -> traces/ab-${RUNKEY}-{arm}.jsonl（content-free）`)
-console.log(JSON.stringify({ run_key: RUNKEY, seed: SEED, summary: summary.map(s => ({ arm: s.arm, score: s.score })) }))
+console.log(`traces -> traces/ab-${identity.exp_id}-{arm}.jsonl（content-free，header 含完整 identity）`)
+console.log(JSON.stringify({ exp_id: identity.exp_id, identity: identity.components,
+  summary: summary.map(s => ({ arm: s.arm, score: s.score, task_success_rate: s.task_success_rate })) }))
 await getPool().end()

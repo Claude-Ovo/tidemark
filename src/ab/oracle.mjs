@@ -1,26 +1,41 @@
-// P0-12 外部 oracle（冻结契约："外部 oracle 判分"）：确定性哨兵匹配，零 LLM 零自评。
-// 输入只有 harness 递来的注入集合与期望事实 ID——绝不读 viz、绝不读画面、绝不让被测系统
-// 自己给自己打分（injected item 的 content 需要读原文核哨兵：经 detail 面按 agent 键取，
-// 或直接由 recall 注入载荷的 content 字段核——两者都是数据面，不经任何呈现层）。
-// 评分：score = 命中的 required 事实数 / required 总数（hit@required）。
-// 公开 trace 里只出现事实 ID 与哈希，不出现原文（content-free 契约）。
+// P0-12 外部 oracle（预审修订版）：确定性判分，零 LLM 零自评，标签不进检索输入——
+// 判分依据是 plant 期建立的 memory_id→fact_id 外部 fixture map（预审方法学裁定），
+// 不再读正文哨兵。绝不读 viz、绝不让被测系统自评。
+//
+// 评分规则：
+//   基础：score = |required ∩ 注入命中| / |required|；given（任务自带）计入 found——
+//         required 为空且无特殊标记时以 given 覆盖度记满分（对照①）
+//   poison：注入集中出现 poison 事实 → 本 probe 直接 0（对照②：过期记忆压过当前真值即失败）
+//   expect_abstain：零注入=1，任何注入=0（对照③）
+// success 派生（预审 P1-1：outcome 必须由 oracle 结果派生，不许脱钩）：
+//   task_success = expect_abstain ? (injected==0) : (hit === required 全中 且无 poison)
 
-const SENTINEL = /\[FACT:([a-z0-9-]+)\]/g
+export const scoreProbe = ({ injected, required = [], given = [], expectAbstain = false, poisonIds = new Set(), factOf }) => {
+  const injectedFacts = injected.map(i => factOf(i.memory_id)).filter(Boolean)
+  const poisonHit = injectedFacts.some(f => poisonIds.has(f))
+  const found = new Set(injectedFacts.filter(f => required.includes(f)))
+  const hitIds = injected.filter(i => required.includes(factOf(i.memory_id))).map(i => i.memory_id)
 
-export const scoreProbe = async ({ injected, required }) => {
-  const hitIds = []                 // 命中的 memory_id（供 full 臂做证据链）
-  const found = new Set()
-  for (const item of injected) {
-    // recall 注入载荷本身带 content（agent 面数据）；从中提取哨兵
-    const text = item.content ?? ''
-    for (const m of text.matchAll(SENTINEL)) {
-      if (required.includes(m[1])) { found.add(m[1]); hitIds.push(item.memory_id) }
-    }
+  let score, taskSuccess
+  if (expectAbstain) {
+    score = injected.length === 0 ? 1 : 0
+    taskSuccess = injected.length === 0
+  } else if (poisonHit) {
+    score = 0
+    taskSuccess = false
+  } else if (required.length === 0) {
+    score = given.length ? 1 : 0            // 对照①：任务自带答案，确定性 policy 直接完成
+    taskSuccess = given.length > 0
+  } else {
+    score = +(found.size / required.length).toFixed(4)
+    taskSuccess = found.size === required.length
   }
   return {
     required: required.length,
     hit: found.size,
     hit_ids: [...new Set(hitIds)],
-    score: required.length ? +(found.size / required.length).toFixed(4) : 0,
+    poison_hit: poisonHit,
+    task_success: taskSuccess,
+    score,
   }
 }
