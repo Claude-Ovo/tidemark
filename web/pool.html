@@ -29,19 +29,31 @@
   #legend .swatch.dash { border-top-style: dashed; }
   #legend .dir { opacity: .6; margin-top: 2px; }
   #err { position: fixed; inset: 0; display: none; place-items: center; color: #d98c8c; }
-  /* hover 固定卡：不跟鼠标（GPT 稿采纳项），120-180ms 延迟出现 */
-  #hovercard { position: fixed; right: 16px; top: 64px; width: 260px; padding: 10px 12px;
+  /* hover 卡（Owner 裁定改稿：出现在鼠标当前位置，不再固定角落）：
+     150ms intent 延迟 + 120ms ease-out 淡入上浮；连续悬停走热路径立即显示 */
+  #hovercard { position: fixed; left: 0; top: 0; width: 260px; padding: 10px 12px;
     background: rgba(13,18,24,.92); border: 1px solid #223042; border-radius: 6px;
-    font-size: 12px; line-height: 1.6; display: none; pointer-events: none; z-index: 5; }
+    font-size: 12px; line-height: 1.6; pointer-events: none; z-index: 5;
+    opacity: 0; visibility: hidden; transform: translateY(4px);
+    transition: opacity 120ms cubic-bezier(0.23,1,0.32,1), transform 120ms cubic-bezier(0.23,1,0.32,1),
+      visibility 0s linear 120ms; }
+  #hovercard.show { opacity: 1; visibility: visible; transform: translateY(0); transition-delay: 0s; }
   #hovercard .k { opacity: .5; margin-right: 6px; }
   #hovercard .preview { margin-top: 6px; opacity: .8; }
-  /* 右侧抽屉：detail 真源；reduced-motion 下无过渡 */
-  #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 92vw);
-    background: #0b0f14; border-left: 1px solid #223042; padding: 18px 20px;
-    transform: translateX(105%); transition: transform 280ms cubic-bezier(0.32, 0.72, 0, 1); overflow-y: auto;
-    z-index: 10; font-size: 13px; line-height: 1.65; }
-  #drawer.open { transform: translateX(0); }
-  @media (prefers-reduced-motion: reduce) { #drawer { transition: none; } }
+  /* 详情（Owner 裁定改稿：居中 modal，不再右侧抽屉）：scale .96→1 + 淡入，
+     进 220ms / 出 160ms 不对称；detail 真源；reduced-motion 下无过渡 */
+  #scrim { position: fixed; inset: 0; background: rgba(4,7,11,.55); opacity: 0;
+    pointer-events: none; z-index: 9; transition: opacity 200ms cubic-bezier(0.23,1,0.32,1); }
+  #scrim.show { opacity: 1; pointer-events: auto; }
+  #drawer { position: fixed; left: 50%; top: 50%; width: min(520px, 92vw);
+    max-height: min(78vh, 660px); background: #0b0f14; border: 1px solid #223042;
+    border-radius: 10px; padding: 18px 20px; overflow-y: auto; z-index: 10;
+    font-size: 13px; line-height: 1.65; opacity: 0; pointer-events: none;
+    transform: translate(-50%, -50%) scale(0.96);
+    transition: opacity 160ms cubic-bezier(0.23,1,0.32,1), transform 160ms cubic-bezier(0.23,1,0.32,1); }
+  #drawer.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%) scale(1);
+    transition-duration: 220ms, 220ms; }
+  @media (prefers-reduced-motion: reduce) { #drawer, #scrim, #hovercard { transition: none; } }
   #drawer h2 { font-size: 13px; margin: 0 0 4px; color: #dfe9f5; }
   #drawer .meta { font-size: 11px; opacity: .5; margin-bottom: 12px; }
   #drawer .content { white-space: pre-wrap; background: rgba(140,170,205,.05);
@@ -61,7 +73,6 @@
   @media (max-width: 480px) {
     #hud .thesis { font-size: 13px; }
     #legend { font-size: 10px; line-height: 1.7; }
-    #hovercard { right: 8px; left: 8px; width: auto; }
   }
 </style>
 </head>
@@ -80,7 +91,8 @@
 </div>
 <div id="err"></div>
 <div id="hovercard" role="status"></div>
-<div id="drawer" role="dialog" aria-modal="false" aria-label="记忆详情" inert aria-hidden="true"></div>
+<div id="scrim"></div>
+<div id="drawer" role="dialog" aria-modal="true" aria-label="记忆详情" inert aria-hidden="true"></div>
 <div id="overlay"></div>
 <script type="module">
 import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout-pool.mjs'
@@ -104,18 +116,64 @@ rmQuery.addEventListener?.('change', (e) => {
   for (const d of drops) { if (d.spawn) { attachParticle(d.spawn); d.spawn = null } }  // 待生成粒子落下
   drops = []
   ripples = []                                       // 移动涟漪清除；潮痕静态标记保留
+  for (const g of grows) g.p.mrScale = 1             // 生长/入场直落终态
+  grows = []
+  for (const en of entrances) en.p.alpha = 1
+  entrances = []
   draw(performance.now())
 })
 
-// particles: layout 输出 + 呈现态（pr = presentation radius，迁移持久不回跳）
+// ---- 动效常量与曲线（audit 批：魔法数收口；曲线用精确 cubic-bezier 求解，不近似）----
+const MOTION = {
+  MIGRATE_MS: 1500,           // 迁移 settle（结论 65：可中断，从当前呈现值 retarget）
+  RIPPLE_MS: 1400,            // 涟漪扩散
+  RAIN_FALL_MS: 380,          // remember 雨滴下落（落体 ease-in = 重力）
+  ATTACH_GROW_MS: 220,        // 着水后粒子从滴径长到 markR
+  ENTRANCE_MS: 260,           // 首屏单粒子淡入
+  ENTRANCE_LAYER_MS: 180,     // 首屏层间错峰（anchor→active→receding）
+  ENTRANCE_SWEEP_MS: 260,     // 首屏层内按角向扫过
+  HOVER_INTENT_MS: 150, HOVER_WARM_MS: 400,
+  RING_STAY: 4500, RING_FADE: 800,   // 潮痕停留/淡出（四审 P1-3 签定值）
+}
+// 精确 cubic-bezier 求值（牛顿迭代+二分兜底）——AUDIT 指定曲线逐字落，不用弱内建近似
+const cubicBezier = (p1x, p1y, p2x, p2y) => {
+  const cx = 3 * p1x, bx = 3 * (p2x - p1x) - cx, ax = 1 - cx - bx
+  const cy = 3 * p1y, by = 3 * (p2y - p1y) - cy, ay = 1 - cy - by
+  const sx = (t) => ((ax * t + bx) * t + cx) * t
+  const sy = (t) => ((ay * t + by) * t + cy) * t
+  const dx = (t) => (3 * ax * t + 2 * bx) * t + cx
+  return (x) => {
+    if (x <= 0) return 0
+    if (x >= 1) return 1
+    let t = x
+    for (let i = 0; i < 8; i++) {
+      const err = sx(t) - x
+      if (Math.abs(err) < 1e-6) return sy(t)
+      const d = dx(t)
+      if (Math.abs(d) < 1e-6) break
+      t -= err / d
+    }
+    let lo = 0, hi = 1
+    while (hi - lo > 1e-6) { t = (lo + hi) / 2; if (sx(t) < x) lo = t; else hi = t }
+    return sy(t)
+  }
+}
+const easeInOutStrong = cubicBezier(0.77, 0, 0.175, 1)   // 迁移：屏上位移用强 in-out
+const easeOutStrong = cubicBezier(0.23, 1, 0.32, 1)      // 涟漪扩张/生长/入场：强 ease-out
+const easeInQuad = (k) => k * k                          // 雨滴落体（物理：匀加速）
+
+// particles: layout 输出 + 呈现态（pr = presentation radius，迁移持久不回跳；
+// mrScale = 着水生长系数；alpha = 首屏入场淡入系数，完成后恒 1）
 let particles = [], fadeR = fadeLineRadius(0.15)
-let ripples = []        // { theta, r, t0 }
-let drops = []          // { theta, r, t0, spawn }（spawn: 落滴结束后留存的新粒子）
+let ripples = []        // { theta, r, t0, small }（small: 着水微涟漪/多目标 recall 收敛尺寸）
+let drops = []          // { theta, r, t0, spawn }（雨滴：下落→着水→spawn 留存）
 let tweens = []         // { p, from, to, t0, dur }（可中断：新 tween 从当前 pr 起算并顶掉旧的）
+let grows = []          // { p, t0 }（着水后 markR 生长，消除 attach 尺寸 pop）
+let entrances = []      // { p, t0 }（首屏一次性错峰入场，reduced 直落）
 // 四审 P1-3：潮痕是事件 signature 不是常驻编码——settle 后停留 RING_STAY 再淡出，
-// 半径终态持久；最新 outcome 状态属于 hover/drawer（本原型不实现）
+// 半径终态持久；最新 outcome 状态属于 hover/drawer
 let rings = []          // { p, kind: 'credited'|'blamed', t0, until }
-const RING_STAY = 4500, RING_FADE = 800
+const RING_STAY = MOTION.RING_STAY, RING_FADE = MOTION.RING_FADE
 let rafActive = false
 
 const geo = () => {
@@ -129,10 +187,8 @@ const resize = () => {
 }
 addEventListener('resize', () => { resize(); draw(performance.now()) })
 
-const easeInOut = (k) => (k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2)
-
 // 迁移：从当前呈现值 retarget（可中断）；REDUCED 直落终态
-const migrate = (p, to, dur = 1500) => {
+const migrate = (p, to, dur = MOTION.MIGRATE_MS) => {
   if (REDUCED) { p.pr = to; requestDraw(); return }
   tweens = tweens.filter(t => t.p !== p)          // 中断旧 tween：from 取当前 pr，不回跳
   tweens.push({ p, from: p.pr, to, t0: performance.now(), dur })
@@ -143,7 +199,7 @@ const migrate = (p, to, dur = 1500) => {
 // addRing 用 timer 在 fade 起点唤醒 rAF
 const ringFading = (now) => rings.some(rg => now >= rg.t0 + RING_STAY)
 const anyActive = (now = performance.now()) =>
-  tweens.length || ripples.length || drops.length || ringFading(now)
+  tweens.length || ripples.length || drops.length || grows.length || entrances.length || ringFading(now)
 const requestDraw = () => {
   if (rafActive) return
   rafActive = true
@@ -165,14 +221,28 @@ const requestDraw = () => {
 const step = (now) => {
   for (const tw of tweens) {
     const k = Math.min(1, (now - tw.t0) / tw.dur)
-    tw.p.pr = tw.from + (tw.to - tw.from) * easeInOut(k)
+    tw.p.pr = tw.from + (tw.to - tw.from) * easeInOutStrong(k)   // 屏上位移：强 in-out
   }
   tweens = tweens.filter(tw => now - tw.t0 < tw.dur)
-  ripples = ripples.filter(r => now - r.t0 < 1400)
+  ripples = ripples.filter(r => now - r.t0 < MOTION.RIPPLE_MS)
   for (const d of drops) {
-    if (now - d.t0 >= 900 && d.spawn) { attachParticle(d.spawn); d.spawn = null }  // 落滴结束→粒子+按钮留存
+    // 雨滴着水：微涟漪 + spawn 留存（生长起步消除尺寸 pop）
+    if (now - d.t0 >= MOTION.RAIN_FALL_MS && d.spawn) {
+      ripples.push({ theta: d.theta, r: d.r, t0: now, small: true })
+      attachParticle(d.spawn); d.spawn = null
+    }
   }
-  drops = drops.filter(d => now - d.t0 < 900)
+  drops = drops.filter(d => now - d.t0 < MOTION.RAIN_FALL_MS)
+  for (const g of grows) {
+    const k = Math.min(1, (now - g.t0) / MOTION.ATTACH_GROW_MS)
+    g.p.mrScale = 0.45 + 0.55 * easeOutStrong(k)
+  }
+  grows = grows.filter(g => { if (now - g.t0 < MOTION.ATTACH_GROW_MS) return true; g.p.mrScale = 1; return false })
+  for (const en of entrances) {
+    const k = Math.min(1, Math.max(0, (now - en.t0) / MOTION.ENTRANCE_MS))
+    en.p.alpha = easeOutStrong(k)
+  }
+  entrances = entrances.filter(en => { if (now - en.t0 < MOTION.ENTRANCE_MS) return true; en.p.alpha = 1; return false })
   rings = rings.filter(rg => now < rg.until)          // 潮痕到期即清，不留常驻残影
 }
 
@@ -209,8 +279,8 @@ const draw = (now = 0) => {
 
   for (const p of particles) {
     const x = cx + p.pr * R * Math.cos(p.theta), y = cy + p.pr * R * Math.sin(p.theta)
-    ctx.beginPath(); ctx.arc(x, y, p.markR * R, 0, 7)
-    ctx.fillStyle = 'rgba(190,215,240,.85)'; ctx.fill()
+    ctx.beginPath(); ctx.arc(x, y, p.markR * (p.mrScale ?? 1) * R, 0, 7)
+    ctx.fillStyle = `rgba(190,215,240,${(0.85 * (p.alpha ?? 1)).toFixed(3)})`; ctx.fill()
   }
   for (const rg of rings) {                            // 潮痕：停留后淡出，跟随粒子当前呈现位
     const x = cx + rg.p.pr * R * Math.cos(rg.p.theta), y = cy + rg.p.pr * R * Math.sin(rg.p.theta)
@@ -218,18 +288,31 @@ const draw = (now = 0) => {
     ringMark(x, y, (rg.p.markR + 0.008) * R, rg.kind, alpha)
   }
   for (const rp of ripples) {
-    const k = (now - rp.t0) / 1400
+    // 物理感：半径快扩后减速（强 ease-out），振幅后段加速消散
+    const k = Math.min(1, (now - rp.t0) / MOTION.RIPPLE_MS)
+    const g = easeOutStrong(k)
+    const max = rp.small ? 0.045 : 0.09
     const x = cx + rp.r * R * Math.cos(rp.theta), y = cy + rp.r * R * Math.sin(rp.theta)
-    ctx.beginPath(); ctx.arc(x, y, (0.01 + k * 0.09) * R, 0, 7)
-    ctx.strokeStyle = `rgba(150,200,255,${(1 - k) * 0.5})`; ctx.lineWidth = 1.5; ctx.stroke()
+    ctx.beginPath(); ctx.arc(x, y, (0.01 + g * max) * R, 0, 7)
+    ctx.strokeStyle = `rgba(150,200,255,${(Math.pow(1 - k, 1.4) * 0.5).toFixed(3)})`
+    ctx.lineWidth = 1.5; ctx.stroke()
   }
   for (const d of drops) {
-    const k = (now - d.t0) / 900
-    const x = cx + d.r * R * Math.cos(d.theta), y = cy + d.r * R * Math.sin(d.theta)
-    ctx.beginPath(); ctx.arc(x, y, Math.max(0, 0.004 + (1 - k) * 0.012) * R, 0, 7)   // 防负半径（过期 drop 防御）
-    ctx.fillStyle = `rgba(200,225,250,${0.9 - k * 0.6})`; ctx.fill()
+    // 雨滴（参考 rainform「data into rain」）：从上方 0.12R 处匀加速落体（ease-in=重力），
+    // 滴头 + 短拖尾；着水事件在 step 里触发微涟漪与 spawn 留存
+    const k = Math.min(1, (now - d.t0) / MOTION.RAIN_FALL_MS)
+    const g = easeInQuad(k)
+    const tx = cx + d.r * R * Math.cos(d.theta), ty = cy + d.r * R * Math.sin(d.theta)
+    const y = ty - (1 - g) * 0.12 * R
+    const alpha = 0.25 + k * 0.65
+    ctx.strokeStyle = `rgba(200,225,250,${(alpha * 0.45).toFixed(3)})`
+    ctx.lineWidth = 1
+    ctx.beginPath(); ctx.moveTo(tx, y - 0.022 * R * (1 - g * 0.5)); ctx.lineTo(tx, y); ctx.stroke()
+    ctx.beginPath(); ctx.arc(tx, y, 0.005 * R, 0, 7)
+    ctx.fillStyle = `rgba(200,225,250,${alpha.toFixed(3)})`; ctx.fill()
   }
-  if (typeof syncOverlay === 'function') syncOverlay()   // 按钮与 painted anchor 同帧
+  // 按钮与 painted anchor 同帧；audit #5：只同步迁移中的粒子（其余按钮位置不变）
+  if (typeof syncOverlay === 'function' && tweens.length) syncOverlay(tweens.map(t => t.p))
 }
 
 // 四审 P1-1：首屏请求有界退避（0/750/1500/3000ms 共 4 次），耗尽后给显式 retry
@@ -282,8 +365,19 @@ const anchorXY = (p) => {
 }
 const ageDays = (iso) => Math.max(0, (Date.now() - Date.parse(iso)) / 864e5).toFixed(1)
 
-let hoverTimer = null
-const showHover = (p) => {
+let hoverTimer = null, hoverHiddenAt = 0
+// Owner 裁定：卡出现在触发时鼠标所在位置（键盘 focus 无坐标→贴粒子 anchor），出现后不追鼠标
+const placeHover = (px, py) => {
+  const vw = innerWidth, vh = innerHeight
+  hovercard.style.left = '0px'; hovercard.style.top = '0px'   // 先归零再量，避免旧位截断影响尺寸
+  const w = hovercard.offsetWidth || 260, h = hovercard.offsetHeight || 120
+  let x = px + 14, y = py + 12
+  if (x + w > vw - 8) x = px - w - 14
+  if (y + h > vh - 8) y = py - h - 12
+  hovercard.style.left = `${Math.max(8, x)}px`
+  hovercard.style.top = `${Math.max(8, y)}px`
+}
+const showHover = (p, at) => {
   const m = memIndex.get(p.memory_id)
   if (!m) return
   hovercard.innerHTML = ''
@@ -301,19 +395,35 @@ const showHover = (p) => {
   const pv = document.createElement('div'); pv.className = 'preview'
   pv.textContent = (m.content_preview ?? '').slice(0, 80)
   hovercard.append(pv)
-  hovercard.style.display = 'block'
+  const [ax, ay] = at ?? anchorXY(p)
+  placeHover(ax, ay)
+  hovercard.classList.add('show')
 }
-const hideHover = () => { clearTimeout(hoverTimer); hovercard.style.display = 'none' }
-const hoverIntent = (p) => { clearTimeout(hoverTimer); hoverTimer = setTimeout(() => showHover(p), 150) }
+const hideHover = () => {
+  clearTimeout(hoverTimer)
+  if (hovercard.classList.contains('show')) hoverHiddenAt = performance.now()
+  hovercard.classList.remove('show')
+}
+// 连续悬停热路径（audit #4：工具栏 tooltip 模式）——刚看过一张卡，下一张免 intent 等待
+const hoverIntent = (p, at) => {
+  clearTimeout(hoverTimer)
+  if (performance.now() - hoverHiddenAt < MOTION.HOVER_WARM_MS) { showHover(p, at); return }
+  hoverTimer = setTimeout(() => showHover(p, at), MOTION.HOVER_INTENT_MS)
+}
 
 const esc = (s) => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML }
 // 请求生命周期守卫（P1-4）：A→B 竞态与 close 后迟到响应统一由 guard 判废；
 // 打开即移交焦点，关闭 inert+aria-hidden 移出可访问树并归还 opener
 const guard = makeDrawerGuard()
+const scrim = document.getElementById('scrim')
+scrim.addEventListener('click', () => closeDrawer())
 const openDrawer = async (p, opener) => {
   drawerOpener = opener ?? drawerOpener
   const token = guard.begin()
   drawer.removeAttribute('inert'); drawer.setAttribute('aria-hidden', 'false')
+  overlay.setAttribute('inert', '')                 // 居中 modal（Owner 裁定）：打开期间粒子按钮出 Tab 序
+  scrim.classList.add('show')
+  hideHover()
   drawer.innerHTML = '<button class="close" aria-label="关闭">ESC</button><div class="meta">loading…</div>'
   drawer.classList.add('open')
   drawer.querySelector('.close').onclick = closeDrawer
@@ -375,7 +485,9 @@ const openDrawer = async (p, opener) => {
 const closeDrawer = () => {
   guard.close()
   drawer.classList.remove('open')
+  scrim.classList.remove('show')
   drawer.setAttribute('inert', ''); drawer.setAttribute('aria-hidden', 'true')  // 关闭态移出 Tab/可访问树
+  overlay.removeAttribute('inert')                  // 先还按钮可聚焦，再归还焦点
   if (drawerOpener) { drawerOpener.focus(); drawerOpener = null }
 }
 addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDrawer(); hideHover() } })
@@ -389,14 +501,19 @@ const placeBtn = (b, p) => {
 }
 // 二审 P1-2：粒子入场收口成一个函数——三条路径（drop 完成/切 reduce flush/初始 reduce 直落）
 // 共用，粒子与按钮永远同步
-const attachParticle = (p) => { particles.push(p); addOverlayButton(p); live?.clearPending(p.memory_id) }
+const attachParticle = (p) => {
+  particles.push(p)
+  if (!REDUCED) { p.mrScale = 0.45; grows.push({ p, t0: performance.now() }) }   // 着水生长，消除 attach pop
+  addOverlayButton(p)
+  live?.clearPending(p.memory_id)
+}
 const addOverlayButton = (p) => {
   const m = memIndex.get(p.memory_id)
   const b = document.createElement('button')
   b.setAttribute('aria-label', `${LAYER_ZH[p.layer]} 记忆：${(m?.content_preview ?? '').slice(0, 40)}`)
-  b.addEventListener('mouseenter', () => hoverIntent(p))
+  b.addEventListener('mouseenter', (ev) => hoverIntent(p, [ev.clientX, ev.clientY]))  // 卡出现在鼠标位（Owner 裁定）
   b.addEventListener('mouseleave', hideHover)
-  b.addEventListener('focus', () => showHover(p))
+  b.addEventListener('focus', () => showHover(p))          // 键盘路径：无坐标，贴粒子 anchor
   b.addEventListener('blur', hideHover)
   b.addEventListener('click', (ev) => openDrawer(p, ev.currentTarget))
   placeBtn(b, p)
@@ -407,7 +524,8 @@ const buildOverlay = () => {
   overlay.innerHTML = ''; btnOf.clear()
   for (const p of particles) addOverlayButton(p)
 }
-const syncOverlay = () => {           // draw 帧末调用：迁移中的粒子按钮同帧跟随
+const syncOverlay = (only = null) => { // draw 帧末：only=迁移中粒子（audit #5）；resize/全量走 null
+  if (only) { for (const p of only) { const b = btnOf.get(p); if (b) placeBtn(b, p) } return }
   for (const [p, b] of btnOf) placeBtn(b, p)
 }
 let resizeRaf = 0
@@ -484,6 +602,18 @@ function applySnapshot(snap, { initial = false } = {}) {
   if (initial) {
     particles = placed.map(p => ({ ...p, pr: p.r }))
     buildOverlay()
+    // 首屏入场（audit 机会 A，仅此一次）：锚定层→潮带→退潮缘错峰，层内按角向扫过——
+    // 池子"注满"的 0.9s。纯装饰：按钮已就位，不阻塞任何交互；REDUCED 直落终态。
+    if (!REDUCED && particles.length) {
+      const layerIdx = { anchor: 0, active_tide: 1, receding_edge: 2 }
+      const t0 = performance.now()
+      for (const p of particles) {
+        p.alpha = 0
+        const sweep = ((p.theta % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) / (2 * Math.PI)
+        entrances.push({ p, t0: t0 + (layerIdx[p.layer] ?? 2) * MOTION.ENTRANCE_LAYER_MS + sweep * MOTION.ENTRANCE_SWEEP_MS })
+      }
+      requestDraw()
+    }
     return { memories, added: [], removed: [] }
   }
   // 增量：已有粒子 → 目标半径变了就 migrate（可中断 settle）；新增/移除由 diffSnapshot
@@ -538,8 +668,18 @@ function startActivityLoop(bootSnap) {
     },
     onEvent: (e) => {
       if (e.kind === 'recall') {
-        // recall 只涟漪不移动（契约）；REDUCED 下零位移动画——与 scripted 同一 gate（三审 P1-2）
-        if (!REDUCED) { ripples.push({ theta: 0, r: 0, t0: performance.now() }); requestDraw() }
+        // recall 只涟漪不移动（契约）；REDUCED 下零位移动画——与 scripted 同一 gate（三审 P1-2）。
+        // 涟漪打在被召回的粒子上（事件 memory_ids=injected receipt items，与 scripted 同语法）；
+        // 无一命中（overflow/已移除）时回退池心，recall 仍可见
+        if (!REDUCED) {
+          const now = performance.now()
+          const targets = (e.memory_ids ?? [])
+            .map(id => particles.find(p => p.memory_id === id)).filter(Boolean).slice(0, 6)
+          if (targets.length) for (const p of targets)
+            ripples.push({ theta: p.theta, r: p.pr, t0: now, small: targets.length > 2 })
+          else ripples.push({ theta: 0, r: 0, t0: now })
+          requestDraw()
+        }
       } else if (e.kind === 'outcome') {
         for (const act of outcomeActions(e)) {          // 零动作规则集中在纯函数（L6）
           const p = particles.find(x => x.memory_id === act.memory_id)

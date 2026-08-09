@@ -98,11 +98,16 @@ export const vizActivity = async ({ principal, after, limit, graceMs }) => {
       [tenant_id, agent_id],
       r => ({ kind: 'remember', event_id: r.memory_id, occurred_at: r.created_at, at_exact: r.at_exact, memory_ids: [r.memory_id] }))
     const recalls = await q('recall',
-      { select: `request_id, episode_id, attempt_id, created_at, jsonb_array_length(receipt_json->'receipt'->'items') AS items_count`,
+      { select: `request_id, episode_id, attempt_id, created_at, jsonb_array_length(receipt_json->'receipt'->'items') AS items_count, receipt_json->'receipt'->'items' AS ritems`,
         col: 'created_at', id: 'request_id', from: 'recall_requests' },
       [tenant_id, agent_id],
       r => ({ kind: 'recall', event_id: r.request_id, occurred_at: r.created_at, at_exact: r.at_exact,
-        episode_id: r.episode_id, attempt_id: r.attempt_id, items_count: Number(r.items_count ?? 0) }))
+        episode_id: r.episode_id, attempt_id: r.attempt_id, items_count: Number(r.items_count ?? 0),
+        // 动效批增补（Owner 裁定涟漪打在被召回粒子上）：投影 injected receipt items 的
+        // memory_id——与 remember 事件的 memory_ids 同口径（content-free UUID），上限 12
+        memory_ids: Array.isArray(r.ritems)
+          ? r.ritems.filter(i => i?.injected === true).map(i => i.memory_id).filter(Boolean).slice(0, 12)
+          : [] }))
     const outcomes = await q('outcome',
       { select: `outcome_request_id, status, reported_at, response_json->'items' AS items`,
         col: 'reported_at', id: 'outcome_request_id', from: 'outcomes' },
