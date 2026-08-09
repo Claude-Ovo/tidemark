@@ -16,9 +16,19 @@ process.env.TIDEMARK_DEV_INSECURE = process.env.TIDEMARK_DEV_INSECURE || '1'
 process.env.TIDEMARK_POOL_MAX = process.env.TIDEMARK_POOL_MAX || '4'
 
 const arg = (name, dflt) => (process.argv.find(a => a.startsWith(`--${name}=`))?.split('=')[1]) ?? dflt
+// 二审 P2：CLI 入口 fail-closed——seed 必须是 [0, 2^32-1] 安全整数；
+// replica 限短 ASCII slug（防路径逃逸与 tenant 名污染）
 const SEED = Number(arg('seed', '42'))
+if (!Number.isSafeInteger(SEED) || SEED < 0 || SEED > 0xFFFFFFFF) {
+  console.error(`--seed 必须是 [0, 4294967295] 内的整数，收到: ${arg('seed', '42')}`)
+  process.exit(1)
+}
 const TENANT_BASE = arg('tenant-base', 'ab-demo')
 const REPLICA = arg('replica', '') || null
+if (REPLICA !== null && !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(REPLICA)) {
+  console.error(`--replica 必须匹配 ^[a-z0-9][a-z0-9_-]{0,31}$（短 ASCII slug），收到: ${REPLICA}`)
+  process.exit(1)
+}
 
 const { rememberTool } = await import('../src/tools/remember.mjs')
 const { recallTool } = await import('../src/tools/recall.mjs')
@@ -42,15 +52,17 @@ console.log(`A/B exp_id=${identity.exp_id} seed=${SEED}${REPLICA ? ` replica=${R
 console.log(`  identity: ${JSON.stringify(identity.components)}`)
 const summary = []
 for (const arm of ARMS) {
-  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, seed: SEED, trace, replica: REPLICA })
+  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, trace, replica: REPLICA })
   summary.push(r)
   console.log(`  ${arm.padEnd(12)} score=${r.score}  task_success=${r.task_success_rate}  probes=${r.probes}`)
 }
 
-mkdirSync(new URL('../traces/', import.meta.url), { recursive: true })
+const tracesDir = fileURLToPath(new URL('../traces/', import.meta.url))
+mkdirSync(tracesDir, { recursive: true })
 const stem = REPLICA ? `${identity.exp_id}-${REPLICA}` : identity.exp_id
 for (const arm of ARMS) {
   const p = fileURLToPath(new URL(`../traces/ab-${stem}-${arm}.jsonl`, import.meta.url))
+  if (!p.startsWith(tracesDir)) throw new Error(`trace path escaped traces dir: ${p}`)   // 二审 P2 兜底
   writeFileSync(p, traces.get(arm).map(x => JSON.stringify(x)).join('\n') + '\n')
 }
 console.log(`traces -> traces/ab-${stem}-{arm}.jsonl（content-free，header 含完整 identity）`)

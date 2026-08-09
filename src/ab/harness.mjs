@@ -1,18 +1,14 @@
-// P0-12 三臂 A/B harness（一审修订版）。口径：`model: null, agent_policy: deterministic-v1`，
+// P0-12 三臂 A/B harness（二审修订版）。口径：`model: null, agent_policy: deterministic-v1`，
 // 指标 = injection hit / lifecycle ablation（不冒充生成质量）。
-// 一审三 P1 修订：
-//   P1-1 outcome status 只由 oracle 的 task_success 派生，四路穷尽：
-//        成功且有 used 命中 → success + credited（全部命中项）；
-//        成功但未靠记忆 → success + 空 attribution；
-//        失败且 used 中有 poison → failure + blamed（全部毒项，附 memory_used evidence）；
-//        普通失败 → failure + 空 attribution。
-//        全部 reportOutcome 断言 out.ok===true；塑性分支逐项断言 applied===true——fail closed。
-//   P1-2 policy/oracle/evidence 分层：probe 现场先执行看不见 ground truth 的
-//        deterministicPolicy({given, injected}) 并把行动固化进 trace，oracle 才对行动判分；
-//        evidence 只为 policy 声明的 used IDs 书写（hit_ids/poison_ids 均 ⊆ used）。
-//   P1-3 corpus_digest 覆盖完整 canonical suite（scenarios + distract pool + 生成器版本 +
-//        policy 版本）——只改一条干扰文本也必换 exp_id/tenant/request IDs；
-//        replica 是显式的非科学身份（tenant namespace），不进 exp_id。
+// 二审修订：
+//   P1-1 seed/suite 单一入口：experimentIdentity 校验 seed（有限安全整数 ∈ [0, 2^32-1]）并
+//        返回 deep-frozen suite；runArm 不再接收独立 seed/suite——RNG 只读
+//        identity.components.seed，场景与干扰语料只读 identity.suite。
+//        结构性消灭"identity 锁 seed=42 而执行跑 seed=43"的同幂等键异正文形态。
+//   P1-2 attribution 精确对账：assertApplied 断言回执条数 === 期望条数、
+//        (memory_id, role) 多重集精确相等、每项 applied===true——partial response fail closed。
+// 一审既有（保持）：outcome 四路穷尽由 task_success 派生；policy 先行动、oracle 后判分、
+//   evidence ⊆ 声明的 used；corpus_digest 覆盖完整 canonical suite。
 // 硬闸：全链零 viz 依赖。
 import { createHash } from 'node:crypto'
 import { SCENARIOS, SUITE_VERSION, DISTRACT_POOL, DISTRACT_GENERATOR_VERSION, seededRng, distractText } from './tasks.mjs'
@@ -24,6 +20,14 @@ export const ARMS = ['no-memory', 'vector-only', 'full']
 const sha = (s) => createHash('sha256').update(s).digest('hex')
 const sha8 = (s) => sha(s).slice(0, 8)
 
+const deepFreeze = (o) => {
+  if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+    Object.freeze(o)
+    for (const v of Object.values(o)) deepFreeze(v)
+  }
+  return o
+}
+
 export const defaultSuite = () => ({
   scenarios: SCENARIOS,
   distract_pool: DISTRACT_POOL,
@@ -31,9 +35,14 @@ export const defaultSuite = () => ({
   policy: POLICY_VERSION,
 })
 
-// canonical experiment identity（一审 P1-3：suite 全量 hash，含干扰语料与生成/policy 版本）
+// canonical experiment identity（一审 P1-3 + 二审 P1-1）：
+// suite 全量 hash；返回的 frozen suite 就是唯一可执行定义——hash 与执行不可能分叉。
 export const experimentIdentity = ({ seed, embeddingId, recallCfg, suite = defaultSuite() }) => {
-  const corpusDigest = sha(JSON.stringify(suite))
+  if (!Number.isSafeInteger(seed) || seed < 0 || seed > 0xFFFFFFFF) {
+    throw new Error(`seed must be a safe integer in [0, 4294967295], got: ${seed}`)
+  }
+  const frozenSuite = deepFreeze(structuredClone(suite))
+  const corpusDigest = sha(JSON.stringify(frozenSuite))
   const recallDigest = sha(JSON.stringify(recallCfg))
   const components = {
     suite_version: SUITE_VERSION,
@@ -45,7 +54,7 @@ export const experimentIdentity = ({ seed, embeddingId, recallCfg, suite = defau
     model: null,
   }
   const exp_id = sha(JSON.stringify(components)).slice(0, 12)
-  return { exp_id, components }
+  return { exp_id, components, suite: frozenSuite }
 }
 
 const didFactory = (expId, arm) => (label) => {
@@ -58,19 +67,33 @@ const assertOk = (r, what) => {
   return r
 }
 
-// 塑性分支 fail-closed：每个 attribution 必须真的 applied（一审 P1-1）
-const assertApplied = (out, what) => {
+// 塑性分支精确对账（二审 P1-2）：期望的每条 attribution 都必须有 applied===true 的回执，
+// 条数相等且 (memory_id, role) 多重集精确相等——partial/错位/冒名回执一律 fail closed。
+const assertApplied = (out, attributions, what) => {
   const items = out.items ?? []
-  for (const it of items) {
-    if (it.applied !== true) throw new Error(`${what}: attribution not applied: ${JSON.stringify(out)}`)
+  if (items.length !== attributions.length) {
+    throw new Error(`${what}: expected ${attributions.length} attribution receipts, got ${items.length}: ${JSON.stringify(out)}`)
   }
-  if (!items.length) throw new Error(`${what}: plasticity branch returned zero items: ${JSON.stringify(out)}`)
+  const expect = new Map()
+  for (const a of attributions) {
+    const k = `${a.memory_id}|${a.role}`
+    expect.set(k, (expect.get(k) ?? 0) + 1)
+  }
+  for (const it of items) {
+    if (it.applied !== true) throw new Error(`${what}: attribution not applied: ${JSON.stringify(it)}`)
+    const k = `${it.memory_id}|${it.role}`
+    const n = expect.get(k) ?? 0
+    if (n <= 0) throw new Error(`${what}: unexpected/duplicate receipt ${k}: ${JSON.stringify(out)}`)
+    expect.set(k, n - 1)
+  }
   return out
 }
 
-export const runArm = async ({ arm, identity, tenantBase, tools, seed, trace, replica = null }) => {
+// 二审 P1-1：runArm 不接收 seed/suite——一切从 identity 派生（单一入口）
+export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica = null }) => {
   const did = didFactory(identity.exp_id, arm)
-  const rng = seededRng(seed)
+  const rng = seededRng(identity.components.seed)
+  const suite = identity.suite
   const tenantId = [tenantBase, identity.exp_id, ...(replica ? [replica] : []), arm].join('-')
   const principal = { tenant_id: tenantId, agent_id: 'ab-agent', capabilities: [] }
   trace(arm, { t: 'header', identity: identity.components, exp_id: identity.exp_id, arm,
@@ -80,7 +103,7 @@ export const runArm = async ({ arm, identity, tenantBase, tools, seed, trace, re
   const results = []
   let distractSeq = 0
 
-  for (const sc of SCENARIOS) {
+  for (const sc of suite.scenarios) {
     const scResult = { scenario: sc.id, probes: [] }
     let probeSeq = 0
     for (const [si, step] of sc.steps.entries()) {
@@ -98,7 +121,7 @@ export const runArm = async ({ arm, identity, tenantBase, tools, seed, trace, re
       } else if (step.op === 'distract') {
         if (arm === 'no-memory') continue
         for (let i = 0; i < step.count; i++) {
-          const txt = distractText(rng, ++distractSeq)
+          const txt = distractText(rng, ++distractSeq, suite.distract_pool)
           const r = await tools.remember({ principal, content: txt, kind: 'observation',
             episode_id: `ab-noise`, request_id: did(`noise-${tag}-${i}`), importance: 0.4 })
           assertOk(r, 'distract remember')
@@ -166,7 +189,7 @@ export const runArm = async ({ arm, identity, tenantBase, tools, seed, trace, re
           const out = await tools.reportOutcome({ principal, outcome_request_id: did(`out-${tag}`),
             episode_id: `ab-${sc.id}`, task_instance_id: task, attempt_id: attempt, status, attributions })
           assertOk(out, `report_outcome(${status})`)
-          if (attributions.length) assertApplied(out, `report_outcome(${status})`)
+          if (attributions.length) assertApplied(out, attributions, `report_outcome(${status})`)
           trace(arm, { t: 'outcome', sc: sc.id, probe: probeSeq, status,
             roles: attributions.map(a => a.role), n_attributions: attributions.length,
             applied: attributions.length ? true : null })

@@ -1,24 +1,31 @@
-// P0-12 A/B harness 判别套件（零 DB，纯 mock）——一审三 P1 的回归钉子。
+// P0-12 A/B harness 判别套件（零 DB，纯 mock）——一审/二审 P1 的回归钉子。
 // AB1  identity 确定性：同输入同 exp_id
-// AB2  P1-3 判别：只改一条 distract pool 文本 → exp_id 必变
-// AB3  P1-3 判别：seed / recallCfg / embedding 任一变化 → exp_id 必变
+// AB2  P1（一审）：只改一条 distract pool 文本 → exp_id 必变
+// AB3  P1（一审）：seed / recallCfg / embedding 任一变化 → exp_id 必变
 // AB4  replica 非科学身份：不进 exp_id；同配置双 replica 的 request_id 序列逐位相同、tenant 不同
-// AB5  P1-1（Codex 全空注入反例）：oracle success 的 given-only probe 必须报 success+空 attribution，
-//      不得伪造 failure
-// AB6  P1-1（Codex 预审 wrong-memory 反例）：注入未植入的错误记忆 → 零 credited 零 blamed，
+// AB5  P1（一审，Codex 全空注入反例）：oracle success 的 given-only probe 必须报 success+空
+//      attribution，不得伪造 failure
+// AB6  P1（一审，Codex wrong-memory 反例）：注入未植入的错误记忆 → 零 credited 零 blamed，
 //      任何 attribution 不得引用它
-// AB7  P1-2 忠实注入：credited 全部命中项 / poison 必 blamed 附 evidence；每条 evidence 的
-//      memory_id ⊆ 该 probe 声明的 used（policy 先行，oracle 后判，不倒灌）
-// AB8  P1-2 policy 纯度：行动只依赖 {given, injected}，ground truth 翻转不改变行动；
+// AB7  P1（一审+二审收紧）：credited 全部命中项 / poison 必 blamed 附 evidence；每条 evidence
+//      对【该 probe 已固化的 action.used】校验（不再借道 recallInjected 等价性）
+// AB8  P1（一审）：policy 行动只依赖 {given, injected}，ground truth 翻转不改变行动；
 //      oracle 的 poison 归因只从 used 派生
-// AB9  P1-1 fail-closed：reportOutcome ok:false 或 applied:false → runArm 必须抛出
+// AB9  P1（一审）：reportOutcome ok:false 或 applied:false → runArm 必须抛出
+// AB10 P1（二审）：seed/suite 单一入口——runArm 无独立 seed/suite 通道，杂散参数不改变执行；
+//      identity 换 seed 则 request_id 全集不相交（幂等键结构性不可复用）；invalid seed
+//      fail-closed；identity 的 frozen suite 就是执行定义（换语料池即换执行内容）且不可变
+// AB11 P1（二审，Codex partial-response 反例）：attribution 回执精确对账——缺条/冒名
+//      memory_id/错 role 一律 fail closed
 import { strict as assert } from 'node:assert'
+import { createHash } from 'node:crypto'
 import { experimentIdentity, runArm, defaultSuite } from './harness.mjs'
 import { deterministicPolicy } from './policy.mjs'
 import { scoreProbe } from './oracle.mjs'
 
 let pass = 0
 const ok = (name) => { pass++; console.log(`  AB ok: ${name}`) }
+const sha8 = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8)
 
 const ID_ARGS = { seed: 42, embeddingId: 'emb-test@v1', recallCfg: { topK: 5, floor: 0.3 } }
 
@@ -26,15 +33,17 @@ const ID_ARGS = { seed: 42, embeddingId: 'emb-test@v1', recallCfg: { topK: 5, fl
 const makeMockTools = ({ injectMode, outcome = {} }) => {
   const state = {
     byEpisode: new Map(),          // episode_id -> [{memory_id, kind}]
-    rememberIds: [], tenants: new Set(),
+    rememberIds: [], rememberContents: [], tenants: new Set(),
+    recallOrder: [],               // recall request_id 按发生顺序（与 action 行 1:1 对齐）
     recallInjected: new Map(),     // recall request_id -> Set(memory_id)
     events: [], outcomes: [],
     seq: 0,
   }
   const tools = {
-    remember: async ({ principal, kind, episode_id, request_id }) => {
+    remember: async ({ principal, kind, content, episode_id, request_id }) => {
       state.tenants.add(principal.tenant_id)
       state.rememberIds.push(request_id)
+      state.rememberContents.push(content)
       const memory_id = `m-${++state.seq}`
       if (!state.byEpisode.has(episode_id)) state.byEpisode.set(episode_id, [])
       state.byEpisode.get(episode_id).push({ memory_id, kind })
@@ -47,6 +56,7 @@ const makeMockTools = ({ injectMode, outcome = {} }) => {
       } else if (injectMode === 'wrong') {
         ids = ['m-wrong']
       } // 'empty' -> []
+      state.recallOrder.push(request_id)
       state.recallInjected.set(request_id, new Set(ids))
       return {
         ok: true,
@@ -61,20 +71,25 @@ const makeMockTools = ({ injectMode, outcome = {} }) => {
     reportOutcome: async ({ status, attributions, outcome_request_id }) => {
       state.outcomes.push({ status, attributions, outcome_request_id })
       if (outcome.failOk) return { ok: false, error: 'mock-forced' }
-      const applied = outcome.failApplied ? false : true
-      return { ok: true, items: attributions.map(() => ({ applied })) }
+      let items = attributions.map(a => ({ memory_id: a.memory_id, role: a.role,
+        applied: outcome.failApplied ? false : true }))
+      if (outcome.partial) items = items.slice(0, Math.max(0, items.length - 1))
+      if (outcome.wrongId && items.length) items = items.map((it, i) => i === 0 ? { ...it, memory_id: 'm-imposter' } : it)
+      if (outcome.wrongRole && items.length) items = items.map((it, i) => i === 0
+        ? { ...it, role: it.role === 'credited' ? 'blamed' : 'credited' } : it)
+      return { ok: true, items }
     },
   }
   return { tools, state }
 }
 
-const runFull = async ({ injectMode, outcome, replica = null }) => {
+const runFull = async ({ injectMode, outcome, replica = null, identity = null, extraArgs = {} }) => {
   const { tools, state } = makeMockTools({ injectMode, outcome })
   const traces = []
-  const identity = experimentIdentity(ID_ARGS)
-  const r = await runArm({ arm: 'full', identity, tenantBase: 't', tools, seed: ID_ARGS.seed,
-    trace: (_, obj) => traces.push(obj), replica })
-  return { r, state, traces }
+  const id = identity ?? experimentIdentity(ID_ARGS)
+  const r = await runArm({ arm: 'full', identity: id, tenantBase: 't', tools,
+    trace: (_, obj) => traces.push(obj), replica, ...extraArgs })
+  return { r, state, traces, identity: id }
 }
 
 // ---------- AB1-AB3 identity 判别 ----------
@@ -122,11 +137,10 @@ const runFull = async ({ injectMode, outcome, replica = null }) => {
     assert.equal(o.n_attributions, 0, '未靠记忆的成功必须空 attribution')
   }
   assert.ok(state.outcomes.every(o => o.status !== 'failure' || o.attributions.length === 0))
-  assert.ok(!state.outcomes.some(o => o.status === 'failure' && ['sc-retention'].includes(o.sc)), 'sanity')
   ok('AB5 全空注入：oracle success ⇒ outcome success + 空 attribution')
 }
 
-// ---------- AB6 Codex 预审 wrong-memory 反例 ----------
+// ---------- AB6 Codex wrong-memory 反例 ----------
 {
   const { state } = await runFull({ injectMode: 'wrong' })
   const allAttr = state.outcomes.flatMap(o => o.attributions)
@@ -137,7 +151,7 @@ const runFull = async ({ injectMode, outcome, replica = null }) => {
   ok('AB6 wrong-memory：零归因，零 evidence，不奖励错误记忆')
 }
 
-// ---------- AB7 忠实注入：credited/blamed + evidence ⊆ used ----------
+// ---------- AB7 忠实注入：credited/blamed + evidence ⊆ 冻结的 action.used ----------
 {
   const { state, traces } = await runFull({ injectMode: 'faithful' })
   const byProbe = (sc) => traces.filter(t => t.t === 'outcome' && t.sc === sc)
@@ -152,13 +166,18 @@ const runFull = async ({ injectMode, outcome, replica = null }) => {
     assert.equal(o.status, 'failure', 'mock 无塑性，poison 持续注入即持续 failure')
     assert.deepEqual(o.roles, ['blamed'], 'poison 使用必须 blamed 且只 blame 毒项')
   }
-  // evidence ⊆ 该 probe 的注入集（policy used = 全部注入，oracle 只从 used 归因）
+  // 二审收紧：evidence 对【已固化的 action.used】校验——recall 顺序与 action 行 1:1 对齐，
+  // 不再借道 recallInjected（那只在 v1 used=全部注入时才恰好等价，policy 收窄会假绿）
+  const actionLines = traces.filter(t => t.t === 'action')
+  assert.equal(actionLines.length, state.recallOrder.length, 'full 臂 recall 与 action 必须 1:1')
   for (const e of state.events) {
-    const injectedSet = state.recallInjected.get(e.payload.recall_request_id)
-    assert.ok(injectedSet?.has(e.payload.memory_id), `evidence ${e.payload.memory_id} 必须 ⊆ used`)
+    const idx = state.recallOrder.indexOf(e.payload.recall_request_id)
+    assert.ok(idx >= 0, 'evidence 必须挂在真实 recall 上')
+    assert.ok(actionLines[idx].used.includes(sha8(e.payload.memory_id)),
+      `evidence ${e.payload.memory_id} 必须 ⊆ 该 probe 固化的 action.used`)
   }
   assert.ok(state.events.length > 0)
-  ok('AB7 忠实注入：credited 全命中项 / blamed 毒项，evidence ⊆ used')
+  ok('AB7 忠实注入：credited 全命中项 / blamed 毒项，evidence ⊆ 冻结 action.used')
 }
 
 // ---------- AB8 policy 纯度 + oracle 只看 used ----------
@@ -167,7 +186,6 @@ const runFull = async ({ injectMode, outcome, replica = null }) => {
   const a1 = deterministicPolicy({ given: [], injected })
   const a2 = deterministicPolicy({ given: [], injected })
   assert.deepEqual(a1, a2)
-  // ground truth 翻转不进 policy 签名——同输入行动恒等；毒性只在 oracle 按 used 归因时出现
   const factOf = (id) => ({ 'm-1': 'f-good', 'm-2': 'f-bad' }[id])
   const vClean = scoreProbe({ action: a1, required: ['f-good'], poisonIds: new Set(), factOf })
   const vPoison = scoreProbe({ action: a1, required: ['f-good'], poisonIds: new Set(['f-bad']), factOf })
@@ -181,7 +199,7 @@ const runFull = async ({ injectMode, outcome, replica = null }) => {
   ok('AB8 policy 看不见 ground truth；oracle 归因只从 used 派生')
 }
 
-// ---------- AB9 fail-closed ----------
+// ---------- AB9 fail-closed（ok:false / applied:false） ----------
 {
   await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { failOk: true } }),
     /report_outcome.*failed/, 'ok:false 必须抛出')
@@ -190,4 +208,45 @@ const runFull = async ({ injectMode, outcome, replica = null }) => {
   ok('AB9 reportOutcome ok:false / applied:false → fail closed')
 }
 
-console.log(`AB harness 判别 ${pass}/9 全绿`)
+// ---------- AB10 seed/suite 单一入口（二审 P1-1） ----------
+{
+  // invalid seed fail-closed
+  for (const bad of [NaN, 1.5, -1, 2 ** 53, 0x100000000, '42', null, undefined]) {
+    assert.throws(() => experimentIdentity({ ...ID_ARGS, seed: bad }), /seed must be a safe integer/,
+      `invalid seed 必须拒绝: ${String(bad)}`)
+  }
+  // 杂散 seed 参数不存在任何通道：显式塞进 runArm 也不改变执行（Codex mismatch 反例的结构性否定）
+  const base = await runFull({ injectMode: 'empty' })
+  const stray = await runFull({ injectMode: 'empty', extraArgs: { seed: 43, suite: { scenarios: [] } } })
+  assert.deepEqual(stray.state.rememberIds, base.state.rememberIds, '杂散 seed/suite 不得改变 request_id 序列')
+  assert.deepEqual(stray.state.rememberContents, base.state.rememberContents, '杂散 seed/suite 不得改变任何正文')
+  // identity 换 seed → request_id 全集不相交：同键异正文结构性不可能
+  const other = await runFull({ injectMode: 'empty', identity: experimentIdentity({ ...ID_ARGS, seed: 43 }) })
+  const setA = new Set(base.state.rememberIds)
+  assert.ok(other.state.rememberIds.every(id => !setA.has(id)), '不同 seed 身份的 request_id 必须全集不相交')
+  // frozen suite 即执行定义：换语料池 → 执行内容真的来自新池，且 exp_id 变
+  const marker = 'MARKER-POOL-LINE-单入口判别'
+  const customSuite = { ...defaultSuite(), distract_pool: [marker] }
+  const customId = experimentIdentity({ ...ID_ARGS, suite: customSuite })
+  assert.notEqual(customId.exp_id, base.identity.exp_id)
+  const custom = await runFull({ injectMode: 'empty', identity: customId })
+  assert.ok(custom.state.rememberContents.some(c => c.includes(marker)), '执行必须使用 identity 携带的 frozen suite')
+  assert.ok(!base.state.rememberContents.some(c => c.includes(marker)))
+  // frozen：事后改不动
+  assert.throws(() => { customId.suite.distract_pool.push('x') }, TypeError, 'identity.suite 必须深冻结')
+  assert.throws(() => { customId.suite.scenarios[0].id = 'tamper' }, TypeError, 'scenarios 必须深冻结')
+  ok('AB10 seed/suite 单一入口：无旁路通道、异 seed 键不相交、frozen suite 即执行定义')
+}
+
+// ---------- AB11 attribution 精确对账（二审 P1-2，Codex partial 反例） ----------
+{
+  await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { partial: true } }),
+    /attribution receipts/, '缺条回执必须拒绝')
+  await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { wrongId: true } }),
+    /unexpected|duplicate/, '冒名 memory_id 回执必须拒绝')
+  await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { wrongRole: true } }),
+    /unexpected|duplicate/, '错 role 回执必须拒绝')
+  ok('AB11 回执精确对账：缺条/冒名/错 role 一律 fail closed')
+}
+
+console.log(`AB harness 判别 ${pass}/11 全绿`)

@@ -113,5 +113,6 @@ export const DISTRACT_POOL = [
   '快递代收点搬到二楼', '空调温度统一调至 26 度', '年度体检安排在十月',
   '工位绿植浇水轮值更新', '内网密码九十天到期提醒',
 ]
-export const distractText = (rng, i) =>
-  `${DISTRACT_POOL[Math.floor(rng() * DISTRACT_POOL.length)]}（批次 ${i}-${Math.floor(rng() * 1e6)}）`
+// pool 显式传入（二审 P1-1 单一入口：执行用的语料必须就是 identity hash 过的那份 frozen suite）
+export const distractText = (rng, i, pool = DISTRACT_POOL) =>
+  `${pool[Math.floor(rng() * pool.length)]}（批次 ${i}-${Math.floor(rng() * 1e6)}）`
