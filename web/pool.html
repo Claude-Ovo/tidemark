@@ -114,7 +114,7 @@ let REDUCED = rmQuery.matches
 // Gate 2 P2 债②：切到 reduce 不只影响后续事件——在跑动画当场 snap 到同一信息终态
 rmQuery.addEventListener?.('change', (e) => {
   REDUCED = e.matches
-  if (!REDUCED) return
+  if (!REDUCED) { requestDraw(); return }            // 关掉 reduce：重启常驻呼吸
   motion.reduceFlush()                               // 迁移直落终态并标 dirty（P1-1 反例②），生长/入场直落
   for (const d of drops) { if (d.spawn) { attachParticle(d.spawn); d.spawn = null } }  // 待生成粒子落下
   drops = []
@@ -140,6 +140,25 @@ const geo = () => {
   const w = canvas.clientWidth, h = canvas.clientHeight
   return { w, h, cx: w / 2, cy: h / 2, R: Math.min(w, h) * 0.44 }
 }
+
+// ---- 柔光粒 sprite（Owner 裁定"点变星星"）：预渲染一次 drawImage 缩放——
+// 每帧上百个 createRadialGradient 太贵；渐变淡向同色 alpha 0（结论 58 两戒①）----
+const glowSprite = (() => {
+  const S = 64
+  const c = document.createElement('canvas'); c.width = c.height = S
+  const g = c.getContext('2d')
+  const grad = g.createRadialGradient(S / 2, S / 2, S * 0.06, S / 2, S / 2, S / 2)
+  grad.addColorStop(0, 'rgba(222,240,255,0.95)')
+  grad.addColorStop(0.25, 'rgba(190,215,240,0.5)')
+  grad.addColorStop(1, 'rgba(190,215,240,0)')
+  g.fillStyle = grad
+  g.fillRect(0, 0, S, S)
+  return c
+})()
+// 常驻氛围（Owner 裁定，覆盖"无活跃动画即停帧"的旧省帧项）：高保留粒子极缓亮度呼吸；
+// reduced-motion 或标签页隐藏时仍停帧（省电与无障碍边界保留）
+const ambientOn = () => !REDUCED && !document.hidden
+document.addEventListener('visibilitychange', () => { if (!document.hidden) requestDraw() })
 const resize = () => {
   canvas.width = canvas.clientWidth * DPR
   canvas.height = canvas.clientHeight * DPR
@@ -170,8 +189,8 @@ const requestDraw = () => {
       rafActive = false
       throw e
     }
-    if (anyActive()) requestAnimationFrame(loop)
-    else rafActive = false                         // 三审：无活跃动画即停帧，不空转
+    if (anyActive() || ambientOn()) requestAnimationFrame(loop)
+    else rafActive = false                         // reduced/隐藏标签页仍停帧；常驻呼吸由 ambientOn 驱动
   }
   requestAnimationFrame(loop)
 }
@@ -223,8 +242,23 @@ const draw = (now = 0) => {
 
   for (const p of particles) {
     const x = cx + p.pr * R * Math.cos(p.theta), y = cy + p.pr * R * Math.sin(p.theta)
-    ctx.beginPath(); ctx.arc(x, y, p.markR * (p.mrScale ?? 1) * R, 0, 7)
-    ctx.fillStyle = `rgba(190,215,240,${(0.85 * (p.alpha ?? 1)).toFixed(3)})`; ctx.fill()
+    const s = p.s ?? 0.5
+    // 强度发光：保留越高越亮越实；呼吸幅度随强度缩放（弱记忆近乎不动），相位取 theta 确定性
+    const breath = ambientOn() ? 1 + 0.07 * s * Math.sin(now / 2400 + p.theta * 7) : 1
+    const lum = Math.min(1, (0.42 + 0.5 * s) * (p.alpha ?? 1) * breath)
+    const mr = p.markR * (p.mrScale ?? 1) * R
+    const halo = mr * 4.6
+    ctx.globalAlpha = lum
+    ctx.drawImage(glowSprite, x - halo, y - halo, halo * 2, halo * 2)   // 光晕（sprite 缩放）
+    ctx.globalAlpha = 1
+    ctx.beginPath(); ctx.arc(x, y, mr, 0, 7)                            // 亮核
+    ctx.fillStyle = `rgba(226,242,255,${Math.min(1, lum + 0.15).toFixed(3)})`
+    ctx.fill()
+    if (p.pinned) {                                                      // pinned 常亮细环（与潮痕环区分：更细更近）
+      ctx.beginPath(); ctx.arc(x, y, mr * 1.9, 0, 7)
+      ctx.strokeStyle = `rgba(200,225,250,${(0.5 * (p.alpha ?? 1)).toFixed(3)})`
+      ctx.lineWidth = 0.8; ctx.stroke()
+    }
   }
   for (const rg of rings) {                            // 潮痕：停留后淡出，跟随粒子当前呈现位
     const x = cx + rg.p.pr * R * Math.cos(rg.p.theta), y = cy + rg.p.pr * R * Math.sin(rg.p.theta)
@@ -551,7 +585,7 @@ function applySnapshot(snap, { initial = false } = {}) {
   meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
     (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
   if (initial) {
-    particles = placed.map(p => ({ ...p, pr: p.r }))
+    particles = placed.map(p => ({ ...p, pr: p.r, pinned: !!memIndex.get(p.memory_id)?.pinned }))
     buildOverlay()
     // 首屏入场（audit 机会 A，仅此一次）：锚定层→潮带→退潮缘错峰，层内按角向扫过——
     // 池子"注满"的 0.9s。纯装饰：按钮已就位，不阻塞任何交互；REDUCED 直落终态。
@@ -573,6 +607,7 @@ function applySnapshot(snap, { initial = false } = {}) {
     const old = byId.get(np.memory_id)
     if (old) {
       old.s = np.s; old.layer = np.layer; old.markR = np.markR
+      old.pinned = !!memIndex.get(np.memory_id)?.pinned
       motion.thetaUpdate(old, np.theta)   // theta-only relayout 也标 dirty（一审 P1-1 反例③）
       if (Math.abs(np.r - old.r) > 1e-6) { old.r = np.r; migrate(old, np.r) }
     }
@@ -644,7 +679,7 @@ function startActivityLoop(bootSnap) {
     onSnapshot: (snap) => {
       const { added } = applySnapshot(snap)
       for (const np of added) {                          // remember：落滴后粒子留存
-        const spawn = { ...np, pr: np.r }
+        const spawn = { ...np, pr: np.r, pinned: !!memIndex.get(np.memory_id)?.pinned }
         live.markPending(np.memory_id)                   // 在途记账：相邻快照不重复生成
         if (REDUCED) { attachParticle(spawn); live.clearPending(np.memory_id); continue }
         drops.push({ theta: np.theta, r: np.r, t0: performance.now(), spawn })
