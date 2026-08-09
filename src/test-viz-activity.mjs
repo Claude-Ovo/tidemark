@@ -272,16 +272,27 @@ try {
     const clean13 = () => inSerializableTx(async (c) => c.query('DELETE FROM recall_requests WHERE tenant_id=$1', [T13]), 'a13-clean')
     await clean13()
     try {
-      // 混合 receipt：16 items = 14 injected + 2 非注入（插在 2、5 位）——
-      // 覆盖 injected 过滤、receipt 顺序、cap=12 截断三个判别点
+      // 混合 receipt（二审 P1-1 加严）：14 合法 injected + 2 非注入 + 5 畸形 injected——
+      // 畸形项插在【队首与前段】：若 cap=12 在筛选前应用，合法第 11/12 项会被挤出 → 判别失败
       const inj = Array.from({ length: 14 }, () => randomUUID())
       const noninj = [randomUUID(), randomUUID()]
-      const items = []
-      let a = 0, b = 0
-      for (let i = 0; i < 16; i++) {
-        if (i === 2 || i === 5) items.push({ memory_id: noninj[b++], receipt_item_id: `ri-n${i}`, injected: false, similarity: 0.91, final_score: 0.9 })
-        else { items.push({ memory_id: inj[a], receipt_item_id: `ri-${a}`, injected: true, similarity: 0.8, final_score: 0.7 }); a++ }
-      }
+      const malformed = [
+        { memory_id: { content: 'CODEX_SENTINEL' }, receipt_item_id: 'ri-m0', injected: true },   // 对象透传（Codex 真库反例）
+        { memory_id: 'not-a-uuid-content-like-value', receipt_item_id: 'ri-m1', injected: true }, // 非 UUID string
+        { memory_id: null, receipt_item_id: 'ri-m2', injected: true },                            // null
+        { receipt_item_id: 'ri-m3', injected: true },                                             // 缺字段
+        { memory_id: 12345, receipt_item_id: 'ri-m4', injected: true },                           // 非 string 标量
+      ]
+      const upper = inj[1].toUpperCase()   // 大写合法 UUID：必须归一小写放行
+      const items = [
+        malformed[0], { memory_id: inj[0], receipt_item_id: 'ri-0', injected: true, similarity: 0.8 },
+        { memory_id: noninj[0], receipt_item_id: 'ri-n0', injected: false, similarity: 0.91 },
+        malformed[1], { memory_id: upper, receipt_item_id: 'ri-1', injected: true, final_score: 0.7 },
+        malformed[2], malformed[3],
+        { memory_id: noninj[1], receipt_item_id: 'ri-n1', injected: false },
+        malformed[4],
+        ...inj.slice(2).map((id, i) => ({ memory_id: id, receipt_item_id: `ri-${i + 2}`, injected: true })),
+      ]
       const rid = randomUUID(), ridEmpty = randomUUID()
       const insReceipt = (c, id, receipt) => c.query(
         `INSERT INTO recall_requests (tenant_id, request_id, agent_id, episode_id, attempt_id,
@@ -297,11 +308,20 @@ try {
       const ev = r.events.find(e => e.event_id === rid)
       const evEmpty = r.events.find(e => e.event_id === ridEmpty)
       assert.ok(ev && evEmpty, '两条 fixture 事件都应可见')
-      assert.deepEqual(ev.memory_ids, inj.slice(0, 12), 'memory_ids = injected items 前 12，保 receipt 顺序')
+      // 合法 injected 序列 = inj 保序（含大写项归一小写）；cap=12 在筛选之后——
+      // 畸形项虽在队首，合法第 11/12 项必须仍在
+      assert.deepEqual(ev.memory_ids, inj.map(x => x.toLowerCase()).slice(0, 12),
+        'memory_ids = 合法 injected 前 12，保 receipt 顺序，cap 在筛选后应用')
       assert.ok(!ev.memory_ids.includes(noninj[0]) && !ev.memory_ids.includes(noninj[1]), '非注入项不得出现')
-      assert.equal(ev.items_count, 16, 'items_count 仍为全量条数（口径不变）')
+      assert.equal(ev.items_count, items.length, 'items_count 仍为全量条数（口径不变，含畸形项）')
       assert.deepEqual(evEmpty.memory_ids, [], '空 receipt → 空数组')
-      assert.ok(ev.memory_ids.every(x => typeof x === 'string'), '元素只许是 UUID string，不许对象')
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+      assert.ok(ev.memory_ids.every(x => typeof x === 'string' && UUID_RE.test(x)),
+        '元素只许是 canonical 小写 UUID string')
+      // 序列化响应零污染：sentinel/非 UUID 值不得出现在整个响应任何位置
+      const raw = JSON.stringify(r)
+      assert.ok(!raw.includes('CODEX_SENTINEL'), '对象 sentinel 不得透传进响应')
+      assert.ok(!raw.includes('not-a-uuid-content-like-value'), '非 UUID string 不得透传进响应')
       for (const k of ['ritems', 'items', 'receipt', 'receipt_json', 'similarity', 'final_score'])
         assert.ok(!(k in ev), `recall 事件不得泄露 ${k}`)
     } finally { await clean13() }

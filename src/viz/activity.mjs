@@ -19,6 +19,18 @@ export const ACTIVITY_CFG = {
   max_limit: 500,
 }
 
+// recall memory_ids 投影（动效批二审 P1-1）：receipt_json 无库级 schema，投影必须
+// fail-closed——只放行 canonical UUID string（归一小写），对象/非 UUID/null/缺字段
+// 一律丢弃；cap=12 在合法筛选之后应用，畸形项不得挤占合法项的名额。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const projectInjectedUuids = (ritems) => Array.isArray(ritems)
+  ? ritems.filter(i => i?.injected === true)
+      .map(i => i?.memory_id)
+      .filter(id => typeof id === 'string' && UUID_RE.test(id))
+      .map(id => id.toLowerCase())
+      .slice(0, 12)
+  : []
+
 export const encodeCursor = (at, kind, id) => Buffer.from(`${at}|${kind}|${id}`).toString('base64')
 const decodeCursor = (after) => {
   const [at, kind, id] = Buffer.from(String(after), 'base64').toString('utf8').split('|')
@@ -104,10 +116,10 @@ export const vizActivity = async ({ principal, after, limit, graceMs }) => {
       r => ({ kind: 'recall', event_id: r.request_id, occurred_at: r.created_at, at_exact: r.at_exact,
         episode_id: r.episode_id, attempt_id: r.attempt_id, items_count: Number(r.items_count ?? 0),
         // 动效批增补（Owner 裁定涟漪打在被召回粒子上）：投影 injected receipt items 的
-        // memory_id——与 remember 事件的 memory_ids 同口径（content-free UUID），上限 12
-        memory_ids: Array.isArray(r.ritems)
-          ? r.ritems.filter(i => i?.injected === true).map(i => i.memory_id).filter(Boolean).slice(0, 12)
-          : [] }))
+        // memory_id。receipt_json 无库级 schema——投影前 fail-closed 筛 canonical UUID
+        // string（对象/非 UUID/null/缺字段全丢弃，绝不透传任意 JSON），归一小写，
+        // cap=12 在合法筛选【之后】应用（动效批二审 P1-1）
+        memory_ids: projectInjectedUuids(r.ritems) }))
     const outcomes = await q('outcome',
       { select: `outcome_request_id, status, reported_at, response_json->'items' AS items`,
         col: 'reported_at', id: 'outcome_request_id', from: 'outcomes' },

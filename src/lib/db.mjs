@@ -18,6 +18,13 @@ export const getPool = () => {
       keepAlive: true,
     })
     pool.on('error', (e) => console.error(JSON.stringify({ evt: 'pool_idle_error', msg: e.message.slice(0, 120) })))
+    // pool.on('error') 只覆盖【池内闲置】客户端；被借出但无在途 query 的客户端（事务间隙、
+    // serverless 掐线）冒 socket error 时无监听 → uncaught 'error' 打死整个 dev server
+    //（8/6 与 8/9 两次实锤，CN 风暴时段）。connect 级兜底：每个客户端常驻一个 error 监听
+    // 吞掉裸 socket 错误——在途 query 的拒绝路径不受影响，坏连接在下次使用时由
+    // isConnectionBroken 判别销毁。生产 Lambda 每请求短连接无此形态，此为 dev 长驻加固。
+    pool.on('connect', (c) => c.on('error', (e) =>
+      console.error(JSON.stringify({ evt: 'client_socket_error', msg: String(e?.message ?? e).slice(0, 120) }))))
   }
   return pool
 }
