@@ -104,7 +104,10 @@ export const SCENARIOS = [
   },
 ]
 
-const DISTRACT_POOL = [
+// 一审 P1-3：干扰语料与生成规则属于 canonical suite definition 的一部分——
+// 由 harness 的 corpus_digest 全量 hash（改任何一条干扰文本 = 新 exp_id 新 tenant）。
+export const DISTRACT_GENERATOR_VERSION = 'mulberry32-pool-pick-v1'
+export const DISTRACT_POOL = [
   '例行周报已提交，无异常', '会议室预定系统下午维护', '打印机墨盒已更换',
   '团建时间待定', '门禁卡续期提醒', '停车场月租下月调价', '咖啡机除垢完成',
   '快递代收点搬到二楼', '空调温度统一调至 26 度', '年度体检安排在十月',

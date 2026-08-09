@@ -1,7 +1,10 @@
-// P0-12 三臂 A/B 入口：node scripts/run-ab.mjs [--run-key=ab-v1] [--seed=42] [--tenant-base=ab-demo]
-// 三臂各自独立 tenant；确定性 ID（同 run-key 重跑走幂等 replay）；产出：
-//   1) 汇总表（stdout）  2) 公开脱敏 trace：traces/ab-<runkey>-<arm>.jsonl（content-free）
-// Codex 硬闸声明：本入口与 harness/oracle 零 viz 依赖，画面永不进指标。
+// P0-12 三臂 A/B 入口：node scripts/run-ab.mjs [--seed=42] [--tenant-base=ab-demo] [--replica=r1]
+// 实验身份 = canonical experiment identity（suite+语料+seed+embedding+召回配置全量摘要）——
+// 同身份重跑走幂等 replay；换 seed/语料/embedding/top-k 即新身份新 tenant。
+// --replica 是显式的【非科学身份】：只做 tenant namespace（同配置 fresh-run determinism 判别用），
+// 不进入 exp_id（一审 P1-3 裁定，旧 --run-key 已删除）。
+// 产出：1) 汇总表（stdout）  2) 公开脱敏 trace：traces/ab-<exp_id>[-replica]-<arm>.jsonl（content-free）
+// Codex 硬闸声明：本入口与 harness/policy/oracle 零 viz 依赖，画面永不进指标。
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -13,9 +16,9 @@ process.env.TIDEMARK_DEV_INSECURE = process.env.TIDEMARK_DEV_INSECURE || '1'
 process.env.TIDEMARK_POOL_MAX = process.env.TIDEMARK_POOL_MAX || '4'
 
 const arg = (name, dflt) => (process.argv.find(a => a.startsWith(`--${name}=`))?.split('=')[1]) ?? dflt
-const RUNKEY = arg('run-key', 'ab-v1')
 const SEED = Number(arg('seed', '42'))
 const TENANT_BASE = arg('tenant-base', 'ab-demo')
+const REPLICA = arg('replica', '') || null
 
 const { rememberTool } = await import('../src/tools/remember.mjs')
 const { recallTool } = await import('../src/tools/recall.mjs')
@@ -34,23 +37,23 @@ const tools = {
 const traces = new Map(ARMS.map(a => [a, []]))
 const trace = (arm, obj) => traces.get(arm).push(obj)
 
-// canonical experiment identity（预审 P1-2）：seed/语料/embedding/召回配置任一变化 = 新身份新 tenant
 const identity = experimentIdentity({ seed: SEED, embeddingId: embedModelId(), recallCfg: RECALL_CFG })
-console.log(`A/B exp_id=${identity.exp_id} seed=${SEED}（agent_policy=deterministic-v1, model=null；指标=injection hit / lifecycle ablation）`)
+console.log(`A/B exp_id=${identity.exp_id} seed=${SEED}${REPLICA ? ` replica=${REPLICA}（非科学身份，仅 tenant namespace）` : ''}（agent_policy=deterministic-v1, model=null；指标=injection hit / lifecycle ablation）`)
 console.log(`  identity: ${JSON.stringify(identity.components)}`)
 const summary = []
 for (const arm of ARMS) {
-  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, seed: SEED, trace })
+  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, seed: SEED, trace, replica: REPLICA })
   summary.push(r)
   console.log(`  ${arm.padEnd(12)} score=${r.score}  task_success=${r.task_success_rate}  probes=${r.probes}`)
 }
 
 mkdirSync(new URL('../traces/', import.meta.url), { recursive: true })
+const stem = REPLICA ? `${identity.exp_id}-${REPLICA}` : identity.exp_id
 for (const arm of ARMS) {
-  const p = fileURLToPath(new URL(`../traces/ab-${identity.exp_id}-${arm}.jsonl`, import.meta.url))
+  const p = fileURLToPath(new URL(`../traces/ab-${stem}-${arm}.jsonl`, import.meta.url))
   writeFileSync(p, traces.get(arm).map(x => JSON.stringify(x)).join('\n') + '\n')
 }
-console.log(`traces -> traces/ab-${identity.exp_id}-{arm}.jsonl（content-free，header 含完整 identity）`)
-console.log(JSON.stringify({ exp_id: identity.exp_id, identity: identity.components,
+console.log(`traces -> traces/ab-${stem}-{arm}.jsonl（content-free，header 含完整 identity）`)
+console.log(JSON.stringify({ exp_id: identity.exp_id, replica: REPLICA, identity: identity.components,
   summary: summary.map(s => ({ arm: s.arm, score: s.score, task_success_rate: s.task_success_rate })) }))
 await getPool().end()
