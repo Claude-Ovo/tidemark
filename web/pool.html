@@ -31,7 +31,9 @@
   #err { position: fixed; inset: 0; display: none; place-items: center; color: #d98c8c; }
   /* hover 卡（Owner 裁定改稿：出现在鼠标当前位置，不再固定角落）：
      150ms intent 延迟 + 120ms ease-out 淡入上浮；连续悬停走热路径立即显示 */
-  #hovercard { position: fixed; left: 0; top: 0; width: 260px; padding: 10px 12px;
+  #hovercard { position: fixed; left: 0; top: 0; box-sizing: border-box;
+    width: min(260px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: hidden;
+    padding: 10px 12px;
     background: rgba(13,18,24,.92); border: 1px solid #223042; border-radius: 6px;
     font-size: 12px; line-height: 1.6; pointer-events: none; z-index: 5;
     opacity: 0; visibility: hidden; transform: translateY(4px);
@@ -45,8 +47,9 @@
   #scrim { position: fixed; inset: 0; background: rgba(4,7,11,.55); opacity: 0;
     pointer-events: none; z-index: 9; transition: opacity 200ms cubic-bezier(0.23,1,0.32,1); }
   #scrim.show { opacity: 1; pointer-events: auto; }
-  #drawer { position: fixed; left: 50%; top: 50%; width: min(520px, 92vw);
-    max-height: min(78vh, 660px); background: #0b0f14; border: 1px solid #223042;
+  #drawer { position: fixed; left: 50%; top: 50%; box-sizing: border-box;
+    width: min(520px, calc(100vw - 16px));
+    max-height: min(78vh, 660px, calc(100vh - 16px)); background: #0b0f14; border: 1px solid #223042;
     border-radius: 10px; padding: 18px 20px; overflow-y: auto; z-index: 10;
     font-size: 13px; line-height: 1.65; opacity: 0; pointer-events: none;
     transform: translate(-50%, -50%) scale(0.96);
@@ -98,6 +101,7 @@
 import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout-pool.mjs'
 import { makeDrawerGuard } from '/src/pool/drawer-guard.mjs'
 import { makeLiveCoordinator, outcomeActions, eventCausesRefresh, diffSnapshot } from '/src/pool/live-coordinator.mjs'
+import { MOTION, easeOutStrong, easeInQuad, makeMotionState } from '/src/pool/motion-sync.mjs'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -111,65 +115,21 @@ let REDUCED = rmQuery.matches
 rmQuery.addEventListener?.('change', (e) => {
   REDUCED = e.matches
   if (!REDUCED) return
-  for (const tw of tweens) tw.p.pr = tw.to          // 迁移直落终态
-  tweens = []
+  motion.reduceFlush()                               // 迁移直落终态并标 dirty（P1-1 反例②），生长/入场直落
   for (const d of drops) { if (d.spawn) { attachParticle(d.spawn); d.spawn = null } }  // 待生成粒子落下
   drops = []
   ripples = []                                       // 移动涟漪清除；潮痕静态标记保留
-  for (const g of grows) g.p.mrScale = 1             // 生长/入场直落终态
-  grows = []
-  for (const en of entrances) en.p.alpha = 1
-  entrances = []
-  draw(performance.now())
+  draw(performance.now())                            // draw 帧末消费 dirty，按钮同步终态
 })
 
-// ---- 动效常量与曲线（audit 批：魔法数收口；曲线用精确 cubic-bezier 求解，不近似）----
-const MOTION = {
-  MIGRATE_MS: 1500,           // 迁移 settle（结论 65：可中断，从当前呈现值 retarget）
-  RIPPLE_MS: 1400,            // 涟漪扩散
-  RAIN_FALL_MS: 380,          // remember 雨滴下落（落体 ease-in = 重力）
-  ATTACH_GROW_MS: 220,        // 着水后粒子从滴径长到 markR
-  ENTRANCE_MS: 260,           // 首屏单粒子淡入
-  ENTRANCE_LAYER_MS: 180,     // 首屏层间错峰（anchor→active→receding）
-  ENTRANCE_SWEEP_MS: 260,     // 首屏层内按角向扫过
-  HOVER_INTENT_MS: 150, HOVER_WARM_MS: 400,
-  RING_STAY: 4500, RING_FADE: 800,   // 潮痕停留/淡出（四审 P1-3 签定值）
-}
-// 精确 cubic-bezier 求值（牛顿迭代+二分兜底）——AUDIT 指定曲线逐字落，不用弱内建近似
-const cubicBezier = (p1x, p1y, p2x, p2y) => {
-  const cx = 3 * p1x, bx = 3 * (p2x - p1x) - cx, ax = 1 - cx - bx
-  const cy = 3 * p1y, by = 3 * (p2y - p1y) - cy, ay = 1 - cy - by
-  const sx = (t) => ((ax * t + bx) * t + cx) * t
-  const sy = (t) => ((ay * t + by) * t + cy) * t
-  const dx = (t) => (3 * ax * t + 2 * bx) * t + cx
-  return (x) => {
-    if (x <= 0) return 0
-    if (x >= 1) return 1
-    let t = x
-    for (let i = 0; i < 8; i++) {
-      const err = sx(t) - x
-      if (Math.abs(err) < 1e-6) return sy(t)
-      const d = dx(t)
-      if (Math.abs(d) < 1e-6) break
-      t -= err / d
-    }
-    let lo = 0, hi = 1
-    while (hi - lo > 1e-6) { t = (lo + hi) / 2; if (sx(t) < x) lo = t; else hi = t }
-    return sy(t)
-  }
-}
-const easeInOutStrong = cubicBezier(0.77, 0, 0.175, 1)   // 迁移：屏上位移用强 in-out
-const easeOutStrong = cubicBezier(0.23, 1, 0.32, 1)      // 涟漪扩张/生长/入场：强 ease-out
-const easeInQuad = (k) => k * k                          // 雨滴落体（物理：匀加速）
-
 // particles: layout 输出 + 呈现态（pr = presentation radius，迁移持久不回跳；
-// mrScale = 着水生长系数；alpha = 首屏入场淡入系数，完成后恒 1）
+// mrScale = 着水生长系数；alpha = 首屏入场淡入系数，完成后恒 1）。
+// tween/grow/entrance 与持久 dirty 集全部住在 motion-sync 状态机里（一审 P1-1：
+// 脏标记跨 step→draw 存活，node 判别 M1-M5 直接测它）
+const motion = makeMotionState()
 let particles = [], fadeR = fadeLineRadius(0.15)
 let ripples = []        // { theta, r, t0, small }（small: 着水微涟漪/多目标 recall 收敛尺寸）
 let drops = []          // { theta, r, t0, spawn }（雨滴：下落→着水→spawn 留存）
-let tweens = []         // { p, from, to, t0, dur }（可中断：新 tween 从当前 pr 起算并顶掉旧的）
-let grows = []          // { p, t0 }（着水后 markR 生长，消除 attach 尺寸 pop）
-let entrances = []      // { p, t0 }（首屏一次性错峰入场，reduced 直落）
 // 四审 P1-3：潮痕是事件 signature 不是常驻编码——settle 后停留 RING_STAY 再淡出，
 // 半径终态持久；最新 outcome 状态属于 hover/drawer
 let rings = []          // { p, kind: 'credited'|'blamed', t0, until }
@@ -187,11 +147,9 @@ const resize = () => {
 }
 addEventListener('resize', () => { resize(); draw(performance.now()) })
 
-// 迁移：从当前呈现值 retarget（可中断）；REDUCED 直落终态
+// 迁移：从当前呈现值 retarget（可中断）；REDUCED 直落终态（motion 内部标 dirty）
 const migrate = (p, to, dur = MOTION.MIGRATE_MS) => {
-  if (REDUCED) { p.pr = to; requestDraw(); return }
-  tweens = tweens.filter(t => t.p !== p)          // 中断旧 tween：from 取当前 pr，不回跳
-  tweens.push({ p, from: p.pr, to, t0: performance.now(), dur })
+  motion.migrate(p, to, { dur, reduced: REDUCED, now: performance.now() })
   requestDraw()
 }
 
@@ -199,7 +157,7 @@ const migrate = (p, to, dur = MOTION.MIGRATE_MS) => {
 // addRing 用 timer 在 fade 起点唤醒 rAF
 const ringFading = (now) => rings.some(rg => now >= rg.t0 + RING_STAY)
 const anyActive = (now = performance.now()) =>
-  tweens.length || ripples.length || drops.length || grows.length || entrances.length || ringFading(now)
+  motion.active() || ripples.length || drops.length || ringFading(now)
 const requestDraw = () => {
   if (rafActive) return
   rafActive = true
@@ -219,11 +177,7 @@ const requestDraw = () => {
 }
 
 const step = (now) => {
-  for (const tw of tweens) {
-    const k = Math.min(1, (now - tw.t0) / tw.dur)
-    tw.p.pr = tw.from + (tw.to - tw.from) * easeInOutStrong(k)   // 屏上位移：强 in-out
-  }
-  tweens = tweens.filter(tw => now - tw.t0 < tw.dur)
+  motion.step(now)                                   // tween/grow/entrance 推进（完成帧仍标 dirty，P1-1 反例①）
   ripples = ripples.filter(r => now - r.t0 < MOTION.RIPPLE_MS)
   for (const d of drops) {
     // 雨滴着水：微涟漪 + spawn 留存（生长起步消除尺寸 pop）
@@ -233,16 +187,6 @@ const step = (now) => {
     }
   }
   drops = drops.filter(d => now - d.t0 < MOTION.RAIN_FALL_MS)
-  for (const g of grows) {
-    const k = Math.min(1, (now - g.t0) / MOTION.ATTACH_GROW_MS)
-    g.p.mrScale = 0.45 + 0.55 * easeOutStrong(k)
-  }
-  grows = grows.filter(g => { if (now - g.t0 < MOTION.ATTACH_GROW_MS) return true; g.p.mrScale = 1; return false })
-  for (const en of entrances) {
-    const k = Math.min(1, Math.max(0, (now - en.t0) / MOTION.ENTRANCE_MS))
-    en.p.alpha = easeOutStrong(k)
-  }
-  entrances = entrances.filter(en => { if (now - en.t0 < MOTION.ENTRANCE_MS) return true; en.p.alpha = 1; return false })
   rings = rings.filter(rg => now < rg.until)          // 潮痕到期即清，不留常驻残影
 }
 
@@ -311,8 +255,12 @@ const draw = (now = 0) => {
     ctx.beginPath(); ctx.arc(tx, y, 0.005 * R, 0, 7)
     ctx.fillStyle = `rgba(200,225,250,${alpha.toFixed(3)})`; ctx.fill()
   }
-  // 按钮与 painted anchor 同帧；audit #5：只同步迁移中的粒子（其余按钮位置不变）
-  if (typeof syncOverlay === 'function' && tweens.length) syncOverlay(tweens.map(t => t.p))
+  // 按钮与 painted anchor 同帧（一审 P1-1）：消费持久 dirty 集——tween 逐帧/完成帧、
+  // REDUCED 直落、theta-only relayout 三条路径统一走这里；消费即清，其余按钮不动
+  if (typeof syncOverlay === 'function') {
+    const dirty = motion.consumeDirty()
+    if (dirty.length) syncOverlay(dirty)
+  }
 }
 
 // 四审 P1-1：首屏请求有界退避（0/750/1500/3000ms 共 4 次），耗尽后给显式 retry
@@ -374,8 +322,11 @@ const placeHover = (px, py) => {
   let x = px + 14, y = py + 12
   if (x + w > vw - 8) x = px - w - 14
   if (y + h > vh - 8) y = py - h - 12
-  hovercard.style.left = `${Math.max(8, x)}px`
-  hovercard.style.top = `${Math.max(8, y)}px`
+  // 真夹取（二审 P2-1）：双侧钳到 [8, viewport - size - 8]，卡比视口大时 CSS 已限尺寸+内滚
+  x = Math.min(Math.max(8, x), Math.max(8, vw - w - 8))
+  y = Math.min(Math.max(8, y), Math.max(8, vh - h - 8))
+  hovercard.style.left = `${x}px`
+  hovercard.style.top = `${y}px`
 }
 const showHover = (p, at) => {
   const m = memIndex.get(p.memory_id)
@@ -503,7 +454,7 @@ const placeBtn = (b, p) => {
 // 共用，粒子与按钮永远同步
 const attachParticle = (p) => {
   particles.push(p)
-  if (!REDUCED) { p.mrScale = 0.45; grows.push({ p, t0: performance.now() }) }   // 着水生长，消除 attach pop
+  if (!REDUCED) motion.grow(p, performance.now())   // 着水生长，消除 attach pop
   addOverlayButton(p)
   live?.clearPending(p.memory_id)
 }
@@ -608,9 +559,8 @@ function applySnapshot(snap, { initial = false } = {}) {
       const layerIdx = { anchor: 0, active_tide: 1, receding_edge: 2 }
       const t0 = performance.now()
       for (const p of particles) {
-        p.alpha = 0
         const sweep = ((p.theta % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) / (2 * Math.PI)
-        entrances.push({ p, t0: t0 + (layerIdx[p.layer] ?? 2) * MOTION.ENTRANCE_LAYER_MS + sweep * MOTION.ENTRANCE_SWEEP_MS })
+        motion.enter(p, t0 + (layerIdx[p.layer] ?? 2) * MOTION.ENTRANCE_LAYER_MS + sweep * MOTION.ENTRANCE_SWEEP_MS)
       }
       requestDraw()
     }
@@ -622,7 +572,8 @@ function applySnapshot(snap, { initial = false } = {}) {
   for (const np of placed) {
     const old = byId.get(np.memory_id)
     if (old) {
-      old.s = np.s; old.layer = np.layer; old.theta = np.theta; old.markR = np.markR
+      old.s = np.s; old.layer = np.layer; old.markR = np.markR
+      motion.thetaUpdate(old, np.theta)   // theta-only relayout 也标 dirty（一审 P1-1 反例③）
       if (Math.abs(np.r - old.r) > 1e-6) { old.r = np.r; migrate(old, np.r) }
     }
   }

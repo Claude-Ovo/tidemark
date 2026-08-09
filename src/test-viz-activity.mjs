@@ -265,6 +265,48 @@ try {
     } finally { await clean12() }
   })
 
+  await t('A13 recall memory_ids 投影：injected-only、保序、cap=12、零泄露（动效批 additive 契约）', async () => {
+    // 独立 tenant（同 A12 式）：不与 A 系事件计数纠缠
+    const T13 = 'activity-a13-tenant', A13 = 'activity-a13-agent'
+    const vp = { tenant_id: T13, agent_id: A13, capabilities: [], scope: 'viz' }
+    const clean13 = () => inSerializableTx(async (c) => c.query('DELETE FROM recall_requests WHERE tenant_id=$1', [T13]), 'a13-clean')
+    await clean13()
+    try {
+      // 混合 receipt：16 items = 14 injected + 2 非注入（插在 2、5 位）——
+      // 覆盖 injected 过滤、receipt 顺序、cap=12 截断三个判别点
+      const inj = Array.from({ length: 14 }, () => randomUUID())
+      const noninj = [randomUUID(), randomUUID()]
+      const items = []
+      let a = 0, b = 0
+      for (let i = 0; i < 16; i++) {
+        if (i === 2 || i === 5) items.push({ memory_id: noninj[b++], receipt_item_id: `ri-n${i}`, injected: false, similarity: 0.91, final_score: 0.9 })
+        else { items.push({ memory_id: inj[a], receipt_item_id: `ri-${a}`, injected: true, similarity: 0.8, final_score: 0.7 }); a++ }
+      }
+      const rid = randomUUID(), ridEmpty = randomUUID()
+      const insReceipt = (c, id, receipt) => c.query(
+        `INSERT INTO recall_requests (tenant_id, request_id, agent_id, episode_id, attempt_id,
+           query_hmac, pipeline_version, receipt_json, serialization_checksum)
+         VALUES ($1, $2, $3, 'ep-a13', $4, $5, 'test', $6::JSONB, $5)`,
+        [T13, id, A13, `at-${id}`, bytes, JSON.stringify(receipt)])
+      await inWriteTx(async (c) => {
+        await insReceipt(c, rid, { receipt: { items } })
+        await insReceipt(c, ridEmpty, { receipt: { items: [] } })
+      }, 'act-a13-ins')
+      const r = await vizActivity({ principal: vp })
+      assert.equal(r.ok, true)
+      const ev = r.events.find(e => e.event_id === rid)
+      const evEmpty = r.events.find(e => e.event_id === ridEmpty)
+      assert.ok(ev && evEmpty, '两条 fixture 事件都应可见')
+      assert.deepEqual(ev.memory_ids, inj.slice(0, 12), 'memory_ids = injected items 前 12，保 receipt 顺序')
+      assert.ok(!ev.memory_ids.includes(noninj[0]) && !ev.memory_ids.includes(noninj[1]), '非注入项不得出现')
+      assert.equal(ev.items_count, 16, 'items_count 仍为全量条数（口径不变）')
+      assert.deepEqual(evEmpty.memory_ids, [], '空 receipt → 空数组')
+      assert.ok(ev.memory_ids.every(x => typeof x === 'string'), '元素只许是 UUID string，不许对象')
+      for (const k of ['ritems', 'items', 'receipt', 'receipt_json', 'similarity', 'final_score'])
+        assert.ok(!(k in ev), `recall 事件不得泄露 ${k}`)
+    } finally { await clean13() }
+  })
+
   await t('A9 配置守卫：29999 接受 / 30000 拒绝（严格不等式）', async () => {
     const { execSync } = await import('node:child_process')
     const probe = (v) => {
