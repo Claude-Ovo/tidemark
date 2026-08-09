@@ -17,6 +17,9 @@
 //      fail-closed；identity 的 frozen suite 就是执行定义（换语料池即换执行内容）且不可变
 // AB11 P1（二审，Codex partial-response 反例）：attribution 回执精确对账——缺条/冒名
 //      memory_id/错 role 一律 fail closed
+// AB12 P1（三审）：identity 完整性闭环——factory 返回对象（壳/components/suite）mutation 必
+//      TypeError；伪造 identity（旧 exp_id+改 seed / 旧 corpus_digest+换 suite / 域外 seed）
+//      必须在任何 tool call 之前被 runArm 拒绝
 import { strict as assert } from 'node:assert'
 import { createHash } from 'node:crypto'
 import { experimentIdentity, runArm, defaultSuite } from './harness.mjs'
@@ -249,4 +252,37 @@ const runFull = async ({ injectMode, outcome, replica = null, identity = null, e
   ok('AB11 回执精确对账：缺条/冒名/错 role 一律 fail closed')
 }
 
-console.log(`AB harness 判别 ${pass}/11 全绿`)
+// ---------- AB12 identity 完整性闭环（三审 P1，Codex mutation/forgery 反例） ----------
+{
+  const identity = experimentIdentity(ID_ARGS)
+  // 冻结：壳、components、suite 全部改不动（Codex 反例的第一半：isFrozen 必须为 true）
+  assert.ok(Object.isFrozen(identity) && Object.isFrozen(identity.components) && Object.isFrozen(identity.suite),
+    'identity 返回对象必须整体冻结')
+  assert.throws(() => { identity.components.seed = 43 }, TypeError, 'components mutation 必须 TypeError')
+  assert.throws(() => { identity.suite = { scenarios: [] } }, TypeError, 'suite 替换必须 TypeError')
+  assert.throws(() => { identity.exp_id = 'forged' }, TypeError, 'exp_id 改写必须 TypeError')
+
+  // 伪造路径（structuredClone 剥掉冻结，模拟绕过 factory 的手搓对象）——
+  // 必须在任何 tool call 之前拒绝：mock 记录调用数，断言恒为零
+  const rejectForged = async (mutate, pattern, name) => {
+    const forged = structuredClone(identity)
+    mutate(forged)
+    const { tools, state } = makeMockTools({ injectMode: 'empty' })
+    await assert.rejects(
+      () => runArm({ arm: 'full', identity: forged, tenantBase: 't', tools, trace: () => {} }),
+      pattern, name)
+    assert.equal(state.rememberIds.length + state.recallOrder.length + state.events.length + state.outcomes.length, 0,
+      `${name}：拒绝必须发生在任何 tool call 之前`)
+  }
+  await rejectForged(f => { f.components.seed = 43 }, /exp_id mismatch/, '旧 exp_id + 改 seed 必须拒绝')
+  await rejectForged(f => { f.suite = structuredClone(experimentIdentity({ ...ID_ARGS, suite: { ...defaultSuite(), distract_pool: ['换池'] } }).suite) },
+    /corpus_digest mismatch/, '旧 corpus_digest + 换 suite 必须拒绝')
+  await rejectForged(f => { f.components.seed = NaN }, /seed out of domain/, '域外 seed 必须拒绝')
+  await rejectForged(f => { delete f.components }, /missing/, '缺 components 的裸对象必须拒绝')
+  // 合法 factory identity 照常通过（回归保护）
+  const { tools } = makeMockTools({ injectMode: 'empty' })
+  await runArm({ arm: 'full', identity, tenantBase: 't', tools, trace: () => {} })
+  ok('AB12 identity 完整性：mutation 即 TypeError，伪造对象在任何 tool call 前拒绝')
+}
+
+console.log(`AB harness 判别 ${pass}/12 全绿`)

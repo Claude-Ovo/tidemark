@@ -7,6 +7,10 @@
 //        结构性消灭"identity 锁 seed=42 而执行跑 seed=43"的同幂等键异正文形态。
 //   P1-2 attribution 精确对账：assertApplied 断言回执条数 === 期望条数、
 //        (memory_id, role) 多重集精确相等、每项 applied===true——partial response fail closed。
+// 三审修订：
+//   P1   identity 完整性闭环：experimentIdentity 返回对象整体 deep-freeze（壳+components+suite）；
+//        runArm 入口 fail-closed 重验 seed 域 / corpus_digest===hash(suite) /
+//        exp_id===hash(components)——事后 mutation 与伪造 identity 在任何 tool call 前拒绝。
 // 一审既有（保持）：outcome 四路穷尽由 task_success 派生；policy 先行动、oracle 后判分、
 //   evidence ⊆ 声明的 used；corpus_digest 覆盖完整 canonical suite。
 // 硬闸：全链零 viz 依赖。
@@ -35,26 +39,53 @@ export const defaultSuite = () => ({
   policy: POLICY_VERSION,
 })
 
-// canonical experiment identity（一审 P1-3 + 二审 P1-1）：
-// suite 全量 hash；返回的 frozen suite 就是唯一可执行定义——hash 与执行不可能分叉。
+// canonical 摘要函数——identity 生成与 runArm 入口重验共用同一实现（三审 P1）
+const corpusDigestOf = (suite) => sha(JSON.stringify(suite)).slice(0, 16)
+const expIdOf = (components) => sha(JSON.stringify(components)).slice(0, 12)
+const seedValid = (seed) => Number.isSafeInteger(seed) && seed >= 0 && seed <= 0xFFFFFFFF
+
+// canonical experiment identity（一审 P1-3 + 二审 P1-1 + 三审 P1）：
+// suite 全量 hash；整个返回对象（壳+components+suite）deep-freeze——
+// hash 的就是执行的，生成后任何改写都是 TypeError。
 export const experimentIdentity = ({ seed, embeddingId, recallCfg, suite = defaultSuite() }) => {
-  if (!Number.isSafeInteger(seed) || seed < 0 || seed > 0xFFFFFFFF) {
+  if (!seedValid(seed)) {
     throw new Error(`seed must be a safe integer in [0, 4294967295], got: ${seed}`)
   }
   const frozenSuite = deepFreeze(structuredClone(suite))
-  const corpusDigest = sha(JSON.stringify(frozenSuite))
   const recallDigest = sha(JSON.stringify(recallCfg))
   const components = {
     suite_version: SUITE_VERSION,
-    corpus_digest: corpusDigest.slice(0, 16),
+    corpus_digest: corpusDigestOf(frozenSuite),
     seed,
     embedding_identity: embeddingId,
     recall_cfg_digest: recallDigest.slice(0, 16),
     agent_policy: POLICY_VERSION,
     model: null,
   }
-  const exp_id = sha(JSON.stringify(components)).slice(0, 12)
-  return { exp_id, components, suite: frozenSuite }
+  return deepFreeze({ exp_id: expIdOf(components), components, suite: frozenSuite })
+}
+
+// 三审 P1：runArm 入口 fail-closed 完整性重验——seed 域合法、
+// corpus_digest === hash(suite)、exp_id === hash(components)。
+// 既拦事后 mutation（冻结对象改不动，但克隆/伪造对象能绕过冻结），
+// 也拦绕过 factory 手搓的不一致 identity；任何 tool call 之前执行。
+const validateIdentity = (identity) => {
+  if (!identity || typeof identity !== 'object' || !identity.components || !identity.suite) {
+    throw new Error('identity integrity: missing exp_id/components/suite (use experimentIdentity)')
+  }
+  const { components, suite } = identity
+  if (!seedValid(components.seed)) {
+    throw new Error(`identity integrity: seed out of domain: ${components.seed}`)
+  }
+  const cd = corpusDigestOf(suite)
+  if (components.corpus_digest !== cd) {
+    throw new Error(`identity integrity: corpus_digest mismatch (declared=${components.corpus_digest}, recomputed=${cd})`)
+  }
+  const eid = expIdOf(components)
+  if (identity.exp_id !== eid) {
+    throw new Error(`identity integrity: exp_id mismatch (declared=${identity.exp_id}, recomputed=${eid})`)
+  }
+  return identity
 }
 
 const didFactory = (expId, arm) => (label) => {
@@ -89,8 +120,10 @@ const assertApplied = (out, attributions, what) => {
   return out
 }
 
-// 二审 P1-1：runArm 不接收 seed/suite——一切从 identity 派生（单一入口）
+// 二审 P1-1：runArm 不接收 seed/suite——一切从 identity 派生（单一入口）；
+// 三审 P1：入口先做完整性重验，任何 tool call 之前 fail closed
 export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica = null }) => {
+  validateIdentity(identity)
   const did = didFactory(identity.exp_id, arm)
   const rng = seededRng(identity.components.seed)
   const suite = identity.suite
