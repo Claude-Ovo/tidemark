@@ -56,7 +56,6 @@ const { groupReport, verifyFixtures, expectedContentionScenarios } = await impor
 // 冻结六字段快照；末尾逐字段与 after 精确对账（不用创建默认常量冒充 before）
 const AUDIT_FIELDS = ['credited_success_count', 'evidenced_blame_count', 'strength_anchor',
   'strength_anchor_at', 'last_rewarded_at', 'revision']
-const { getPool } = await import('../src/lib/db.mjs')
 const rowSnapshot = async (tenantId, memoryId) => {
   const { rows } = await getPool().query(
     `SELECT ${AUDIT_FIELDS.join(', ')} FROM memories WHERE tenant_id=$1 AND memory_id=$2`,
