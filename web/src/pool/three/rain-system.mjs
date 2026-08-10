@@ -67,7 +67,7 @@ const vertexShader = /* glsl */`
   void main() {
     vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    gl_PointSize = clamp(aLength * uViewportHeight / max(1.0, -viewPosition.z), 3.0, 22.0);
+    gl_PointSize = clamp(aLength * uViewportHeight / max(1.0, -viewPosition.z), 4.0, 40.0);
     vOpacity = aOpacity * uDropBloom;
   }
 `
@@ -101,6 +101,66 @@ const createDropPoints = (count, material) => {
   return points
 }
 
+const crownVertexShader = /* glsl */`
+  attribute float aSize;
+  attribute float aOpacity;
+  uniform float uViewportHeight;
+  varying float vOpacity;
+
+  void main() {
+    vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewPosition;
+    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 5.0, 18.0);
+    vOpacity = aOpacity;
+  }
+`
+
+const crownFragmentShader = /* glsl */`
+  uniform vec3 uColor;
+  varying float vOpacity;
+
+  float segmentDistance(vec2 point, vec2 start, vec2 end) {
+    vec2 line = end - start;
+    float projection = clamp(dot(point - start, line) / dot(line, line), 0.0, 1.0);
+    return length(point - start - line * projection);
+  }
+
+  void main() {
+    vec2 point = (gl_PointCoord - 0.5) * 2.0;
+    float leftJet = segmentDistance(point, vec2(-0.34, -0.38), vec2(-0.56, 0.34));
+    float centreJet = segmentDistance(point, vec2(0.0, -0.42), vec2(0.02, 0.62));
+    float rightJet = segmentDistance(point, vec2(0.34, -0.38), vec2(0.58, 0.28));
+    float jets = 1.0 - smoothstep(0.045, 0.105, min(leftJet, min(centreJet, rightJet)));
+    float tips = max(
+      1.0 - smoothstep(0.05, 0.16, distance(point, vec2(-0.56, 0.34))),
+      max(
+        1.0 - smoothstep(0.05, 0.16, distance(point, vec2(0.02, 0.62))),
+        1.0 - smoothstep(0.05, 0.16, distance(point, vec2(0.58, 0.28)))
+      )
+    );
+    float bowlDistance = abs(length(vec2(point.x, (point.y + 0.40) * 1.75)) - 0.50);
+    float bowl = (1.0 - smoothstep(0.045, 0.11, bowlDistance))
+      * (1.0 - smoothstep(-0.20, 0.16, point.y));
+    float alpha = max(max(jets * 0.72, tips), bowl * 0.70) * vOpacity;
+    if (alpha < 0.025) discard;
+    gl_FragColor = vec4(uColor, alpha);
+    #include <colorspace_fragment>
+  }
+`
+
+const createCrownPoints = (count, material) => {
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3))
+  geometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(count), 1))
+  geometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(count), 1))
+  geometry.setDrawRange(0, 0)
+  const points = new THREE.Points(geometry, material)
+  points.name = 'RainImpactCrowns'
+  points.frustumCulled = false
+  points.renderOrder = 6
+  return points
+}
+
 const createSplashTexture = () => {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = 96
@@ -130,7 +190,7 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
   const uniforms = {
     uViewportHeight: { value: Math.max(1, window.innerHeight) },
     uDropBloom: { value: cfg.dropBloom },
-    uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.coldGlint) },
+    uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.pearl) },
   }
   const material = new THREE.ShaderMaterial({
     uniforms,
@@ -138,6 +198,7 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
     fragmentShader,
     transparent: true,
     depthWrite: false,
+    blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
 
@@ -169,7 +230,22 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
   const splashColor = new THREE.Color()
   const splashes = Array.from({ length: cfg.splashSlots }, () => null)
   let splashCursor = 0
-  group.add(ambient, directed, splashMesh)
+  const crownUniforms = {
+    uViewportHeight: uniforms.uViewportHeight,
+    uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.pearl) },
+  }
+  const crownMaterial = new THREE.ShaderMaterial({
+    uniforms: crownUniforms,
+    vertexShader: crownVertexShader,
+    fragmentShader: crownFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  })
+  const crowns = createCrownPoints(cfg.splashSlots, crownMaterial)
+  group.add(ambient, directed, splashMesh, crowns)
 
   const samples = seededGaussianDiskSamples(cfg.count)
   const random = mulberry32(cfg.seed ^ 0xa53c91e7)
@@ -208,15 +284,33 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
   }
 
   const updateSplashes = (seconds) => {
-    if (reduced) { splashMesh.count = 0; return }
+    if (reduced) {
+      splashMesh.count = 0
+      crowns.geometry.setDrawRange(0, 0)
+      return
+    }
+    const crownPosition = crowns.geometry.attributes.position.array
+    const crownSize = crowns.geometry.attributes.aSize.array
+    const crownOpacity = crowns.geometry.attributes.aOpacity.array
     let drawIndex = 0
+    let crownIndex = 0
     for (let i = 0; i < splashes.length; i++) {
       const splash = splashes[i]
       if (!splash) continue
       const progress = (seconds - splash.born) / cfg.splashLifetime
       if (progress < 0 || progress >= 1) { splashes[i] = null; continue }
+      const crownProgress = (seconds - splash.born) / cfg.crownLifetime
+      if (crownProgress >= 0 && crownProgress < 1) {
+        crownPosition[crownIndex * 3] = splash.x
+        crownPosition[crownIndex * 3 + 1] = 0.065 + crownProgress * 0.08
+        crownPosition[crownIndex * 3 + 2] = splash.z
+        crownSize[crownIndex] = 0.17 + splash.strength * 0.12
+        crownOpacity[crownIndex] = ((1 - crownProgress) ** 3)
+          * (0.52 + splash.strength * 0.48) * cfg.crownBloom
+        crownIndex++
+      }
       const fade = (1 - progress) ** 2
-      const size = (0.065 + splash.strength * 0.055) + progress * (0.18 + splash.strength * 0.10)
+      const size = (0.045 + splash.strength * 0.035) + progress * (0.09 + splash.strength * 0.04)
       splashDummy.position.set(splash.x, 0.026, splash.z)
       splashDummy.rotation.set(-Math.PI / 2, 0, 0)
       splashDummy.scale.setScalar(size)
@@ -229,6 +323,10 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
     splashMesh.count = drawIndex
     splashMesh.instanceMatrix.needsUpdate = true
     if (splashMesh.instanceColor) splashMesh.instanceColor.needsUpdate = true
+    crowns.geometry.setDrawRange(0, crownIndex)
+    crowns.geometry.attributes.position.needsUpdate = true
+    crowns.geometry.attributes.aSize.needsUpdate = true
+    crowns.geometry.attributes.aOpacity.needsUpdate = true
   }
 
   const setReducedMotion = (value) => {
@@ -237,6 +335,7 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
     if (reduced) {
       splashes.fill(null)
       splashMesh.count = 0
+      crowns.geometry.setDrawRange(0, 0)
     }
     if (!reduced) lastSeconds = null
   }
@@ -303,6 +402,8 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
       splashGeometry.dispose()
       splashMaterial.dispose()
       splashTexture.dispose()
+      crowns.geometry.dispose()
+      crownMaterial.dispose()
       group.clear()
     },
   }

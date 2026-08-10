@@ -37,13 +37,20 @@ assert.ok(POOL_3D_CONFIG.water.waveNumber < 10, 'impact waves must stay broad en
 assert.ok(POOL_3D_CONFIG.water.semanticImpactLifetime >= 6, 'semantic waves need time to visibly spread')
 assert.ok(POOL_3D_CONFIG.water.ambientImpactLifetime < POOL_3D_CONFIG.water.semanticImpactLifetime,
   'rain ripples must be brief while semantic waves remain legible')
+assert.ok(POOL_3D_CONFIG.water.ringWidth > 0 && POOL_3D_CONFIG.water.ringWidth <= 0.012,
+  'rain impacts must render as fine lines rather than raised circular bands')
+assert.ok(POOL_3D_CONFIG.water.ambientDisplacement < POOL_3D_CONFIG.water.semanticDisplacement,
+  'ambient rain may not deform the mirror as strongly as semantic feedback')
 assert.equal(POOL_3D_CONFIG.water.ambientImpactSlots + POOL_3D_CONFIG.water.semanticImpactSlots,
   POOL_3D_CONFIG.water.impactSlots, 'impact partitions must fill the shader buffer')
-const slots = createImpactSlotAllocator({ ambientSlots: 48, semanticSlots: 10 })
+const ambientSlots = POOL_3D_CONFIG.water.ambientImpactSlots
+const semanticSlots = POOL_3D_CONFIG.water.semanticImpactSlots
+const slots = createImpactSlotAllocator({ ambientSlots, semanticSlots })
 const semanticSlot = slots.next('semantic')
 const ambientWrites = Array.from({ length: 360 }, () => slots.next('ambient'))
-assert.ok(ambientWrites.every(slot => slot < 48), 'ambient rain must stay inside its slot partition')
-assert.ok(semanticSlot >= 48 && semanticSlot < 58, 'semantic impact must use the protected partition')
+assert.ok(ambientWrites.every(slot => slot < ambientSlots), 'ambient rain must stay inside its slot partition')
+assert.ok(semanticSlot >= ambientSlots && semanticSlot < ambientSlots + semanticSlots,
+  'semantic impact must use the protected partition')
 assert.ok(!ambientWrites.includes(semanticSlot), 'ambient rain may not evict a semantic wave')
 assert.throws(() => slots.next('unknown'), /unknown impact kind/)
 

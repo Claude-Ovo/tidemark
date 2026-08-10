@@ -69,6 +69,10 @@ const vertexShader = /* glsl */`
   uniform float uAmbientImpactLifetime;
   uniform float uSemanticImpactLifetime;
   uniform float uDimpleDuration;
+  uniform float uDimpleDisplacement;
+  uniform float uImpactAmplitude;
+  uniform float uAmbientDisplacement;
+  uniform float uSemanticDisplacement;
   uniform float uWaveSpeed;
   uniform float uWaveNumber;
   uniform float uAmbientAmplitude;
@@ -92,7 +96,9 @@ const vertexShader = /* glsl */`
       float packet = exp(-delta * delta * 2.8) * exp(-(age / max(lifetime, 0.001)) * 1.8);
       float pulse = sin(delta * uWaveNumber) * packet;
       float dimple = exp(-d * d * 72.0) * exp(-age * 12.0) * step(age, uDimpleDuration);
-      h += (pulse - dimple * 1.15) * impact.w * alive * edge;
+      float displacement = i < ${AMBIENT_IMPACTS} ? uAmbientDisplacement : uSemanticDisplacement;
+      h += pulse * impact.w * uImpactAmplitude * displacement * alive * edge;
+      h -= dimple * impact.w * uImpactAmplitude * uDimpleDisplacement * alive * edge;
       energy += (abs(pulse) + dimple) * impact.w * alive;
     }
     return h * edge;
@@ -127,25 +133,19 @@ const fragmentShader = /* glsl */`
   uniform float uFogDensity;
   uniform float uRadius;
   uniform float uEdgeFadeStart;
+  uniform vec4 uImpacts[${MAX_IMPACTS}];
+  uniform float uAmbientImpactLifetime;
+  uniform float uSemanticImpactLifetime;
+  uniform float uWaveSpeed;
+  uniform float uRingWidth;
+  uniform float uRingIntensity;
+  uniform float uSecondaryRingIntensity;
   varying vec3 vWorldPosition;
   varying vec3 vWorldNormal;
   varying float vRippleEnergy;
 
-  float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 345.45));
-    p += dot(p, p + 34.345);
-    return fract(p.x * p.y);
-  }
-
-  float valueNoise(vec2 p) {
-    vec2 cell = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(
-      mix(hash21(cell), hash21(cell + vec2(1.0, 0.0)), f.x),
-      mix(hash21(cell + vec2(0.0, 1.0)), hash21(cell + vec2(1.0)), f.x),
-      f.y
-    );
+  float lineRing(float distanceFromImpact, float radius, float width) {
+    return 1.0 - smoothstep(width, width * 2.6, abs(distanceFromImpact - radius));
   }
 
   void main() {
@@ -156,27 +156,31 @@ const fragmentShader = /* glsl */`
     float fresnel = pow(1.0 - facing, 3.2);
     float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 86.0);
     vec2 surface = vWorldPosition.xz;
-    float coarse = valueNoise(surface * 0.42 + vec2(uTime * 0.018, -uTime * 0.012));
-    float fine = valueNoise(surface * 1.13 + vec2(-uTime * 0.025, uTime * 0.019));
-    vec2 horizontalView = normalize(viewDir.xz + vec2(0.0001));
-    vec2 bandDirection = normalize(vec2(0.96, 0.28) + horizontalView * 0.18);
-    float irregularBand = dot(surface, bandDirection) * 0.15
-      + (coarse - 0.5) * 0.74 + (fine - 0.5) * 0.22 - sin(uTime * 0.045) * 0.31;
-    float bandWidth = mix(4.1, 10.8, 0.5 + 0.5 * dot(horizontalView, bandDirection));
-    bandWidth *= mix(0.72, 1.22, coarse);
-    float pearlBand = exp(-irregularBand * irregularBand * bandWidth)
-      * smoothstep(0.22, 0.78, fine) * (0.08 + fresnel * 0.54);
-    float quietVariation = valueNoise(surface * 0.28 + vec2(uTime * 0.01));
+    float ringGlow = 0.0;
+    for (int i = 0; i < ${MAX_IMPACTS}; i++) {
+      vec4 impact = uImpacts[i];
+      float age = uTime - impact.z;
+      float lifetime = i < ${AMBIENT_IMPACTS} ? uAmbientImpactLifetime : uSemanticImpactLifetime;
+      float alive = step(0.0, age) * step(age, lifetime);
+      float fade = pow(max(0.0, 1.0 - age / max(lifetime, 0.001)), 1.65);
+      float radius = age * uWaveSpeed;
+      float distanceFromImpact = distance(surface, impact.xy);
+      float primary = lineRing(distanceFromImpact, radius, uRingWidth);
+      float secondaryRadius = max(0.0, radius - 0.13);
+      float secondary = lineRing(distanceFromImpact, secondaryRadius, uRingWidth * 0.82)
+        * step(0.16, radius) * uSecondaryRingIntensity;
+      ringGlow += (primary + secondary) * impact.w * fade * alive;
+    }
 
-    vec3 color = mix(uAbyss, uDeepBlue, 0.50 + quietVariation * 0.14);
-    color = mix(color, uSteel, fresnel * 0.18);
-    color += uPearl * pearlBand * 0.20;
-    color += uColdGlint * specular * 0.72;
-    color += uColdGlint * min(vRippleEnergy * 3.4, 1.0) * 0.17;
+    float centralMirror = exp(-dot(surface, surface) * 0.12);
+    vec3 color = mix(uAbyss, uDeepBlue, 0.055 + centralMirror * 0.055 + fresnel * 0.08);
+    color += uSteel * fresnel * 0.052;
+    color += uPearl * specular * 0.32;
+    color += uColdGlint * min(ringGlow * uRingIntensity, 1.35);
 
     float distanceToCamera = length(cameraPosition - vWorldPosition);
     float fog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    color = mix(color, uFogColor, clamp(fog, 0.0, 0.82));
+    color = mix(color, uFogColor, clamp(fog, 0.0, 0.35));
     float radial = length(vWorldPosition.xz) / uRadius;
     float edgeAlpha = 1.0 - smoothstep(uEdgeFadeStart, 1.0, radial);
     gl_FragColor = vec4(color, edgeAlpha * 0.96);
@@ -201,8 +205,15 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
     uAmbientImpactLifetime: { value: POOL_3D_CONFIG.water.ambientImpactLifetime },
     uSemanticImpactLifetime: { value: POOL_3D_CONFIG.water.semanticImpactLifetime },
     uDimpleDuration: { value: POOL_3D_CONFIG.water.dimpleDuration },
+    uDimpleDisplacement: { value: POOL_3D_CONFIG.water.dimpleDisplacement },
+    uImpactAmplitude: { value: POOL_3D_CONFIG.water.impactAmplitude },
+    uAmbientDisplacement: { value: POOL_3D_CONFIG.water.ambientDisplacement },
+    uSemanticDisplacement: { value: POOL_3D_CONFIG.water.semanticDisplacement },
     uWaveSpeed: { value: POOL_3D_CONFIG.water.waveSpeed },
     uWaveNumber: { value: POOL_3D_CONFIG.water.waveNumber },
+    uRingWidth: { value: POOL_3D_CONFIG.water.ringWidth },
+    uRingIntensity: { value: POOL_3D_CONFIG.water.ringIntensity },
+    uSecondaryRingIntensity: { value: POOL_3D_CONFIG.water.secondaryRingIntensity },
     uAmbientAmplitude: { value: POOL_3D_CONFIG.water.ambientAmplitude },
     uAbyss: { value: new THREE.Color(POOL_3D_CONFIG.palette.abyss) },
     uDeepBlue: { value: new THREE.Color(POOL_3D_CONFIG.palette.deepBlue) },
@@ -251,7 +262,7 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
         x,
         z,
         seconds,
-        Math.max(0, Math.min(1, strength)) * POOL_3D_CONFIG.water.impactAmplitude,
+        Math.max(0, Math.min(1, strength)),
       )
     },
     dispose() { geometry.dispose(); material.dispose() },
