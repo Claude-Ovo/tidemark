@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { POOL_3D_CONFIG, cappedPixelRatio, fittedVerticalFov, polarToWorld, wantsThreePreview } from './src/pool/three/config.mjs'
-import { seededUnitDiskSamples } from './src/pool/three/rain-system.mjs'
+import { advanceRainDrop, seededGaussianDiskSamples, seededUnitDiskSamples } from './src/pool/three/rain-system.mjs'
 import { createImpactSlotAllocator, createRadialDiskGeometry } from './src/pool/three/water-disk.mjs'
 
 assert.equal(wantsThreePreview('?renderer=3d'), true)
@@ -34,14 +34,16 @@ assert.equal(camera.dragThresholdPx, 5)
 assert.ok(POOL_3D_CONFIG.water.edgeFadeStart >= 0.8 && POOL_3D_CONFIG.water.edgeFadeStart <= 0.9,
   'water must fade through roughly the outer 10-20%, not end as a hard disk')
 assert.ok(POOL_3D_CONFIG.water.waveNumber < 10, 'impact waves must stay broad enough to read')
-assert.ok(POOL_3D_CONFIG.water.impactLifetime >= 6, 'impact waves need time to visibly spread')
+assert.ok(POOL_3D_CONFIG.water.semanticImpactLifetime >= 6, 'semantic waves need time to visibly spread')
+assert.ok(POOL_3D_CONFIG.water.ambientImpactLifetime < POOL_3D_CONFIG.water.semanticImpactLifetime,
+  'rain ripples must be brief while semantic waves remain legible')
 assert.equal(POOL_3D_CONFIG.water.ambientImpactSlots + POOL_3D_CONFIG.water.semanticImpactSlots,
   POOL_3D_CONFIG.water.impactSlots, 'impact partitions must fill the shader buffer')
-const slots = createImpactSlotAllocator({ ambientSlots: 14, semanticSlots: 10 })
+const slots = createImpactSlotAllocator({ ambientSlots: 48, semanticSlots: 10 })
 const semanticSlot = slots.next('semantic')
-const ambientWrites = Array.from({ length: 140 }, () => slots.next('ambient'))
-assert.ok(ambientWrites.every(slot => slot < 14), 'ambient storm must stay inside its slot partition')
-assert.ok(semanticSlot >= 14 && semanticSlot < 24, 'semantic impact must use the protected partition')
+const ambientWrites = Array.from({ length: 360 }, () => slots.next('ambient'))
+assert.ok(ambientWrites.every(slot => slot < 48), 'ambient rain must stay inside its slot partition')
+assert.ok(semanticSlot >= 48 && semanticSlot < 58, 'semantic impact must use the protected partition')
 assert.ok(!ambientWrites.includes(semanticSlot), 'ambient rain may not evict a semantic wave')
 assert.throws(() => slots.next('unknown'), /unknown impact kind/)
 
@@ -51,6 +53,23 @@ assert.deepEqual(rainA, rainB, 'rain layout must be stable for a fixed seed')
 assert.ok(rainA.every(({ x, z }) => Math.hypot(x, z) <= 1 + 1e-12), 'rain must land inside the water disk')
 const meanRadiusSquared = rainA.reduce((sum, { x, z }) => sum + x * x + z * z, 0) / rainA.length
 assert.ok(Math.abs(meanRadiusSquared - 0.5) < 0.06, 'rain must sample disk area uniformly, not bunch at the centre')
+
+const gaussianA = seededGaussianDiskSamples(1024, { seed: 42 })
+const gaussianB = seededGaussianDiskSamples(1024, { seed: 42 })
+assert.deepEqual(gaussianA, gaussianB, 'central rain field must be deterministic for a fixed seed')
+assert.ok(gaussianA.every(({ x, z }) => Math.hypot(x, z) <= POOL_3D_CONFIG.rain.maxRadius + 1e-12),
+  'central rain must stay inside its soft maximum radius')
+const gaussianMeanR2 = gaussianA.reduce((sum, { x, z }) => sum + x * x + z * z, 0) / gaussianA.length
+assert.ok(gaussianMeanR2 < meanRadiusSquared * 0.45, 'rain density must concentrate smoothly near the centre')
+assert.equal(POOL_3D_CONFIG.water.ambientImpactSlots, POOL_3D_CONFIG.rain.count,
+  'every simultaneously visible ambient drop must have a dedicated impact slot')
+assert.ok(POOL_3D_CONFIG.water.ambientImpactLifetime
+    < (POOL_3D_CONFIG.rain.maxHeight - 0.06) / POOL_3D_CONFIG.rain.maxSpeed,
+  'a drop may not land twice before its previous ambient ripple expires')
+assert.deepEqual(advanceRainDrop(0.07, 1, 0.02), { height: 0.06, landed: true },
+  'a drop must clamp exactly to the water plane when its impact fires')
+assert.deepEqual(advanceRainDrop(0.5, 1, 0.02), { height: 0.48, landed: false },
+  'a drop above the water may not trigger an early ripple')
 
 const waterGeometry = createRadialDiskGeometry(5, 8, 24)
 assert.equal(waterGeometry.attributes.position.count, 1 + 8 * 24)

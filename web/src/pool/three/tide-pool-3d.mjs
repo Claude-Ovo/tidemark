@@ -34,7 +34,7 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
   const tideMarks = createTideMarkGroup()
   const rain = createRainSystem({
     radius: water.radius,
-    onImpact: (x, z, strength) => water.addImpact(x, z, performance.now() / 1000, strength, 'ambient'),
+    onImpact: (x, z, strength, seconds) => water.addImpact(x, z, seconds, strength, 'ambient'),
   })
   rain.setReducedMotion(reducedMotion)
   const lighting = new THREE.Group()

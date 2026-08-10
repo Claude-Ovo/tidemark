@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { POOL_3D_CONFIG } from './config.mjs'
 
 const MAX_IMPACTS = POOL_3D_CONFIG.water.impactSlots
+const AMBIENT_IMPACTS = POOL_3D_CONFIG.water.ambientImpactSlots
 
 // Ambient rain is intentionally noisy, while recall/remember/click impacts carry
 // product meaning. Separate rings prevent a storm from evicting a semantic wave
@@ -64,10 +65,10 @@ export const createRadialDiskGeometry = (radius, radialSegments, angularSegments
 const vertexShader = /* glsl */`
   uniform float uTime;
   uniform float uRadius;
-  uniform vec2 uImpactCenters[${MAX_IMPACTS}];
-  uniform float uImpactTimes[${MAX_IMPACTS}];
-  uniform float uImpactStrengths[${MAX_IMPACTS}];
-  uniform float uImpactLifetime;
+  uniform vec4 uImpacts[${MAX_IMPACTS}];
+  uniform float uAmbientImpactLifetime;
+  uniform float uSemanticImpactLifetime;
+  uniform float uDimpleDuration;
   uniform float uWaveSpeed;
   uniform float uWaveNumber;
   uniform float uAmbientAmplitude;
@@ -81,15 +82,18 @@ const vertexShader = /* glsl */`
       + sin(p.y * 0.91 - p.x * 0.18 - uTime * 0.16)) * uAmbientAmplitude;
     energy = 0.0;
     for (int i = 0; i < ${MAX_IMPACTS}; i++) {
-      float age = uTime - uImpactTimes[i];
-      float alive = step(0.0, age) * step(age, uImpactLifetime);
-      float d = distance(p, uImpactCenters[i]);
+      vec4 impact = uImpacts[i];
+      float age = uTime - impact.z;
+      float lifetime = i < ${AMBIENT_IMPACTS} ? uAmbientImpactLifetime : uSemanticImpactLifetime;
+      float alive = step(0.0, age) * step(age, lifetime);
+      float d = distance(p, impact.xy);
       float front = age * uWaveSpeed;
       float delta = d - front;
-      float packet = exp(-delta * delta * 1.28) * exp(-age * 0.24);
+      float packet = exp(-delta * delta * 2.8) * exp(-(age / max(lifetime, 0.001)) * 1.8);
       float pulse = sin(delta * uWaveNumber) * packet;
-      h += pulse * uImpactStrengths[i] * alive * edge;
-      energy += abs(pulse) * uImpactStrengths[i] * alive;
+      float dimple = exp(-d * d * 72.0) * exp(-age * 12.0) * step(age, uDimpleDuration);
+      h += (pulse - dimple * 1.15) * impact.w * alive * edge;
+      energy += (abs(pulse) + dimple) * impact.w * alive;
     }
     return h * edge;
   }
@@ -187,16 +191,16 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
     semanticSlots: POOL_3D_CONFIG.water.semanticImpactSlots,
   })
   if (allocator.total !== MAX_IMPACTS) throw new Error('impact slot partitions must fill impactSlots')
-  const centers = Array.from({ length: MAX_IMPACTS }, () => new THREE.Vector2(999, 999))
-  const times = Array.from({ length: MAX_IMPACTS }, () => -999)
-  const strengths = Array.from({ length: MAX_IMPACTS }, () => 0)
+  // One vec4 per impact keeps the vertex-uniform budget viable on WebGL1:
+  // center.xy + time + strength. Lifetime is derived from the fixed partition.
+  const impacts = Array.from({ length: MAX_IMPACTS }, () => new THREE.Vector4(999, 999, -999, 0))
   const uniforms = {
     uTime: { value: 0 },
     uRadius: { value: radius },
-    uImpactCenters: { value: centers },
-    uImpactTimes: { value: times },
-    uImpactStrengths: { value: strengths },
-    uImpactLifetime: { value: POOL_3D_CONFIG.water.impactLifetime },
+    uImpacts: { value: impacts },
+    uAmbientImpactLifetime: { value: POOL_3D_CONFIG.water.ambientImpactLifetime },
+    uSemanticImpactLifetime: { value: POOL_3D_CONFIG.water.semanticImpactLifetime },
+    uDimpleDuration: { value: POOL_3D_CONFIG.water.dimpleDuration },
     uWaveSpeed: { value: POOL_3D_CONFIG.water.waveSpeed },
     uWaveNumber: { value: POOL_3D_CONFIG.water.waveNumber },
     uAmbientAmplitude: { value: POOL_3D_CONFIG.water.ambientAmplitude },
@@ -243,9 +247,12 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
     },
     addImpact(x, z, seconds, strength = 1, kind = 'semantic') {
       const slot = allocator.next(kind)
-      centers[slot].set(x, z)
-      times[slot] = seconds
-      strengths[slot] = Math.max(0, Math.min(1, strength)) * POOL_3D_CONFIG.water.impactAmplitude
+      impacts[slot].set(
+        x,
+        z,
+        seconds,
+        Math.max(0, Math.min(1, strength)) * POOL_3D_CONFIG.water.impactAmplitude,
+      )
     },
     dispose() { geometry.dispose(); material.dispose() },
   }
