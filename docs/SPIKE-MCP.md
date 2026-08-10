@@ -28,7 +28,10 @@
 - [ ] 对照比赛规则原文确认 MCP "使用" 门槛
 - [ ] end-to-end 审计：按 request_id 查 recall_requests → memory → nightly provenance
 
-## 第三步：AWS runtime spike（P0-01，状态：**conditional / blocked_external(Bedrock allowlisting)**）
+## 第三步：AWS runtime spike（P0-01——〔2026-08-10 状态更新〕本地闭环+生产部署已签
+##（README §Deploy、prod smoke 13/13）；原 Bedrock blocker 已 **resolved-negative**
+##（结论 55：官方终审拒绝，embedding 转 Lambda 内 local-onnx 并在生产验真，
+## 证据见 SPIKE-ONNX.md），下方"未验证"节按此读作历史记录）
 
 环境：us-east-1，nodejs22.x，512MB，express + serverless-http，官方 MCP SDK 客户端 + 断言套件验收（`spike/aws/client-test.mjs`，退出码生效）。证据链见 `SPIKE-EVIDENCE.md`。
 
@@ -45,9 +48,12 @@
 | 冷启动后 DB 重连（3×INIT_START 后测试全过） | OK |
 | CloudWatch 结构化日志与 CRDB 行按 request_id 对应 | OK |
 
-### 未验证（tracked blocker）
+### 未验证（历史 blocker——已 resolved-negative 终局）
 
-- **Bedrock 段**：新账户被 marketplace allowlisting 拦截（信用卡授权失败→AWS 要求提工单验证，2026-07-29 已提交，ETA 未知）。embedding 走 provider 层（`EMBED_PROVIDER=bedrock|stub`），stub 为 sha256 驱动确定性 512 维、同接口同落库路径。**批准后 24h 内（最迟 P0-04 验收前）以 expected_provider=bedrock 重跑套件并补三处证据；此前 P0-01 不得称 completed。**
+- **Bedrock 段**〔2026-08-03 终局，结论 55〕：工单终审**拒绝**（enterprise-only），
+  非待批。原"批准后 24h 重跑"条件永久不可满足，作废；P0-01 的完成判据改由
+  local-onnx 主路径承担（六条硬边界另行验收，已签——SPIKE-ONNX.md + 生产 smoke）。
+  `EMBED_PROVIDER=bedrock` 分支保留为企业账号可选未验证路径。
 
 ### 三个关键发现（实现必须遵守）
 
@@ -57,4 +63,5 @@
 4. **并发活跃业务连接预算**：新账户 Lambda 总并发=10 且不可配 per-function reserved concurrency（实测被拒）；预算=账户并发(10)×pool.max(1)，idle/redeploy/admin socket 另计、留 headroom；限额提升后改用 reserved concurrency 收紧
 5. **本项目 PS5.1 兼容策略：.ps1 一律 ASCII-only 注释**（Windows PowerShell 5.1 将无 BOM 脚本按 ANSI 解码，非 ASCII 字节会破坏解析——带 BOM 或 PowerShell 7 无此问题，故为项目策略而非技术必然）
 
-- [ ] EventBridge Scheduler → Lambda 定时触发样例（P0-09 前完成）
+- [x] EventBridge Scheduler → Lambda 定时触发（P0-09 已交付签收：cron 规则 + canonical
+  scheduled_for + DLQ 双层失败通路，生产 smoke S11/S13 断言，见 README 部署表）

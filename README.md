@@ -2,9 +2,13 @@
 
 **A memory organ that learns from outcomes, not repetition — and proves every recall.**
 
-An outcome-gated memory layer for AI agents, built on CockroachDB (distributed vector indexing + managed MCP audit path) and AWS (Lambda, EventBridge, Bedrock). CockroachDB × AWS Hackathon 2026 entry.
+An outcome-gated memory layer for AI agents, built on CockroachDB (distributed vector indexing + managed MCP audit path) and AWS (Lambda, EventBridge, API Gateway, Secrets Manager). Embedding runs **inside the Lambda** (sealed ONNX MiniLM — no external AI API in the request path). CockroachDB × AWS Hackathon 2026 entry.
 
-Design docs: `docs/SPEC.md` (implementation contract, frozen v1.2.2.1) · `docs/ARCHITECTURE.md` · decision log in `collab/CODEX_CHANNEL.md`.
+Design docs: `docs/SPEC.md` (implementation contract, v1.2.6) · `docs/ARCHITECTURE.md` · decision log in `collab/CODEX_CHANNEL.md`.
+
+**Live visualization**: `web/pool.html` — the Memory Tide Pool (2D canvas, zero deps): one particle
+per memory, radius = server-computed retention, recall ripples, outcome tide-marks, live activity
+loop off `/viz/activity`. `cd web && npx vite`, then open `http://localhost:5173/pool.html`.
 
 ## Run (development)
 
@@ -80,16 +84,16 @@ What it creates (all create-or-update; reruns are safe):
 | Resource | Name | Notes |
 |---|---|---|
 | Secrets Manager secret | `tidemark/prod` | DB URL, HMAC key, admin key, agent API keys. Generated once by `infra/gen-secret.mjs`; values are preserved on redeploy (`-RotateSecrets` regenerates). Credentials never enter argv, function config, or the repo. |
-| IAM role | `tidemark-prod-role` | Basic execution + `GetSecretValue` on the one secret + `bedrock:InvokeModel` on the Titan embed model. |
+| IAM role | `tidemark-prod-role` | Basic execution + `GetSecretValue` on the one secret + `bedrock:InvokeModel` on the Titan embed model (legacy grant — nothing in the request path calls Bedrock; kept only for the unverified enterprise-account provider branch). |
 | Lambda | `tidemark-mcp` | The Memory MCP server (same `src/server.mjs` as local, wrapped by `src/aws/mcp-handler.mjs`). 30s / 1024MB / pool max=1 (in-process embedding needs the headroom). |
-| Lambda | `tidemark-nightly` | Dream -> reflection -> transition orchestrator (`src/aws/nightly-handler.mjs`). 600s / 1024MB. |
+| Lambda | `tidemark-nightly` | Dream -> reflection -> transition orchestrator (`src/aws/nightly-handler.mjs`; dream/reflection model segment stub-only this cycle — see Bedrock status below). 600s / 1024MB. |
 | API Gateway HTTP API | `tidemark-api` | `$default` -> `tidemark-mcp`. |
 | EventBridge rule | `tidemark-nightly` | `cron(0 19 * * ? *)` (03:00 Beijing). Event time is floored to the minute into the canonical `scheduled_for`, so duplicate/retried deliveries land on the same `nightly_runs` key and commit exactly once (handler-level proof in smoke S11). |
 | SQS DLQ | `tidemark-nightly-dlq` | Two failure layers, both explicit (smoke S13 asserts them): EventBridge target `RetryPolicy` + `DeadLetterConfig` for delivery failures; Lambda async event-invoke-config (2 retries, 6h age, `OnFailure` -> DLQ) for function-code failures. The nightly handler deliberately fails on nonterminal job states (lease held, retryable, stale, crashed), so async retries carry the same event = same canonical schedule = takeover of the same run; exhausted retries land in the DLQ instead of vanishing. |
 
 The prod database (`tidemark_prod`) is migrated + verified from your machine as part of the deploy. Functions receive only `TIDEMARK_SECRET_ARN`; secrets are pulled at cold start (`src/lib/secrets.mjs`, allowlisted keys, fail-closed: with an ARN present, all four production keys must be present after the merge or the cold start fails - configuration drift never falls back to built-in dev keys).
 
-Bedrock status (honest): `EMBED_PROVIDER=bedrock` flips the embedding path by config only, but it stays unverified until AWS allowlisting clears (P0-01/P0-04 conditional). The nightly model extraction (`DREAM_PROVIDER`) is **stub-only for now** - the Bedrock provider branch is intentionally not wired yet (P0-07 conditional) and throws rather than pretending.
+Bedrock status (honest): access was **formally denied** for this account (resolved-negative — enterprise-only per the AWS support case), which is why embedding runs in-Lambda ONNX. `EMBED_PROVIDER=bedrock` remains a config-only branch for enterprise accounts, unverified. The nightly model extraction (`DREAM_PROVIDER`) is **stub-only this cycle**: the full pipeline (lease/idempotence/revision fencing/provenance schema) is implemented and tested, but dream/reflection produce no model-generated rows — the provider branch throws rather than pretending (P0-07 conditional).
 
 ## Admin surface (owner-only, not an agent tool)
 
@@ -115,10 +119,14 @@ stay platform-default, privilege-filtered and credential-masked. Every write ver
 prose-bearing base tables are verifiably denied (`src/test-auditor.mjs` A1-A7, incl.
 grant-drift/SYSTEM-grant convergence red gates), including schema CREATE (CockroachDB
 grants it to the `public` role by default - revoked). Three judge questions (four
-copy-paste SQL blocks: receipt, direction-aware plasticity, dream + reflection provenance):
-see `docs/AUDITOR.md`. This is the path the CockroachDB Managed MCP Server audits through
-(operator-facing, isolated demo cluster).
+copy-paste SQL blocks: receipt, direction-aware plasticity, dream + reflection provenance —
+note the provenance queries return zero product rows this cycle: the schema and its red-gate
+tests are live, but the generating model segment is blocked_external): see `docs/AUDITOR.md`.
+This is the **documented operator path** for the CockroachDB Managed MCP Server
+(operator-facing, isolated demo cluster); console wiring evidence is pending and we do not
+claim live MCP verification before it lands.
 
 ## License
 
-MIT (license file added before submission).
+MIT — see `LICENSE`. The sealed embedding model (`all-MiniLM-L6-v2`, Apache-2.0) and its
+attribution live in `NOTICE.md`.

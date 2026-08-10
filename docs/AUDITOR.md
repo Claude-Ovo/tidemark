@@ -6,6 +6,12 @@ The auditor can trace every claim the system makes — *which memories were reca
 what outcome credited them, and which nightly run produced a derived memory* — without ever
 seeing stored prose, vectors, or credentials.
 
+Scope note (honest): the recall/plasticity queries (1, 2) return live product rows today.
+The provenance queries (3a, 3b) exercise live schema + red-gate-tested joins, but return
+**zero product rows this cycle** — the dream/reflection generating model segment is
+blocked_external (Bedrock denied; stub validates the state machine only). Empty results
+there are the honest state, not a broken query.
+
 ## The account
 
 `tidemark_auditor` (created by `infra/setup-auditor.mjs`; prod credentials sealed in
@@ -101,10 +107,13 @@ pairs to one experience, the unconstrained join would cross-pair every event wit
 pair (proven by red gate A7). Both end at an idempotent, lease-fenced run with a frozen source fingerprint —
 no orphaned "the model just said so" rows.
 
-## Wiring the Managed MCP Server
+## Wiring the Managed MCP Server (documented procedure — operator evidence pending)
 
-The CockroachDB Cloud console configures the Managed MCP endpoint with the
+Procedure: the CockroachDB Cloud console configures the Managed MCP endpoint with the
 `tidemark_auditor` SQL credentials (console step, operator-performed). The MCP tools are
 the official fixed 12 (read/query); with this account the APPLICATION data they can reach
-is exactly the relations above (platform catalogs stay privilege-filtered as noted). Business traffic never touches this path — it stays on Tidemark's own Memory MCP
-(conclusion 18).
+is exactly the relations above (platform catalogs stay privilege-filtered as noted).
+Business traffic never touches this path — it stays on Tidemark's own Memory MCP
+(conclusion 18). **Status**: the SQL account face is implemented and red-gate tested
+(A1-A7); the console wiring + live MCP tool query have not yet been evidenced by the
+operator, and we do not claim live MCP verification before that lands (conclusion 57).

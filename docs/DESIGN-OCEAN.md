@@ -5,7 +5,9 @@
 > （"太花哨、三十秒抓不到重点"）与 Codex 八审三个 P1（global percentile 越带、
 > 真实数据聚簇、去壁纸不成立）为同一病的两种表述。
 > 概念原作 ovo.jpg 退役，至多作品牌插画，不进主交互。
-> 风格参考：https://rainform.pages.dev/ （Owner 指定）。
+> 风格参考：https://rainform.pages.dev/ （Owner 指定）。〔license 注：Rainform 为
+> PolyForm Noncommercial 1.0.0——仅借鉴视觉/交互思路，本项目零复制其代码，
+> 与 SPEC-3D-POOL.md 同一红线。〕
 
 ## 一句话
 
@@ -87,10 +89,14 @@ item 级归因上。视觉语法 = 架构真相。
 
 ## 交互
 
-1. **Hover**（120–180ms 延迟）→ 固定位小卡（不跟鼠标）：一句概要、层级、年龄、
-   保留度、最近一次 outcome。首屏不泄精确数值。
-2. **Click / Enter** → **右侧抽屉**：内容（principal-aware：agent 键全文 /
-   viz viewer 键 content_preview，抽屉声明口径——与契约 D 同界）、来源 episode、衰减曲线、
+1. **Hover**（150ms intent 延迟，连续悬停热路径免等）→ 小卡**出现在触发时鼠标位置**
+   （键盘 focus 贴粒子 anchor；出现后不追鼠标）——〔Owner 2026-08-09 裁定改稿，
+   推翻本节旧"固定位不跟鼠标"方案，结论 73〕：一句概要、层级、年龄、保留度、
+   最近一次 outcome。首屏不泄精确数值。
+2. **Click / Enter** → **居中 modal**（scale 0.96→1 + scrim，DOM id 仍为 `#drawer`）——
+   〔Owner 2026-08-09 裁定改稿，推翻本节旧"右侧抽屉"方案，结论 73；drawer-guard
+   竞态判废/ESC/焦点归还/inert 契约原样保留〕：内容（principal-aware：agent 键全文 /
+   viz viewer 键 content_preview，声明口径——与契约 D 同界）、来源 episode、衰减曲线、
    credited/blamed 归因、receipt 评分构成、关联记忆。
    〔v1 的水泡透镜 / "同一只泡五态" 退役——Codex 裁定它是旧表现层非架构地基，
    Owner 2026-08-07 确认收回 8/5 的五态签字。〕
@@ -219,11 +225,13 @@ forward-only 的 activity 流不能保证首次打开就有历史详情（Codex 
 - 最终 painted anchor = pointer/keyboard 唯一坐标源
 - 真实快照角向无聚簇退化（x 聚簇教训转移到 angle，P1-3 整项保留）
 
-## 开工门（Codex 2026-08-07 裁定）
+## 开工门（Codex 2026-08-07 裁定；〔2026-08-10 状态注〕三道门均已过——
+## P0-11 全构件签收：布局/activity/demo refresh/交互层/live 消费环 + 动效批与
+## 粒子视觉升级；后续 3D 化见 SPEC-3D-POOL.md）
 
-1. 本文档 + V2 清单 + A/B/C 数据契约冻结 ← **本次提交**
-2. 真实单 Agent 74-memory 一屏静态极坐标原型 + 一条 scripted 因果序列
-3. 过门后才扩交互；不再维护旧海底双轨
+1. 本文档 + V2 清单 + A/B/C 数据契约冻结 ✅
+2. 真实单 Agent 74-memory 一屏静态极坐标原型 + 一条 scripted 因果序列 ✅
+3. 过门后才扩交互；不再维护旧海底双轨 ✅（交互层与 live 环已交付签收）
 
 ## 技术方向（承 v1，范围收窄)
 

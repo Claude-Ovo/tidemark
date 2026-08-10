@@ -32,7 +32,10 @@ ALL SPIKE ASSERTIONS PASSED (provider=stub)
 - `embedding VECTOR(512)` 实际值入库，读回后按 canonical 算法（4 位定点 sha256）重算 digest 与写入前 digest 一致（digest_match=true）
 - 越权验证：second-agent 持同一 request_id 查询 → not_found_in_scope
 
-**待补（Bedrock allowlisting 批准后 24h 内）**：同套件以 `expected_provider=bedrock` 重跑，断言 model_id=amazon.titan-embed-text-v2:0，三处证据重新采集。
+**〔2026-08-10 状态注〕原"待补（Bedrock 批准后重跑）"作废**——结论 55：Bedrock 申请
+终审拒绝（resolved-negative，非待批）。生产 embedding 证据由 local-onnx 主路径承担：
+见 `SPIKE-ONNX.md`（bit-exact 跨平台向量、派生身份、封存 manifest）与 `infra/smoke.mjs`
+生产断言。本文其余 stub-run 证据作为 P0-01 运行时形态的历史记录保留。
 
 复现：`spike/aws/deploy.ps1`（migrate + 打包 + 无 BOM cli-input-json 下发 env + wait + 每步退出码断言），再跑 `node client-test.mjs <url> stub` 与 `node digest-test.mjs`（固定 seed 20260729）。
 **从旧 schema（commit a4bee54 一代表）升级**：必须 `.\deploy.ps1 -ResetSpikeTable`——会销毁此前 spike 证据行（本轮实际执行过 reset，旧行已弃）；migrate 会校验 schema 形态，旧表存在而未 reset 时显式失败并提示，不静默放过。

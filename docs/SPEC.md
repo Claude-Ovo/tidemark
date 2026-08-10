@@ -1,7 +1,7 @@
-# SPEC v1.2.5 — Tidemark（会遗忘的记忆）
+# SPEC v1.2.6 — Tidemark（会遗忘的记忆）
 
 > v1.2.6（2026-08-03，local-onnx 转向，结论 55）：本账号 Bedrock 官方终审拒绝（enterprise-only），v1 embedding 主路径改为 Lambda 内自托管量化 MiniLM（q8 ONNX 随部署包封存，manifest SHA 验真、冷启动 fail-closed、零外部 AI 调用）。`embedding_model_id` 为派生身份（可读前缀+完整 64-hex digest，覆盖模型 commit/文件 SHA/输出契约/运行时版本），落库于 memories（034/035），vector index prefix 含身份（036/037）——不同 embedding 空间绝不混检索，recall/nightly dedup 只查当前身份；三处 pipeline version 注入精确身份（recall-v6/dream-v2/reflect-v3）。截断契约：冻结 max_tokens=256（manifest 承载并入身份），head-token-decode 确定性截断+可观测标记。正文中 "Bedrock" 的 embedding 语境按本条读作"当前 embedding provider"；bedrock 分支保留为企业账号未验证可选项。
-> v1.2.5（2026-08-01，P0-07 dream/reflection，Codex 方案两审+代码一审驱动）：nightly 三 job（dream/reflection/transition）共用 run harness（claim/lease/fencing/future-gate/frozen-control）；dream=due 队列低权重簇浓缩（(agent,episode) 分组、derived 硬排除防回流、每簇独立 fingerprint 与确定性 derived_memory_id、全簇或零、server 算 time_range、salient canonical rendering 入正文）；reflection=failure->success 配对提炼 candidate 经验（`reflection_pairs` 账本 exactly-once、outcome 锚定终态真相、anchors 优先截断 32/16KiB、(agent,scope) 分区双层 dedup 0.92、evidence_ids server 封口、事件全字段 hash 快照）；orchestrator 单入口 dream->reflection->transition（dream 占源故 stale/暂态短路，reflection 不占源故任何结果不阻 transition）；Dream/Reflection Receipt 落 `result_receipt`（028）。常数：min_cluster=3/max_clusters=5/max_sources=8/window=72h/retention=120h/max_pairs=5/32ev/16KiB/dedup=0.92。migrations 024-032。Bedrock 前保持 conditional / blocked_external（结论 36）。
+> v1.2.5（2026-08-01，P0-07 dream/reflection，Codex 方案两审+代码一审驱动）：nightly 三 job（dream/reflection/transition）共用 run harness（claim/lease/fencing/future-gate/frozen-control）；dream=due 队列低权重簇浓缩（(agent,episode) 分组、derived 硬排除防回流、每簇独立 fingerprint 与确定性 derived_memory_id、全簇或零、server 算 time_range、salient canonical rendering 入正文）；reflection=failure->success 配对提炼 candidate 经验（`reflection_pairs` 账本 exactly-once、outcome 锚定终态真相、anchors 优先截断 32/16KiB、(agent,scope) 分区双层 dedup 0.92、evidence_ids server 封口、事件全字段 hash 快照）；orchestrator 单入口 dream->reflection->transition（dream 占源故 stale/暂态短路，reflection 不占源故任何结果不阻 transition）；Dream/Reflection Receipt 落 `result_receipt`（028）。常数：min_cluster=3/max_clusters=5/max_sources=8/window=72h/retention=120h/max_pairs=5/32ev/16KiB/dedup=0.92。migrations 024-032。模型段状态：Bedrock 申请已 **resolved-negative**（结论 55，永久拒非待批）——dream/reflection 生成段 v1 以 stub 验证状态机、无产物，保持 conditional；embedding 已按 v1.2.6 转 local-onnx 并在生产验真。
 
 > v1.2.4（2026-07-31，P0-06 生命周期调度，Codex 两轮方案审驱动）：状态机边界统一 `<=`（消除阈值等值热循环）；consolidation progress 独立于 lifetime count（`consolidation_baseline`，migration 020/021，"复活后重新挣"可执行化）；`next_transition_at` canonical scheduler 收口（结论 39 债务清偿，migration 022 回填 + PREFLIGHTS[22]）；nightly_runs 增 `control_config`（023，takeover 只读冻结控制面）；transition job 契约=evaluation_at=scheduled_for 进 fingerprint、lease 用墙钟、fencing generation token、no-work 不落 run、整批 stale 零写入。
 > v1.2.3（2026-07-31，P0-05 实现修正同步，Codex 二审/三审驱动）：outcomes 终态唯一改 per `(tenant, agent, attempt)`（migrations 018/019）；幂等归属 outcomes 本表（payload_hmac/response_json 两列，013/016/017）；`max_attributions=32` 冻结；attempt ledger 锚降为一致性检测。仅同步已实现并经交叉审查的行为，无新增 feature。
@@ -33,7 +33,7 @@ CREATE TABLE memories (
   kind           STRING,                                   -- tool 入参 kind 落点（fact/preference/task_state/...，自由枚举）
   episode_id     STRING,                                   -- 写入时所处 episode
   content        STRING NOT NULL,
-  embedding      VECTOR(1024),                             -- 维度以 Bedrock 模型为准 [pending spike]
+  embedding      VECTOR(512),                              -- 〔结论 55〕local-onnx（MiniLM-L6 384 维 mean+L2）零填充至 512；实库 001_memories.sql 与 verify.mjs 均为 512
   experience_body JSONB,                                   -- 仅 experience：{trigger, wrong_action, correct_action, caution, evidence_ids[]}
   exp_status     STRING CHECK (exp_status IN ('candidate','verified','superseded')),  -- 仅 experience，NOT NULL when layer='experience'
   source         STRING NOT NULL CHECK (source IN ('user_asserted','tool_verified','agent_inferred','external_untrusted','derived')),  -- server 分配
@@ -317,13 +317,34 @@ forget/export/unpin：owner/admin HTTP 面。`reflect` 无公共 tool。
 
 幂等/lease/stale/batch 全按结论 13/16/17。Lambda 连接池 handler 外复用 max=1；EventBridge retry+DLQ（P0-09 接线）。
 
-## 7. 评测（三档 A/B）
+## 7. 评测（P0-12 三臂 A/B——冻结口径：recall + outcome-gated plasticity evaluation slice）
 
-同 v1.0，附加假设：importance 双算是否改善 attribution 命中 [A/B]；固定 seed 公开 trace。
+〔2026-08-10 与 Codex 冻结，取代 v1.0 的"三档"描述〕**不宣称完整生命周期已验证**——
+reflection/nightly 场景因模型段 blocked_external 明确不做，不用假产物冒充。
+
+- **三臂**：`no-memory` / `vector-only`（同 embedding/top-k，关 outcome 塑性）/ `full`
+  （开 outcome-gated 塑性）。agent 为确定性脚本 policy（`model: null,
+  agent_policy: deterministic-v1`）——零自由生成，差异全额归因记忆层；指标为
+  injection hit / lifecycle ablation，不冒充生成质量。
+- **12 场景三组呈现**（headline 不出单一均分）：main effectiveness 5 场景聚合 /
+  negative controls 5 场景逐项 pass-fail（含 credited 的 matched cancelled 对照与
+  agent 隔离全 receipt 候选判定）/ diagnostics 2 场景 raw 值（paraphrase 冻结判据
+  `no-shared-cjk-bigram-v1`、slot-pressure 报 raw coverage + budget-normalized）。
+- **完整性机制**：canonical experiment identity（suite+语料+seed+embedding+召回配置
+  全量摘要，深冻结+入口重验）；policy→action→oracle→evidence 单向分层；attribution
+  回执精确对账；坑位场景 receipt 前置不成立标 `invalid_fixture` 不计入组；
+  cancelled 零塑性三层证据（agent 面 plasticity_applied / receipt 面 utility /
+  行级 read-only 审计）。
+- 固定 seed 公开 content-free trace（fact 标签+哈希+receipt 分量）。
+- 实现：`src/ab/{tasks,policy,oracle,harness,report}.mjs` + `scripts/run-ab.mjs`；
+  判别 `src/ab/test-ab.mjs`（AB1-AB14）接 root。
 
 ## 8. Auditor Mode
 
-同 v1.0；spike 待办不变。[pending spike]
+已实现并签收（P0-10，结论 57）：独立只读账号、12 application relations（四张脱敏视图
++八张 content-free ledgers）、评委 SQL 面——详见 `docs/AUDITOR.md`。
+残留：Managed MCP 控制台接线与 live tool 查询的 operator 留证仍待补，补前不称线上
+MCP 实证完成。
 
 ## 9. Property tests（验收增量）
 
@@ -346,7 +367,7 @@ v1.0 全部保留（移至 credited 路径），新增：
 
 ## 12. Freeze Addendum（v1.2.2，ChatGPT 终审产物）
 
-1. **工具清单唯一化**：agent 面恰好 **5 个** tool——`remember / recall / pin / report_outcome / log_event`（此前摘要中"四个"为过期表述）；`peek_recall` 与 `forget/export/unpin/admin_replace_memory` 属 owner/admin HTTP 面，不是 agent tool。实现后导出 tools/list 快照存 `docs/TOOLS-SNAPSHOT.json`，README/SPEC/测试只认这一份。
+1. **工具清单唯一化**：agent 面恰好 **5 个** tool——`remember / recall / pin / report_outcome / log_event`（此前摘要中"四个"为过期表述）；`peek_recall` 与 `forget/export/unpin/admin_replace_memory` 属 owner/admin HTTP 面，不是 agent tool。工具面真相源为 `/health` 的 `tools` 数组与 `src/server.mjs` 注册表（生产 smoke 断言）；〔2026-08-10 勘误〕原计划的 `docs/TOOLS-SNAPSHOT.json` 未落地，本句降级为上述运行时真相源，不再承诺独立快照文件。
 2. **credited 也要 item 级证据（v1.2.2.1 修订）**：attempt_events 新增 server-validated 事件类型 `memory_used`，payload 必含 `recall_request_id + receipt_item_id + memory_id`；credited item 必须 `injected=true` 且其 `evidence_event_id` 指向**与该 item 绑定**的 `memory_used` 事件——`attempt_end(success)` 只证明 outcome，不得单独充当某条 memory 的 credited 证据；credited 与 blamed 互斥；`(attempt_id, memory_id, role)` 唯一；无 item-bound 证据时 outcome 照存、该 item `no_plasticity`。
 3. **pin 是 capability**：principal 需带 `memory:pin` 能力位；仅 accepted 可 pin；superseded/quarantined/已删除不可 pin；pin 不改 source/utility；操作经 tool_requests 留审计；配额与告警 P1。
 4. **主业务路径必须在 AWS**：Memory MCP 主服务部署于 AWS（Lambda+Function URL 优先，MCP transport 不兼容则 ECS Fargate）——**7/29 部署 spike 先行**（P0-01），spike 不绿不许写十天本地代码。spike 验收不止公网 200（v1.2.2.1 补）：必须验证 ①认证上下文→tenant/agent 映射 ②真实 MCP transport/session ③冷启动后重连 ④CRDB TLS 与连接上限行为。

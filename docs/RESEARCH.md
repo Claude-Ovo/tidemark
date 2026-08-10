@@ -31,5 +31,5 @@
 - **叙事定位**：全场卷"recall accuracy"且互撕作假，我们卷"memory as a living organ"——衰减、结果门控、可解释浮现。评分表的 originality 与 memory design 两项正打。
 - **必须吸收的新需求**（调研前没排上的）：入库端质量闸门（REJECT/去重复提取）——与 GPT review 的防投毒来源分级合并成一个"写入卫生"小节。
 - **Receipt 是最稀缺资产**（among the projects reviewed 唯一的"为什么想起这条"答案）：带 integrity checksum 落库可审计，文案里放 C 位。
-- **A/B 评测**（无记忆 vs 纯向量 vs 完整生命周期）正好回应"benchmark theatre"——我们不刷榜，我们自证。
+- **A/B 评测**（no-memory vs vector-only vs full 三臂，冻结口径：**recall + outcome-gated plasticity evaluation slice**，12 场景分 main/controls/diagnostics 三组呈现，不宣称完整生命周期已验证）正好回应"benchmark theatre"——negative controls 与 invalid_fixture 判定公开，我们不刷榜，我们自证。
 - 引用弹药：mem0 #4573（97.8% 垃圾）、#5330（遗忘插件）、Ask HN（不学模式）、AWS AgentCore——submission 的 "Real-World Impact" 一节全用真实 issue 编号说话。

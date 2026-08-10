@@ -1,3 +1,9 @@
+> **〔历史计划稿存档，2026-07-29〕** 本文为当时的评审记录，不再随现状更新——现状以
+> `SPEC.md`（实现真相源）与 `../collab/CODEX_CHANNEL.md` 结论区（决策日志）为准。
+> 与现实的已知偏差：Bedrock 已 resolved-negative（结论 55，embedding 转 local-onnx）；
+> "full lifecycle" 臂现名 `full`，评测口径冻结为 recall + outcome-gated plasticity
+> evaluation slice（不宣称完整生命周期）；P0-11 前端为「记忆潮池」而非本文的 Demo UI 描述。
+
 我先签结论：基于你贴出的 v1.2.1 摘要，架构有条件通过，可以明天开工。 Codex 三轮没有白吵，绝大多数裁决我同意；没有任何理由推倒重来。真正需要今天补进冻结附录的，是一项窄翻案和七个实现不变量。
 
 我尚未拿到 SPEC.md 原文，因此这是架构级签字，不冒充逐行签字。把两个 Markdown 直接拖进来后，我还能补查 DDL/FK/状态机是否与摘要一致。
