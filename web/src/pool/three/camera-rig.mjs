@@ -1,12 +1,12 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { POOL_3D_CONFIG } from './config.mjs'
+import { POOL_3D_CONFIG, fittedVerticalFov } from './config.mjs'
 
 const easeOutQuart = (t) => 1 - (1 - t) ** 4
 
 export const createCameraRig = ({ domElement, aspect, reducedMotion = false, onTap, onProjectionChange }) => {
   const cfg = POOL_3D_CONFIG.camera
-  const camera = new THREE.PerspectiveCamera(cfg.fov, aspect, cfg.near, cfg.far)
+  const camera = new THREE.PerspectiveCamera(fittedVerticalFov(aspect, cfg.fov), aspect, cfg.near, cfg.far)
   const homePosition = new THREE.Vector3(...cfg.position)
   const homeTarget = new THREE.Vector3(...cfg.target)
   camera.position.copy(homePosition)
@@ -107,7 +107,12 @@ export const createCameraRig = ({ domElement, aspect, reducedMotion = false, onT
     reset,
     setReducedMotion(value) { reduce = !!value; if (reduce) controls.autoRotate = false },
     consumeProjectionDirty() { const dirty = projectionDirty; projectionDirty = false; return dirty },
-    resize(nextAspect) { camera.aspect = nextAspect; camera.updateProjectionMatrix(); projectionDirty = true },
+    resize(nextAspect) {
+      camera.aspect = nextAspect
+      camera.fov = fittedVerticalFov(nextAspect, cfg.fov)
+      camera.updateProjectionMatrix()
+      projectionDirty = true
+    },
     dispose() {
       controls.removeEventListener('start', onStart)
       controls.removeEventListener('end', onEnd)

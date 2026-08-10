@@ -135,10 +135,12 @@ export const createDataModelGroup = () => {
       toneMapped: false,
     })
     const sprite = new THREE.Sprite(material)
+    sprite.renderOrder = 3
     const reflectionMaterial = material.clone()
     reflectionMaterial.opacity = 0.12
     reflectionMaterial.color.setHex(0x8ea9bc)
     const reflection = new THREE.Sprite(reflectionMaterial)
+    reflection.renderOrder = 1
     node.add(sprite, reflection)
     node.userData = { particle, sprite, reflection }
     nodeLayer.add(node)
@@ -176,12 +178,14 @@ export const createDataModelGroup = () => {
       const breath = reducedMotion ? 1 : 1 + 0.045 * strength * Math.sin(seconds * 0.72 + Number(p.theta) * 5)
       const alpha = Number(p.alpha ?? 1)
       const growth = Number(p.mrScale ?? 1)
-      const size = Math.max(0.07, Number(p.markR ?? 0.014) * POOL_3D_CONFIG.worldRadius * 3.25) * growth * breath
+      const size = Math.max(0.07, Number(p.markR ?? 0.014) * POOL_3D_CONFIG.worldRadius * 3.45) * growth * breath
       node.userData.sprite.scale.setScalar(size)
-      node.userData.sprite.material.opacity = Math.min(1, (0.52 + 0.42 * strength) * alpha)
-      node.userData.reflection.position.y = -0.085
-      node.userData.reflection.scale.set(size * 0.92, size * 0.23, 1)
-      node.userData.reflection.material.opacity = (0.045 + 0.075 * strength) * alpha
+      node.userData.sprite.material.opacity = Math.min(1, (0.64 + 0.34 * strength) * alpha)
+      // Keep the flattened glint just above the water plane; below it, the
+      // nearly opaque disk makes this work invisible.
+      node.userData.reflection.position.y = -0.04
+      node.userData.reflection.scale.set(size * 0.96, size * 0.18, 1)
+      node.userData.reflection.material.opacity = (0.065 + 0.09 * strength) * alpha
     }
     return moved
   }

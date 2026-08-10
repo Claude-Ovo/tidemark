@@ -3,6 +3,26 @@ import { POOL_3D_CONFIG } from './config.mjs'
 
 const MAX_IMPACTS = POOL_3D_CONFIG.water.impactSlots
 
+// Ambient rain is intentionally noisy, while recall/remember/click impacts carry
+// product meaning. Separate rings prevent a storm from evicting a semantic wave
+// before its configured lifetime has elapsed.
+export const createImpactSlotAllocator = ({ ambientSlots, semanticSlots }) => {
+  if (!Number.isInteger(ambientSlots) || ambientSlots < 1
+      || !Number.isInteger(semanticSlots) || semanticSlots < 1) {
+    throw new Error('impact slot partitions must be positive integers')
+  }
+  let ambientCursor = 0
+  let semanticCursor = 0
+  return {
+    total: ambientSlots + semanticSlots,
+    next(kind = 'semantic') {
+      if (kind === 'ambient') return ambientCursor++ % ambientSlots
+      if (kind === 'semantic') return ambientSlots + semanticCursor++ % semanticSlots
+      throw new Error(`unknown impact kind: ${kind}`)
+    },
+  }
+}
+
 export const createRadialDiskGeometry = (radius, radialSegments, angularSegments) => {
   const radial = Math.max(2, Math.floor(radialSegments))
   const angular = Math.max(12, Math.floor(angularSegments))
@@ -144,11 +164,11 @@ const fragmentShader = /* glsl */`
       * smoothstep(0.22, 0.78, fine) * (0.08 + fresnel * 0.54);
     float quietVariation = valueNoise(surface * 0.28 + vec2(uTime * 0.01));
 
-    vec3 color = mix(uAbyss, uDeepBlue, 0.42 + quietVariation * 0.11);
-    color = mix(color, uSteel, fresnel * 0.13);
-    color += uPearl * pearlBand * 0.15;
-    color += uColdGlint * specular * 0.58;
-    color += uColdGlint * min(vRippleEnergy * 3.4, 1.0) * 0.10;
+    vec3 color = mix(uAbyss, uDeepBlue, 0.50 + quietVariation * 0.14);
+    color = mix(color, uSteel, fresnel * 0.18);
+    color += uPearl * pearlBand * 0.20;
+    color += uColdGlint * specular * 0.72;
+    color += uColdGlint * min(vRippleEnergy * 3.4, 1.0) * 0.17;
 
     float distanceToCamera = length(cameraPosition - vWorldPosition);
     float fog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
@@ -162,6 +182,11 @@ const fragmentShader = /* glsl */`
 `
 
 export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_CONFIG.waterRadiusScale } = {}) => {
+  const allocator = createImpactSlotAllocator({
+    ambientSlots: POOL_3D_CONFIG.water.ambientImpactSlots,
+    semanticSlots: POOL_3D_CONFIG.water.semanticImpactSlots,
+  })
+  if (allocator.total !== MAX_IMPACTS) throw new Error('impact slot partitions must fill impactSlots')
   const centers = Array.from({ length: MAX_IMPACTS }, () => new THREE.Vector2(999, 999))
   const times = Array.from({ length: MAX_IMPACTS }, () => -999)
   const strengths = Array.from({ length: MAX_IMPACTS }, () => 0)
@@ -202,7 +227,6 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
   mesh.name = 'WaterDisk'
   mesh.renderOrder = 0
 
-  let cursor = 0
   let frozenSeconds = 0
   let wasReduced = false
   return {
@@ -217,8 +241,8 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
       }
       wasReduced = reducedMotion
     },
-    addImpact(x, z, seconds, strength = 1) {
-      const slot = cursor++ % MAX_IMPACTS
+    addImpact(x, z, seconds, strength = 1, kind = 'semantic') {
+      const slot = allocator.next(kind)
       centers[slot].set(x, z)
       times[slot] = seconds
       strengths[slot] = Math.max(0, Math.min(1, strength)) * POOL_3D_CONFIG.water.impactAmplitude

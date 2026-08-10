@@ -20,7 +20,7 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
   renderer.setSize(Math.max(1, host.clientWidth), Math.max(1, host.clientHeight), false)
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.06
+  renderer.toneMappingExposure = 1.25
   renderer.domElement.setAttribute('aria-hidden', 'true')
   renderer.domElement.dataset.poolRenderer = 'three-tier1'
   host.append(renderer.domElement)
@@ -34,14 +34,14 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
   const tideMarks = createTideMarkGroup()
   const rain = createRainSystem({
     radius: water.radius,
-    onImpact: (x, z, strength) => water.addImpact(x, z, performance.now() / 1000, strength),
+    onImpact: (x, z, strength) => water.addImpact(x, z, performance.now() / 1000, strength, 'ambient'),
   })
   rain.setReducedMotion(reducedMotion)
   const lighting = new THREE.Group()
   lighting.name = 'Lighting'
   lighting.add(
-    new THREE.HemisphereLight(0xa9c9dc, 0x030508, 0.42),
-    new THREE.DirectionalLight(0xdceaf3, 1.15),
+    new THREE.HemisphereLight(POOL_3D_CONFIG.palette.coldGlint, 0x05080b, 0.56),
+    new THREE.DirectionalLight(POOL_3D_CONFIG.palette.pearl, 1.35),
   )
   lighting.children[1].position.set(-4, 7, 2)
   scene.add(water.mesh, dataModel.group, tideMarks.group, rain.group, lighting)

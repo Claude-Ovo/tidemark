@@ -17,7 +17,7 @@
     font: 13px/1.5 system-ui, sans-serif; }
   #stage, #stage3d { position: fixed; inset: 0; width: 100vw; height: 100vh; }
   #stage { display: block; }
-  #stage3d { display: none; overflow: hidden; background: #05080d; touch-action: none; }
+  #stage3d { display: none; overflow: hidden; background: #081018; touch-action: none; }
   #stage3d canvas { display: block; width: 100%; height: 100%; }
   body.three-preview #stage { display: none; }
   body.three-preview #stage3d { display: block; }
@@ -117,6 +117,18 @@ const meta = document.getElementById('meta')
 const scriptline = document.getElementById('scriptline')
 const DPR = Math.min(window.devicePixelRatio || 1, 2)
 const THREE_REQUESTED = wantsThreePreview(location.search)
+// The 3D framing has room for denser visual LOD than the frozen 2D baseline.
+// Radius remains untouched (retention truth); only two crowded marks may shrink
+// further while the original collision invariant stays strict.
+const THREE_LAYOUT_CFG = Object.freeze({
+  ...POOL_CFG,
+  MARK_R_MIN: 0.005,
+  ANGLE_TRIES: 144,
+  ANGLE_STEP: 0.02,
+})
+const layoutMemories = (memories) => layoutPool(memories, {
+  cfg: THREE_REQUESTED ? THREE_LAYOUT_CFG : POOL_CFG,
+})
 let threePool = null
 // 四审 P2：运行中响应系统无障碍偏好变化，不只在 boot 读一次
 const rmQuery = matchMedia('(prefers-reduced-motion: reduce)')
@@ -594,7 +606,7 @@ const boot = async () => {
     // 其 created_at 最新 → 时序 rank 居末 → 既有粒子位置不受扰动（确定性布局保证）
     const scripted = { memory_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', pinned: false,
       effective_strength: 0.82, created_at: new Date(Date.parse(snap.snapshot_at) + 1000).toISOString() }
-    const relaid = layoutPool([...memories, scripted])
+    const relaid = layoutMemories([...memories, scripted])
     const spawnPlace = relaid.placed.find(p => p.memory_id === scripted.memory_id)
 
     const seq = [
@@ -640,7 +652,7 @@ function applySnapshot(snap, { initial = false } = {}) {
   const memories = [...snap.episodes.flatMap(e => e.memories), ...snap.loose]
   for (const m of memories) memIndex.set(m.memory_id, m)
   fadeR = fadeLineRadius(snap.fade_threshold)
-  const { placed, overflow } = layoutPool(memories)
+  const { placed, overflow } = layoutMemories(memories)
   meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
     (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '') +
     (threePool?.active ? ' · 3D PREVIEW' : '')
