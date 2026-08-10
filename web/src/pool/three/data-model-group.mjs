@@ -20,20 +20,76 @@ const makeGlowTexture = () => {
 
 const ringGeometry = (radius, y = 0.012, segments = 192) => {
   const points = []
+  const arcFade = []
   for (let i = 0; i <= segments; i++) {
     const a = i / segments * Math.PI * 2
     points.push(new THREE.Vector3(Math.cos(a) * radius, y, Math.sin(a) * radius))
+    const drift = 0.5 + 0.5 * Math.sin(a * 1.35 + radius * 0.57)
+    arcFade.push(0.18 + drift ** 1.7 * 0.82)
   }
-  return new THREE.BufferGeometry().setFromPoints(points)
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  geometry.setAttribute('aArcFade', new THREE.Float32BufferAttribute(arcFade, 1))
+  return geometry
 }
+
+const guideVertexShader = /* glsl */`
+  attribute float aArcFade;
+  attribute float lineDistance;
+  varying float vArcFade;
+  varying float vViewAngle;
+  varying float vLineDistance;
+  #include <fog_pars_vertex>
+
+  void main() {
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    vec3 viewDirection = normalize(cameraPosition - worldPosition.xyz);
+    vArcFade = aArcFade;
+    vViewAngle = smoothstep(0.18, 0.78, abs(viewDirection.y));
+    vLineDistance = lineDistance;
+    vec4 mvPosition = viewMatrix * worldPosition;
+    gl_Position = projectionMatrix * mvPosition;
+    #include <fog_vertex>
+  }
+`
+
+const guideFragmentShader = /* glsl */`
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  uniform float uDashed;
+  varying float vArcFade;
+  varying float vViewAngle;
+  varying float vLineDistance;
+  #include <fog_pars_fragment>
+
+  void main() {
+    float dash = uDashed < 0.5 ? 1.0 : step(mod(vLineDistance, 0.19), 0.075);
+    float alpha = uOpacity * vArcFade * mix(0.38, 1.0, vViewAngle) * dash;
+    if (alpha < 0.008) discard;
+    gl_FragColor = vec4(uColor, alpha);
+    #include <fog_fragment>
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`
 
 const makeGuide = (radius, opacity, dashed = false) => {
   const geometry = ringGeometry(radius)
-  const material = dashed
-    ? new THREE.LineDashedMaterial({ color: 0x7d95aa, transparent: true, opacity, dashSize: 0.08, gapSize: 0.11, depthWrite: false })
-    : new THREE.LineBasicMaterial({ color: 0x7d95aa, transparent: true, opacity, depthWrite: false })
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
+      uColor: { value: new THREE.Color(0x718798) },
+      uOpacity: { value: opacity },
+      uDashed: { value: dashed ? 1 : 0 },
+    },
+    vertexShader: guideVertexShader,
+    fragmentShader: guideFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    fog: true,
+    toneMapped: true,
+  })
   const line = new THREE.Line(geometry, material)
-  if (dashed) line.computeLineDistances()
+  line.computeLineDistances()
   line.renderOrder = 2
   return line
 }
@@ -59,10 +115,10 @@ export const createDataModelGroup = () => {
       child.material?.dispose()
     }
     guides.add(
-      makeGuide(pin * POOL_3D_CONFIG.worldRadius, 0.11),
-      makeGuide(anchor * POOL_3D_CONFIG.worldRadius, 0.11),
-      makeGuide(receding * POOL_3D_CONFIG.worldRadius, 0.11),
-      makeGuide(fade * POOL_3D_CONFIG.worldRadius, 0.25, true),
+      makeGuide(pin * POOL_3D_CONFIG.worldRadius, 0.052),
+      makeGuide(anchor * POOL_3D_CONFIG.worldRadius, 0.046),
+      makeGuide(receding * POOL_3D_CONFIG.worldRadius, 0.038),
+      makeGuide(fade * POOL_3D_CONFIG.worldRadius, 0.115, true),
     )
   }
 

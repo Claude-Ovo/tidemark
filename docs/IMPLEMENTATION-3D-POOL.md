@@ -27,4 +27,18 @@
 
 ### 后续 Tier 1
 
-Batch 2 再接 `RainSystem`（seeded polar sampling + pooled drops）、撞击点的可见雨滴来源、outcome 潮痕的 3D 表达和更完整的 reflection 扰动。Batch 1 不冒充完整 Tier 1 验收。
+Batch 1 不冒充完整 Tier 1 验收；下列尾款在 Batch 2 落地。
+
+## Batch 2：雨 / 慢涟漪 / 潮痕 / 去圆盘感
+
+- `water-disk.mjs` 改用 56×160 径向细分网格。原 `CircleGeometry` 只有圆心和外圈顶点，局部 vertex displacement 无法形成真实扩散；现在每个撞击点能在盘内产生宽波包，24 槽可叠加干涉，7.2s 后衰减。
+- 水面 fragment 的珍珠高光由两层 value noise、视角方向和动态宽度共同打散；外缘从半径 84% 起 alpha 衰减到透明。导轨改为角向非均匀 shader，并按距离降低 opacity，不再形成等亮唱片纹。
+- `rain-system.mjs` 用固定 seed 与 `r = R * sqrt(random)` 做面积均匀采样；58 个 pooled point-sprite 雨滴持续落水并写入同一 impact ring buffer。remember 的定向落滴复用既有 380ms 事件时序，着水后由原状态机生成粒子与微涟漪。
+- `tide-mark-group.mjs` 接入原 outcome ring 生命周期：credited 是完整潮痕，blamed 是三段断裂侵蚀痕；二者跟随记忆当前 world position，停留 4.5s 后淡出。
+- reduced-motion 保留少量静态雨滴、冻结当下水面时间、禁用自动漂移；默认 2D 路径和 WebGL 回落逻辑不变。
+
+### Batch 2 实测
+
+- Node：新增边缘衰减、宽波参数、雨滴 seed/面积均匀性、径向水面顶点/索引拓扑断言。
+- Build：`npm run build` 通过；3D chunk 仍由 `?renderer=3d` dynamic import 隔离。
+- 浏览器真实 `/viz/ocean`：123 memories、2 explicit overflow、122 overlay buttons（含 scripted remember）；WebGL console 零 error/warn。可见下落雨滴、remember 落水、慢扩散叠加涟漪、credited 完整潮痕；水面外缘融入背景，规则直线高光与等亮导轨已移除。

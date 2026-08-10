@@ -247,6 +247,8 @@ const draw = (now = 0) => {
       fade: fadeR,
     })
     threePool.syncRipples(ripples)
+    threePool.syncDrops(drops)
+    threePool.syncRings(rings)
     motion.consumeDirty()
     return
   }

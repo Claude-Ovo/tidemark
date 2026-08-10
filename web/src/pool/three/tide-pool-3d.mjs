@@ -2,6 +2,8 @@ import * as THREE from 'three'
 import { createCameraRig } from './camera-rig.mjs'
 import { POOL_3D_CONFIG, cappedPixelRatio, polarToWorld } from './config.mjs'
 import { createDataModelGroup } from './data-model-group.mjs'
+import { createRainSystem } from './rain-system.mjs'
+import { createTideMarkGroup } from './tide-mark-group.mjs'
 import { createWaterDisk } from './water-disk.mjs'
 
 export const webglAvailable = () => {
@@ -29,6 +31,12 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
 
   const water = createWaterDisk()
   const dataModel = createDataModelGroup()
+  const tideMarks = createTideMarkGroup()
+  const rain = createRainSystem({
+    radius: water.radius,
+    onImpact: (x, z, strength) => water.addImpact(x, z, performance.now() / 1000, strength),
+  })
+  rain.setReducedMotion(reducedMotion)
   const lighting = new THREE.Group()
   lighting.name = 'Lighting'
   lighting.add(
@@ -36,7 +44,7 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
     new THREE.DirectionalLight(0xdceaf3, 1.15),
   )
   lighting.children[1].position.set(-4, 7, 2)
-  scene.add(water.mesh, dataModel.group, lighting)
+  scene.add(water.mesh, dataModel.group, tideMarks.group, rain.group, lighting)
 
   let reduce = reducedMotion
   let contextLost = false
@@ -67,6 +75,7 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
     const height = Math.max(1, host.clientHeight)
     renderer.setPixelRatio(cappedPixelRatio(window.devicePixelRatio))
     renderer.setSize(width, height, false)
+    rain.resize(height)
     cameraRig.resize(width / height)
     requestFrame()
   }
@@ -80,6 +89,8 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
     const cameraMoved = cameraRig.update(now)
     const dataMoved = dataModel.update(seconds, reduce)
     water.update(seconds, reduce)
+    rain.update(seconds)
+    tideMarks.update(now, reduce)
     renderer.render(scene, cameraRig.camera)
     if (cameraMoved || dataMoved || cameraRig.consumeProjectionDirty()) onProjectionFrame?.()
     if (!reduce || cameraRig.controls.autoRotate) requestFrame()
@@ -111,7 +122,12 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
     renderer,
     scene,
     camera: cameraRig.camera,
-    setReducedMotion(value) { reduce = !!value; cameraRig.setReducedMotion(reduce); requestFrame() },
+    setReducedMotion(value) {
+      reduce = !!value
+      cameraRig.setReducedMotion(reduce)
+      rain.setReducedMotion(reduce)
+      requestFrame()
+    },
     setParticles(nextParticles, guideRadii) {
       particles = nextParticles
       dataModel.setParticles(particles)
@@ -130,6 +146,14 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
       rippleKeys = nextKeys
       requestFrame()
     },
+    syncDrops(drops) {
+      rain.syncRememberDrops(drops)
+      requestFrame()
+    },
+    syncRings(rings) {
+      tideMarks.setRings(rings)
+      requestFrame()
+    },
     projectParticle(particle) { return dataModel.project(particle, cameraRig.camera, renderer.domElement) },
     requestRender: requestFrame,
     resize,
@@ -142,6 +166,8 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
       renderer.domElement.removeEventListener('webglcontextrestored', restored)
       cameraRig.dispose()
       dataModel.dispose()
+      tideMarks.dispose()
+      rain.dispose()
       water.dispose()
       renderer.dispose()
       renderer.domElement.remove()

@@ -4,6 +4,7 @@ export const POOL_3D_CONFIG = Object.freeze({
   worldRadius: 5,
   waterRadiusScale: 1.18,
   waterSegments: 160,
+  waterRadialSegments: 56,
   pixelRatioMax: 1.5,
   fogDensity: 0.045,
   camera: Object.freeze({
@@ -28,9 +29,27 @@ export const POOL_3D_CONFIG = Object.freeze({
   }),
   water: Object.freeze({
     impactSlots: 24,
-    impactLifetime: 4.6,
-    ambientAmplitude: 0.018,
-    impactAmplitude: 0.075,
+    impactLifetime: 7.2,
+    ambientAmplitude: 0.008,
+    impactAmplitude: 0.12,
+    waveSpeed: 0.72,
+    waveNumber: 6.4,
+    edgeFadeStart: 0.84,
+  }),
+  rain: Object.freeze({
+    seed: 0x71de4a2b,
+    count: 58,
+    reducedCount: 8,
+    minHeight: 3.8,
+    maxHeight: 12.5,
+    minSpeed: 1.05,
+    maxSpeed: 1.8,
+    radiusScale: 0.91,
+    rememberStartHeight: 3.1,
+  }),
+  tideMark: Object.freeze({
+    stayMs: 4500,
+    fadeMs: 800,
   }),
   palette: Object.freeze({
     abyss: 0x05080d,
