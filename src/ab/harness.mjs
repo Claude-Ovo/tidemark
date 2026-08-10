@@ -15,7 +15,7 @@
 //   evidence ⊆ 声明的 used；corpus_digest 覆盖完整 canonical suite。
 // 硬闸：全链零 viz 依赖。
 import { createHash } from 'node:crypto'
-import { SCENARIOS, SUITE_VERSION, DISTRACT_POOL, DISTRACT_GENERATOR_VERSION, seededRng, distractText } from './tasks.mjs'
+import { SCENARIOS, SUITE_VERSION, DISTRACT_POOL, DISTRACT_GENERATOR_VERSION, PARAPHRASE_CRITERION, seededRng, distractText } from './tasks.mjs'
 import { deterministicPolicy, POLICY_VERSION } from './policy.mjs'
 import { scoreProbe } from './oracle.mjs'
 
@@ -37,6 +37,7 @@ export const defaultSuite = () => ({
   distract_pool: DISTRACT_POOL,
   distract_generator: DISTRACT_GENERATOR_VERSION,
   policy: POLICY_VERSION,
+  paraphrase_criterion: PARAPHRASE_CRITERION,   // 冻结判据版本进 corpus digest（v4 ack 解释②）
 })
 
 // canonical 摘要函数——identity 生成与 runArm 入口重验共用同一实现（三审 P1）
@@ -132,24 +133,33 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
   trace(arm, { t: 'header', identity: identity.components, exp_id: identity.exp_id, arm,
     replica: replica ?? null, replica_note: replica ? 'non-scientific tenant namespace, not part of exp_id' : undefined })
   const factOfMap = new Map()          // memory_id -> fact_id（oracle 判分的外部 fixture map）
+  const memOfFact = new Map()          // fact_id -> memory_id（receipt 分量 trace 的反查）
   const poisonIds = new Set()
+  const foreignIds = new Set()         // 另一 agent 植入的事实——used/receipt 出现即隔离失守（v4）
   const results = []
   let distractSeq = 0
 
   for (const sc of suite.scenarios) {
-    const scResult = { scenario: sc.id, probes: [] }
+    const scResult = { scenario: sc.id, group: sc.group ?? 'main', probes: [] }
     let probeSeq = 0
     for (const [si, step] of sc.steps.entries()) {
       const tag = `${sc.id}-s${si}`
       if (step.op === 'plant') {
+        // v3：step.agent 覆盖植入方（隔离场景）——幂等键是 tenant 级作用域（结论 21），
+        // request_id 必须带 agent 后缀，否则与本 agent 的同名植入撞键
+        const plantPrincipal = step.agent ? { ...principal, agent_id: step.agent } : principal
+        const agentSuffix = step.agent ? `-${step.agent}` : ''
         for (const f of step.facts) {
           if (f.poison) poisonIds.add(f.id)
+          if (f.foreign) foreignIds.add(f.id)
           if (arm === 'no-memory') continue
-          const r = await tools.remember({ principal, content: f.text, kind: 'fact',
-            episode_id: `ab-${sc.id}`, request_id: did(`rem-${tag}-${f.id}`), importance: f.importance })
+          const r = await tools.remember({ principal: plantPrincipal, content: f.text, kind: 'fact',
+            episode_id: `ab-${sc.id}`, request_id: did(`rem-${tag}-${f.id}${agentSuffix}`), importance: f.importance })
           assertOk(r, `remember(${f.id})`)
           factOfMap.set(r.memory_id, f.id)
-          trace(arm, { t: 'plant', sc: sc.id, fact: f.id, poison: !!f.poison, memory: sha8(r.memory_id) })
+          memOfFact.set(f.id, r.memory_id)
+          trace(arm, { t: 'plant', sc: sc.id, fact: f.id, poison: !!f.poison,
+            foreign: !!f.foreign || undefined, agent: step.agent, memory: sha8(r.memory_id) })
         }
       } else if (step.op === 'distract') {
         if (arm === 'no-memory') continue
@@ -165,32 +175,56 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
         const attempt = did(`att-${tag}`), task = did(`task-${tag}`)
         let injected = []
         let receipt = null
+        let receiptItems = []            // v4：完整候选（含未注入）——隔离判定与分量 trace 用
         if (arm !== 'no-memory') {
           const rec = await tools.recall({ principal, query: step.query, purpose: 'ab-probe',
             episode_id: `ab-${sc.id}`, attempt_id: attempt, request_id: did(`rec-${tag}`) })
           assertOk(rec, 'recall')
           receipt = rec.receipt
-          const itemByMem = new Map(rec.receipt.items.filter(i => i.injected).map(i => [i.memory_id, i]))
+          receiptItems = rec.receipt.items ?? []
+          const itemByMem = new Map(receiptItems.filter(i => i.injected).map(i => [i.memory_id, i]))
           injected = (rec.injected?.events ?? []).filter(e => e.injected !== false && itemByMem.has(e.memory_id))
             .map(e => ({ memory_id: e.memory_id, receipt_item_id: itemByMem.get(e.memory_id).receipt_item_id }))
         }
         const receiptItemOf = new Map(injected.map(i => [i.memory_id, i.receipt_item_id]))
+
+        // v4 receipt 分量 trace（content-free：fact 标签+数值）：required/forbidden 目标的
+        // rank/sim/util/eff/imp/final 落 trace——matched control 前置断言与塑性分解的证据面
+        const factsOfInterest = [...(step.required ?? []), ...(step.forbidden ?? [])]
+        if (factsOfInterest.length && receiptItems.length) {
+          const byMem = new Map(receiptItems.map(i => [i.memory_id, i]))
+          const targets = factsOfInterest.map(fid => {
+            const it = byMem.get(memOfFact.get(fid))
+            return it ? { fact: fid, rank: it.rank ?? null, sim: it.similarity ?? null,
+              util: it.utility ?? null, eff: it.effective_strength ?? null,
+              imp: it.importance ?? null, final: it.final_score ?? null, injected: it.injected === true }
+              : { fact: fid, absent: true }
+          })
+          trace(arm, { t: 'receipt_probe', sc: sc.id, probe: probeSeq,
+            precondition: step.precondition, targets,
+            top: receiptItems.slice(0, 6).map(i => ({ rank: i.rank ?? null,
+              final: i.final_score ?? null, injected: i.injected === true })) })
+        }
 
         // ① policy 行动（看不见 required/poison ground truth），先固化进 trace（一审 P1-2）
         const action = deterministicPolicy({ given: step.given ?? [], injected })
         trace(arm, { t: 'action', sc: sc.id, probe: probeSeq, policy: action.policy,
           used: action.used_memory_ids.map(sha8), abstained: action.abstained })
 
-        // ② oracle 对行动判分（fixture 标签只在这里出现）
+        // ② oracle 对行动判分（fixture 标签只在这里出现）；receiptIds=完整候选（v4 隔离加严）
         const verdict = scoreProbe({
-          action, required: step.required ?? [], given: step.given ?? [],
-          expectAbstain: !!step.expect_abstain, poisonIds, factOf: (id) => factOfMap.get(id),
+          action, required: step.required ?? [], given: step.given ?? [], forbidden: step.forbidden ?? [],
+          expectAbstain: !!step.expect_abstain, budgetCap: step.budget_cap ?? null,
+          poisonIds, foreignIds, receiptIds: receiptItems.map(i => i.memory_id),
+          factOf: (id) => factOfMap.get(id),
         })
         scResult.probes.push({ probe: probeSeq, query_hash: sha8(step.query), ...verdict,
+          control_probe: step.control_probe || undefined,
           hit_ids: undefined, poison_ids: undefined })
         trace(arm, { t: 'probe', sc: sc.id, probe: probeSeq, query_hash: sha8(step.query),
           injected: injected.map(i => sha8(i.memory_id)), hit: verdict.hit, required: verdict.required,
-          poison_hit: verdict.poison_hit, task_success: verdict.task_success, score: verdict.score })
+          poison_hit: verdict.poison_hit, foreign_hit: verdict.foreign_hit, forbidden_hit: verdict.forbidden_hit,
+          task_success: verdict.task_success, score: verdict.score })
 
         // ③ full 臂塑性：status 只由 task_success 派生，四路穷尽（一审 P1-1）；
         //    evidence 只为 policy 声明的 used IDs 书写（hit_ids/poison_ids ⊆ used）
@@ -212,7 +246,11 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
             return out
           }
           let status, attributions
-          if (verdict.task_success) {
+          if (step.outcome === 'cancelled') {
+            // cancelled-null 场景：上报取消，零 attribution——零塑性契约的评测面
+            status = 'cancelled'
+            attributions = []
+          } else if (verdict.task_success) {
             status = 'success'
             attributions = verdict.hit_ids.length ? await attributionsFor(verdict.hit_ids, 'credited') : []
           } else {
@@ -223,6 +261,11 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
             episode_id: `ab-${sc.id}`, task_instance_id: task, attempt_id: attempt, status, attributions })
           assertOk(out, `report_outcome(${status})`)
           if (attributions.length) assertApplied(out, attributions, `report_outcome(${status})`)
+          // v4 ack 解释①：cancelled 的 agent 面证据——plasticity_applied 必须为 false 且零 items，
+          // 违反即 fail closed（行级六字段不变量由 run-ab 的 read-only 审计另证）
+          if (status === 'cancelled' && (out.plasticity_applied === true || (out.items ?? []).length)) {
+            throw new Error(`report_outcome(cancelled): plasticity must not apply: ${JSON.stringify(out)}`)
+          }
           trace(arm, { t: 'outcome', sc: sc.id, probe: probeSeq, status,
             roles: attributions.map(a => a.role), n_attributions: attributions.length,
             applied: attributions.length ? true : null })
@@ -236,5 +279,8 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
   const probes = results.flatMap(r => r.probes)
   const score = probes.length ? probes.reduce((a, p) => a + p.score, 0) / probes.length : 0
   const successRate = probes.length ? probes.filter(p => p.task_success).length / probes.length : 0
-  return { arm, score: +score.toFixed(4), task_success_rate: +successRate.toFixed(4), probes: probes.length, scenarios: results }
+  return { arm, score: +score.toFixed(4), task_success_rate: +successRate.toFixed(4), probes: probes.length,
+    scenarios: results,
+    // v4 ack 解释①：run-ab 的 read-only 行级审计需要真实 memory id（进程内传递，不入 trace）
+    factMems: Object.fromEntries(memOfFact) }
 }

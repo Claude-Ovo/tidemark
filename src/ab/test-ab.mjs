@@ -74,13 +74,16 @@ const makeMockTools = ({ injectMode, outcome = {} }) => {
     reportOutcome: async ({ status, attributions, outcome_request_id }) => {
       state.outcomes.push({ status, attributions, outcome_request_id })
       if (outcome.failOk) return { ok: false, error: 'mock-forced' }
+      if (status === 'cancelled' && outcome.forcePlasticityOnCancelled) {
+        return { ok: true, items: [], plasticity_applied: true }   // AB14 反例：取消却报塑性
+      }
       let items = attributions.map(a => ({ memory_id: a.memory_id, role: a.role,
         applied: outcome.failApplied ? false : true }))
       if (outcome.partial) items = items.slice(0, Math.max(0, items.length - 1))
       if (outcome.wrongId && items.length) items = items.map((it, i) => i === 0 ? { ...it, memory_id: 'm-imposter' } : it)
       if (outcome.wrongRole && items.length) items = items.map((it, i) => i === 0
         ? { ...it, role: it.role === 'credited' ? 'blamed' : 'credited' } : it)
-      return { ok: true, items }
+      return { ok: true, items, plasticity_applied: items.some(i => i.applied) }
     },
   }
   return { tools, state }
@@ -285,4 +288,76 @@ const runFull = async ({ injectMode, outcome, replica = null, identity = null, e
   ok('AB12 identity 完整性：mutation 即 TypeError，伪造对象在任何 tool call 前拒绝')
 }
 
-console.log(`AB harness 判别 ${pass}/12 全绿`)
+// ---------- AB13 分组报表 + fixture 前置验证（v4 预审口径） ----------
+{
+  const { groupReport, verifyFixtures } = await import('./report.mjs')
+  const armResult = { scenarios: [
+    { scenario: 's-m1', group: 'main', probes: [{ score: 1, task_success: true }, { score: 0, task_success: false }] },
+    { scenario: 's-m2', group: 'main', probes: [{ score: 1, task_success: true }] },
+    { scenario: 's-c1', group: 'control', probes: [{ score: 1, task_success: true }] },
+    { scenario: 's-c2', group: 'control', probes: [{ score: 0, task_success: false }] },
+    // 断言 probe 语义：设置期 miss 不算 control 失效，pass 只看 control_probe 标记的
+    { scenario: 's-c3', group: 'control', probes: [
+      { score: 0, task_success: false },
+      { score: 1, task_success: true, control_probe: true }] },
+    { scenario: 's-d1', group: 'diagnostic', probes: [{ score: 0.7143, task_success: true, budget_normalized: 1 }] },
+  ] }
+  const g = groupReport(armResult)
+  assert.equal(g.main.n, 3); assert.equal(g.main.score, 0.6667)
+  assert.deepEqual(g.controls.map(c => c.pass), [true, false, true], 'controls pass-fail：无标记看全 probes，有标记只看断言 probe')
+  assert.deepEqual(g.diagnostics[0].budget_normalized, [1], 'diagnostic 带 budget-normalized')
+  assert.equal(g.reference_overall.n, 8)
+  // invalid_fixture 排除出分组统计（s-m1 两 probes 被剔除）
+  const g2 = groupReport(armResult, new Set(['s-m1']))
+  assert.equal(g2.main.n, 1); assert.equal(g2.main.score, 1)
+  assert.equal(g2.reference_overall.n, 6)
+  // fixture 前置：vector 臂坑位目标被注入 ⇒ invalid；cancelled 目标 utility≠0.5 ⇒ violation
+  const fx = verifyFixtures({
+    vector: [
+      { t: 'receipt_probe', sc: 'sc-credited-plasticity', precondition: 'contention',
+        targets: [{ fact: 'ut-target', injected: true }] },
+      { t: 'receipt_probe', sc: 'sc-cancelled-null', precondition: 'contention',
+        targets: [{ fact: 'cn-target', injected: false }] },
+    ],
+    full: [
+      { t: 'receipt_probe', sc: 'sc-cancelled-null', precondition: 'contention',
+        targets: [{ fact: 'cn-target', injected: false, util: 0.75 }] },
+    ],
+  })
+  assert.deepEqual(fx.invalid, ['sc-credited-plasticity'], 'vector 臂目标在席 ⇒ 前置失效')
+  assert.equal(fx.violations.length, 1)
+  assert.equal(fx.violations[0].kind, 'cancelled-target-utility-changed')
+  // 翻转记录（v4 ack 解释①：坑位证明=injected 翻转配合 rank，不只 rank）
+  assert.equal(fx.flips['sc-cancelled-null'].full.injected, false)
+  // 干净输入零误报
+  const fxClean = verifyFixtures({
+    vector: [{ t: 'receipt_probe', sc: 'sc-credited-plasticity', precondition: 'contention',
+      targets: [{ fact: 'ut-target', absent: true }] }],
+    full: [{ t: 'receipt_probe', sc: 'sc-cancelled-null', precondition: 'contention',
+      targets: [{ fact: 'cn-target', injected: false, util: 0.5 }] }],
+  })
+  assert.deepEqual(fxClean.invalid, []); assert.deepEqual(fxClean.violations, [])
+  ok('AB13 分组报表口径 + invalid_fixture 排除 + matched control 服务面断言')
+}
+
+// ---------- AB14 v4 ack 两解释：paraphrase 冻结判据可机械复算 + cancelled 塑性 fail-closed ----------
+{
+  const { paraphraseDisjoint, SCENARIOS } = await import('./tasks.mjs')
+  // 判据本身：当前 fixture 必须满足零共享 CJK 双字（机械复算，不靠标题自述）
+  const para = SCENARIOS.find(s => s.id === 'sc-paraphrase')
+  const fact = para.steps.find(s => s.op === 'plant').facts[0].text
+  const probe = para.steps.find(s => s.op === 'probe').query
+  assert.equal(paraphraseDisjoint(fact, probe), true, 'paraphrase fixture 必须满足冻结判据')
+  assert.equal(paraphraseDisjoint('客户回访记录', '汇总客户档案'), false, '共享"客户"双字必须判否')
+  assert.equal(paraphraseDisjoint('abc 记录', 'ABC 档案'), true, '非 CJK 字符不参与判定')
+  // 判据版本进 corpus digest：换版本必须换 exp_id
+  const base = experimentIdentity(ID_ARGS)
+  const other = experimentIdentity({ ...ID_ARGS, suite: { ...defaultSuite(), paraphrase_criterion: 'other-v2' } })
+  assert.notEqual(base.exp_id, other.exp_id, '判据版本变化必须换实验身份')
+  // cancelled 塑性 fail-closed：mock 返回 plasticity_applied=true ⇒ runArm 必须抛出
+  await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { forcePlasticityOnCancelled: true } }),
+    /plasticity must not apply/, 'cancelled 出现塑性必须 fail closed')
+  ok('AB14 paraphrase 判据机械复算+入 digest；cancelled 塑性 fail-closed')
+}
+
+console.log(`AB harness 判别 ${pass}/14 全绿`)
