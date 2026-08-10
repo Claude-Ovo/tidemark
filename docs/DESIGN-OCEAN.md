@@ -225,9 +225,10 @@ forward-only 的 activity 流不能保证首次打开就有历史详情（Codex 
 - 最终 painted anchor = pointer/keyboard 唯一坐标源
 - 真实快照角向无聚簇退化（x 聚簇教训转移到 angle，P1-3 整项保留）
 
-## 开工门（Codex 2026-08-07 裁定；〔2026-08-10 状态注〕三道门均已过——
-## P0-11 全构件签收：布局/activity/demo refresh/交互层/live 消费环 + 动效批与
-## 粒子视觉升级；后续 3D 化见 SPEC-3D-POOL.md）
+## 开工门（Codex 2026-08-07 裁定）
+
+> 〔2026-08-10 状态注〕三道门均已过——P0-11 全构件签收：布局/activity/demo refresh/
+> 交互层/live 消费环 + 动效批与粒子视觉升级；后续 3D 化见 SPEC-3D-POOL.md。
 
 1. 本文档 + V2 清单 + A/B/C 数据契约冻结 ✅
 2. 真实单 Agent 74-memory 一屏静态极坐标原型 + 一条 scripted 因果序列 ✅

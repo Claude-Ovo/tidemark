@@ -122,8 +122,10 @@ const assertApplied = (out, attributions, what) => {
 }
 
 // 二审 P1-1：runArm 不接收 seed/suite——一切从 identity 派生（单一入口）；
-// 三审 P1：入口先做完整性重验，任何 tool call 之前 fail closed
-export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica = null }) => {
+// 三审 P1：入口先做完整性重验，任何 tool call 之前 fail closed。
+// hooks.afterPlant(factId, memoryId, principal)：run-ab 用它在【任何 probe/treatment 前】
+// 冻结审计目标行的 before 基线（v4 三审 P1-2）——观察钩子，不得改状态
+export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica = null, hooks = {} }) => {
   validateIdentity(identity)
   const did = didFactory(identity.exp_id, arm)
   const rng = seededRng(identity.components.seed)
@@ -158,6 +160,7 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
           assertOk(r, `remember(${f.id})`)
           factOfMap.set(r.memory_id, f.id)
           memOfFact.set(f.id, r.memory_id)
+          if (hooks.afterPlant) await hooks.afterPlant(f.id, r.memory_id, plantPrincipal)
           trace(arm, { t: 'plant', sc: sc.id, fact: f.id, poison: !!f.poison,
             foreign: !!f.foreign || undefined, agent: step.agent, memory: sha8(r.memory_id) })
         }
@@ -189,9 +192,11 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
         const receiptItemOf = new Map(injected.map(i => [i.memory_id, i.receipt_item_id]))
 
         // v4 receipt 分量 trace（content-free：fact 标签+数值）：required/forbidden 目标的
-        // rank/sim/util/eff/imp/final 落 trace——matched control 前置断言与塑性分解的证据面
+        // rank/sim/util/eff/imp/final 落 trace——matched control 前置断言与塑性分解的证据面。
+        // 三审 P1-3：contention probe【无条件】写 trace——空 receipt/无候选时 targets 全 absent、
+        // top 为空，让 verifier 有据可判 invalid，缺 trace 不再 fail-open
         const factsOfInterest = [...(step.required ?? []), ...(step.forbidden ?? [])]
-        if (factsOfInterest.length && receiptItems.length) {
+        if (factsOfInterest.length && (receiptItems.length || step.precondition === 'contention')) {
           const byMem = new Map(receiptItems.map(i => [i.memory_id, i]))
           const targets = factsOfInterest.map(fid => {
             const it = byMem.get(memOfFact.get(fid))
@@ -261,9 +266,11 @@ export const runArm = async ({ arm, identity, tenantBase, tools, trace, replica 
             episode_id: `ab-${sc.id}`, task_instance_id: task, attempt_id: attempt, status, attributions })
           assertOk(out, `report_outcome(${status})`)
           if (attributions.length) assertApplied(out, attributions, `report_outcome(${status})`)
-          // v4 ack 解释①：cancelled 的 agent 面证据——plasticity_applied 必须为 false 且零 items，
-          // 违反即 fail closed（行级六字段不变量由 run-ab 的 read-only 审计另证）
-          if (status === 'cancelled' && (out.plasticity_applied === true || (out.items ?? []).length)) {
+          // v4 ack 解释①（三审收紧）：cancelled 的 agent 面证据——严格要求
+          // plasticity_applied 恒等 false（missing/null/0/"false" 一律拒绝）且 items 为空数组，
+          // 违反即 fail closed（行级六字段不变量由 run-ab 的 before/after 审计另证）
+          if (status === 'cancelled'
+            && (out.plasticity_applied !== false || !Array.isArray(out.items) || out.items.length !== 0)) {
             throw new Error(`report_outcome(cancelled): plasticity must not apply: ${JSON.stringify(out)}`)
           }
           trace(arm, { t: 'outcome', sc: sc.id, probe: probeSeq, status,

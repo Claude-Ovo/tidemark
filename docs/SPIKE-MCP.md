@@ -28,10 +28,11 @@
 - [ ] 对照比赛规则原文确认 MCP "使用" 门槛
 - [ ] end-to-end 审计：按 request_id 查 recall_requests → memory → nightly provenance
 
-## 第三步：AWS runtime spike（P0-01——〔2026-08-10 状态更新〕本地闭环+生产部署已签
-##（README §Deploy、prod smoke 13/13）；原 Bedrock blocker 已 **resolved-negative**
-##（结论 55：官方终审拒绝，embedding 转 Lambda 内 local-onnx 并在生产验真，
-## 证据见 SPIKE-ONNX.md），下方"未验证"节按此读作历史记录）
+## 第三步：AWS runtime spike（P0-01）
+
+> 〔2026-08-10 状态更新〕本地闭环+生产部署已签（README §Deploy、prod smoke 13/13）；
+> 原 Bedrock blocker 已 **resolved-negative**（结论 55：官方终审拒绝，embedding 转
+> Lambda 内 local-onnx 并在生产验真，证据见 SPIKE-ONNX.md）。下方"未验证"节按此读作历史记录。
 
 环境：us-east-1，nodejs22.x，512MB，express + serverless-http，官方 MCP SDK 客户端 + 断言套件验收（`spike/aws/client-test.mjs`，退出码生效）。证据链见 `SPIKE-EVIDENCE.md`。
 

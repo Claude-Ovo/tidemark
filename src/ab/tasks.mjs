@@ -98,7 +98,7 @@ export const SCENARIOS = [
   },
   {
     id: 'sc-outcome-gate', group: GROUPS.MAIN,
-    title: '结果门控：credited 记忆经 utility 计数在后续同主题占优',
+    title: '结果门控：outcome-gated 复合塑性（utility 计数+anchor 双通道）后，同主题直查仍保持命中',
     steps: [
       { op: 'plant', facts: [F('policy-new', '退款流程从 2026 年 7 月起改为线上工单直接审批', 0.5)] },
       { op: 'distract', count: 6 },
@@ -181,7 +181,7 @@ export const SCENARIOS = [
   }),
   {
     id: 'sc-paraphrase', group: GROUPS.DIAGNOSTIC,
-    title: `纯语义改写（diagnostic，冻结判据 ${'PARAPHRASE_CRITERION_V1'}：NFKC+lowercase+去标点空白后，probe 与目标事实不共享任何长度≥2 的连续 CJK 子串——代码内可机械复算，见 paraphraseDisjoint）——诚实测 onnx 中文语义检索，失败不进功能回归 gate`,
+    title: `纯语义改写（diagnostic，冻结判据 ${PARAPHRASE_CRITERION}：NFKC+lowercase+去非汉字后，probe 与目标事实不共享任何长度≥2 的连续 CJK 子串——代码内可机械复算，见 paraphraseDisjoint）——诚实测 onnx 中文语义检索，失败不进功能回归 gate`,
     steps: [
       { op: 'plant', facts: [F('para-fact', '新来的实习生小周负责整理每周的客户回访记录')] },
       { op: 'distract', count: 6 },

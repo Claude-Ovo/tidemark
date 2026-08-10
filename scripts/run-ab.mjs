@@ -50,16 +50,38 @@ const trace = (arm, obj) => traces.get(arm).push(obj)
 const identity = experimentIdentity({ seed: SEED, embeddingId: embedModelId(), recallCfg: RECALL_CFG })
 console.log(`A/B exp_id=${identity.exp_id} seed=${SEED}${REPLICA ? ` replica=${REPLICA}（非科学身份，仅 tenant namespace）` : ''}（agent_policy=deterministic-v1, model=null；指标=injection hit / lifecycle ablation）`)
 console.log(`  identity: ${JSON.stringify(identity.components)}`)
-const { groupReport, verifyFixtures } = await import('../src/ab/report.mjs')
+const { groupReport, verifyFixtures, expectedContentionScenarios } = await import('../src/ab/report.mjs')
+
+// v4 三审 P1-2：cancelled 审计目标的 before 基线——afterPlant 钩子在【任何 probe 前】
+// 冻结六字段快照；末尾逐字段与 after 精确对账（不用创建默认常量冒充 before）
+const AUDIT_FIELDS = ['credited_success_count', 'evidenced_blame_count', 'strength_anchor',
+  'strength_anchor_at', 'last_rewarded_at', 'revision']
+const { getPool } = await import('../src/lib/db.mjs')
+const rowSnapshot = async (tenantId, memoryId) => {
+  const { rows } = await getPool().query(
+    `SELECT ${AUDIT_FIELDS.join(', ')} FROM memories WHERE tenant_id=$1 AND memory_id=$2`,
+    [tenantId, memoryId])
+  return rows[0] ? Object.fromEntries(AUDIT_FIELDS.map(f => [f, String(rows[0][f])])) : null
+}
+let cnBaseline = null
+const auditHooks = {
+  afterPlant: async (factId, memoryId, principal) => {
+    if (factId === 'cn-target') cnBaseline = { memoryId, tenant: principal.tenant_id,
+      before: await rowSnapshot(principal.tenant_id, memoryId) }
+  },
+}
 
 const summary = []
 for (const arm of ARMS) {
-  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, trace, replica: REPLICA })
+  const r = await runArm({ arm, identity, tenantBase: TENANT_BASE, tools, trace, replica: REPLICA,
+    hooks: arm === 'full' ? auditHooks : {} })
   summary.push(r)
 }
 
-// v4 分组报表（预审裁定：headline 不出单一均分；坑位前置不成立标 invalid_fixture）
-const fx = verifyFixtures({ vector: traces.get('vector-only'), full: traces.get('full') })
+// v4 分组报表（预审裁定：headline 不出单一均分；坑位前置不成立标 invalid_fixture——
+// 期望场景集合从 identity.suite 冻结，缺 trace fail-closed）
+const fx = verifyFixtures({ vector: traces.get('vector-only'), full: traces.get('full'),
+  expected: expectedContentionScenarios(identity.suite.scenarios) })
 const invalidSet = new Set(fx.invalid)
 const reports = {}
 for (const r of summary) {
@@ -77,26 +99,26 @@ if (fx.invalid.length) console.log(`  invalid_fixture: ${fx.invalid.join(', ')}�
 if (fx.violations.length) console.log(`  CONTROL VIOLATIONS: ${JSON.stringify(fx.violations)}`)
 console.log(`  flips: ${JSON.stringify(fx.flips)}`)
 
-// v4 ack 解释①：cancelled 目标的行级零塑性 read-only 审计——六字段与植入终态完全一致
-// （receipt 面证据之外的持久态铁证；违反即 exit 1）
-const fullArm = summary.find(s => s.arm === 'full')
-const cnMem = fullArm?.factMems?.['cn-target']
+// v4 三审 P1-2：cancelled 目标行级审计 = before/after 六字段【逐字段精确相等】
+// （before 在 plant 后任何 probe 前冻结；revision/strength_anchor_at 也在对账内——
+// cancelled 若偷偷 bump revision 或重写锚点，此处必 FAIL exit 1）
 let cnAudit = null
-if (cnMem) {
-  const { getPool } = await import('../src/lib/db.mjs')
-  const { rows } = await getPool().query(
-    `SELECT credited_success_count, evidenced_blame_count, strength_anchor,
-            strength_anchor_at, last_rewarded_at, created_at, revision
-     FROM memories WHERE tenant_id=$1 AND memory_id=$2`,
-    [`${TENANT_BASE}-${identity.exp_id}${REPLICA ? `-${REPLICA}` : ''}-full`, cnMem])
-  const r = rows[0]
-  cnAudit = r && Number(r.credited_success_count) === 0 && Number(r.evidenced_blame_count) === 0
-    && Number(r.strength_anchor) === 1
-    && String(r.last_rewarded_at) === String(r.created_at)
-    ? { pass: true }
-    : { pass: false, row: r ?? 'MISSING' }
-  console.log(`  cancelled-target row audit: ${cnAudit.pass ? 'PASS（counts 0/0、anchor 1、last_rewarded_at===created_at——两次 cancelled 未触碰任何持久态）' : `FAIL ${JSON.stringify(cnAudit.row)}`}`)
+if (cnBaseline) {
+  const after = await rowSnapshot(cnBaseline.tenant, cnBaseline.memoryId)
+  if (!cnBaseline.before || !after) {
+    cnAudit = { pass: false, reason: 'row missing', before: cnBaseline.before, after }
+  } else {
+    const diffs = AUDIT_FIELDS.filter(f => cnBaseline.before[f] !== after[f])
+    cnAudit = diffs.length === 0
+      ? { pass: true }
+      : { pass: false, diffs: Object.fromEntries(diffs.map(f => [f, { before: cnBaseline.before[f], after: after[f] }])) }
+  }
+  console.log(`  cancelled-target row audit: ${cnAudit.pass
+    ? 'PASS（before/after 六字段逐字段相等——两次 cancelled 未触碰任何持久态，含 revision 与锚点时间）'
+    : `FAIL ${JSON.stringify(cnAudit)}`}`)
   if (!cnAudit.pass) process.exitCode = 1
+} else {
+  console.log('  cancelled-target row audit: SKIPPED（cn-target 未在本 run 植入）')
 }
 
 const tracesDir = fileURLToPath(new URL('../traces/', import.meta.url))

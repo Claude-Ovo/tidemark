@@ -77,6 +77,12 @@ const makeMockTools = ({ injectMode, outcome = {} }) => {
       if (status === 'cancelled' && outcome.forcePlasticityOnCancelled) {
         return { ok: true, items: [], plasticity_applied: true }   // AB14 反例：取消却报塑性
       }
+      if (status === 'cancelled' && outcome.cancelledMissingField) {
+        return { ok: true, items: [] }                             // AB14 反例：字段缺失（三审 P1-1）
+      }
+      if (status === 'cancelled' && outcome.cancelledNullField) {
+        return { ok: true, items: [], plasticity_applied: null }   // AB14 反例：null 冒充 false
+      }
       let items = attributions.map(a => ({ memory_id: a.memory_id, role: a.role,
         applied: outcome.failApplied ? false : true }))
       if (outcome.partial) items = items.slice(0, Math.max(0, items.length - 1))
@@ -311,33 +317,39 @@ const runFull = async ({ injectMode, outcome, replica = null, identity = null, e
   const g2 = groupReport(armResult, new Set(['s-m1']))
   assert.equal(g2.main.n, 1); assert.equal(g2.main.score, 1)
   assert.equal(g2.reference_overall.n, 6)
-  // fixture 前置：vector 臂坑位目标被注入 ⇒ invalid；cancelled 目标 utility≠0.5 ⇒ violation
-  const fx = verifyFixtures({
-    vector: [
-      { t: 'receipt_probe', sc: 'sc-credited-plasticity', precondition: 'contention',
-        targets: [{ fact: 'ut-target', injected: true }] },
-      { t: 'receipt_probe', sc: 'sc-cancelled-null', precondition: 'contention',
-        targets: [{ fact: 'cn-target', injected: false }] },
-    ],
-    full: [
-      { t: 'receipt_probe', sc: 'sc-cancelled-null', precondition: 'contention',
-        targets: [{ fact: 'cn-target', injected: false, util: 0.75 }] },
-    ],
-  })
-  assert.deepEqual(fx.invalid, ['sc-credited-plasticity'], 'vector 臂目标在席 ⇒ 前置失效')
-  assert.equal(fx.violations.length, 1)
-  assert.equal(fx.violations[0].kind, 'cancelled-target-utility-changed')
-  // 翻转记录（v4 ack 解释①：坑位证明=injected 翻转配合 rank，不只 rank）
-  assert.equal(fx.flips['sc-cancelled-null'].full.injected, false)
-  // 干净输入零误报
-  const fxClean = verifyFixtures({
-    vector: [{ t: 'receipt_probe', sc: 'sc-credited-plasticity', precondition: 'contention',
-      targets: [{ fact: 'ut-target', absent: true }] }],
-    full: [{ t: 'receipt_probe', sc: 'sc-cancelled-null', precondition: 'contention',
-      targets: [{ fact: 'cn-target', injected: false, util: 0.5 }] }],
-  })
+  // fixture 前置（三审 P1-3 fail-closed 版）：期望集合来自 suite；
+  // vector 目标必须【在候选、injected===false、numeric rank>=6】——缺任何一环即 invalid
+  const vLine = (sc, targets) => ({ t: 'receipt_probe', sc, precondition: 'contention', targets })
+  const EXP = ['sc-credited-plasticity', 'sc-cancelled-null']
+  const goodVec = (sc, fact) => vLine(sc, [{ fact, injected: false, rank: 7 }])
+  const goodFull = (sc, fact, util) => vLine(sc, [{ fact, injected: sc === 'sc-credited-plasticity', rank: 5, util }])
+  // 干净基线：零误报 + 翻转记录齐全
+  const fxClean = verifyFixtures({ expected: EXP,
+    vector: [goodVec('sc-credited-plasticity', 'ut-target'), goodVec('sc-cancelled-null', 'cn-target')],
+    full: [goodFull('sc-credited-plasticity', 'ut-target'), goodFull('sc-cancelled-null', 'cn-target', 0.5)] })
   assert.deepEqual(fxClean.invalid, []); assert.deepEqual(fxClean.violations, [])
-  ok('AB13 分组报表口径 + invalid_fixture 排除 + matched control 服务面断言')
+  assert.equal(fxClean.flips['sc-credited-plasticity'].vector.injected, false)
+  assert.equal(fxClean.flips['sc-credited-plasticity'].full.injected, true, '坑位证明=injected 翻转配合 rank')
+  // 违例：cancelled 目标 utility≠0.5 ⇒ violation（前置成立时才判）
+  const fxViol = verifyFixtures({ expected: EXP,
+    vector: [goodVec('sc-credited-plasticity', 'ut-target'), goodVec('sc-cancelled-null', 'cn-target')],
+    full: [goodFull('sc-credited-plasticity', 'ut-target'), goodFull('sc-cancelled-null', 'cn-target', 0.75)] })
+  assert.equal(fxViol.violations.length, 1)
+  assert.equal(fxViol.violations[0].kind, 'cancelled-target-utility-changed')
+  // 六类 fail-closed 反例（Codex 三审点名五类 + injected=true）：全部必须 invalid
+  const cases = [
+    ['缺整条 vector trace', { vector: [], full: [goodFull('sc-credited-plasticity', 'ut-target')] }],
+    ['缺 full trace', { vector: [goodVec('sc-credited-plasticity', 'ut-target')], full: [] }],
+    ['空 receipt（targets 全 absent）', { vector: [vLine('sc-credited-plasticity', [{ fact: 'ut-target', absent: true }])], full: [goodFull('sc-credited-plasticity', 'ut-target')] }],
+    ['rank null', { vector: [vLine('sc-credited-plasticity', [{ fact: 'ut-target', injected: false, rank: null }])], full: [goodFull('sc-credited-plasticity', 'ut-target')] }],
+    ['rank 5（在席内）', { vector: [vLine('sc-credited-plasticity', [{ fact: 'ut-target', injected: false, rank: 5 }])], full: [goodFull('sc-credited-plasticity', 'ut-target')] }],
+    ['injected true', { vector: [vLine('sc-credited-plasticity', [{ fact: 'ut-target', injected: true, rank: 7 }])], full: [goodFull('sc-credited-plasticity', 'ut-target')] }],
+  ]
+  for (const [name, input] of cases) {
+    const r = verifyFixtures({ expected: ['sc-credited-plasticity'], ...input })
+    assert.ok(r.invalid.includes('sc-credited-plasticity'), `${name} 必须判 invalid_fixture`)
+  }
+  ok('AB13 分组报表口径 + invalid_fixture fail-closed 六反例 + matched control 断言')
 }
 
 // ---------- AB14 v4 ack 两解释：paraphrase 冻结判据可机械复算 + cancelled 塑性 fail-closed ----------
@@ -354,10 +366,15 @@ const runFull = async ({ injectMode, outcome, replica = null, identity = null, e
   const base = experimentIdentity(ID_ARGS)
   const other = experimentIdentity({ ...ID_ARGS, suite: { ...defaultSuite(), paraphrase_criterion: 'other-v2' } })
   assert.notEqual(base.exp_id, other.exp_id, '判据版本变化必须换实验身份')
-  // cancelled 塑性 fail-closed：mock 返回 plasticity_applied=true ⇒ runArm 必须抛出
+  // cancelled 塑性 fail-closed（三审 P1-1 严格化）：true/缺字段/null 三类都必须抛出——
+  // 只有恒等 false + 空数组 items 放行
   await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { forcePlasticityOnCancelled: true } }),
-    /plasticity must not apply/, 'cancelled 出现塑性必须 fail closed')
-  ok('AB14 paraphrase 判据机械复算+入 digest；cancelled 塑性 fail-closed')
+    /plasticity must not apply/, 'plasticity_applied=true 必须 fail closed')
+  await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { cancelledMissingField: true } }),
+    /plasticity must not apply/, '字段缺失必须 fail closed（undefined!==false）')
+  await assert.rejects(() => runFull({ injectMode: 'faithful', outcome: { cancelledNullField: true } }),
+    /plasticity must not apply/, 'null 必须 fail closed')
+  ok('AB14 paraphrase 判据机械复算+入 digest；cancelled 塑性三反例 fail-closed')
 }
 
 console.log(`AB harness 判别 ${pass}/14 全绿`)

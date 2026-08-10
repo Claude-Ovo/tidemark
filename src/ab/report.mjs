@@ -41,27 +41,36 @@ export const groupReport = (armResult, invalidSet = new Set()) => {
   }
 }
 
-export const verifyFixtures = ({ vector = [], full = [] }) => {
+// 从 suite 冻结期望的 contention 场景集合（fail-closed 的依据——不是"看 trace 里有什么"）
+export const expectedContentionScenarios = (scenarios) =>
+  scenarios.filter(sc => (sc.steps ?? []).some(st => st.precondition === 'contention')).map(sc => sc.id)
+
+// v4 三审 P1-3：fail-closed——期望集合来自 suite；每个期望场景必须在 vector 与 full 各有
+// contention trace，vector 目标必须【存在于候选、injected===false、numeric rank>=6】，
+// 任一不满足（缺 trace/空 receipt/absent/rank null/rank<6/已注入）即 invalid_fixture。
+// "目标根本没进候选"不再能冒充"坑位竞争成立"。
+export const verifyFixtures = ({ vector = [], full = [], expected = [] }) => {
   const invalid = new Set()
   const violations = []
   const flips = {}
   const contention = (tr) => tr.filter(l => l.t === 'receipt_probe' && l.precondition === 'contention')
   const targetOf = (line) => (line.targets ?? []).find(t => String(t.fact).endsWith('-target'))
-  for (const line of contention(vector)) {
-    const target = targetOf(line)
-    // 前置：vector 臂目标在注入席外（absent=完全出候选，同样成立）；缺 trace 保守判 invalid
-    if (!target || target.injected === true) invalid.add(line.sc)
-    if (target) flips[line.sc] = { vector: { injected: target.injected === true, rank: target.rank ?? null } }
-  }
-  for (const line of contention(full)) {
-    const target = targetOf(line)
-    if (!target) continue
-    // v4 ack 解释①：坑位证明必须是 injected 翻转（false→true）配合 rank，不是只看 rank
-    flips[line.sc] = { ...(flips[line.sc] ?? {}),
-      full: { injected: target.injected === true, rank: target.rank ?? null } }
-    if (target.absent) continue
-    if (line.sc === 'sc-cancelled-null' && target.util != null && Math.abs(target.util - 0.5) > 1e-9) {
-      violations.push({ sc: line.sc, kind: 'cancelled-target-utility-changed', util: target.util })
+  const vecBySc = new Map(contention(vector).map(l => [l.sc, l]))
+  const fullBySc = new Map(contention(full).map(l => [l.sc, l]))
+  for (const sc of expected) {
+    const vLine = vecBySc.get(sc), fLine = fullBySc.get(sc)
+    const vTarget = vLine ? targetOf(vLine) : null
+    const fTarget = fLine ? targetOf(fLine) : null
+    if (vTarget) flips[sc] = { vector: { injected: vTarget.injected === true, rank: vTarget.rank ?? null } }
+    if (fTarget) flips[sc] = { ...(flips[sc] ?? {}), full: { injected: fTarget.injected === true, rank: fTarget.rank ?? null } }
+    // 前置全条件（缺一即 invalid）：双臂 trace 在、vector 目标在候选中且未注入、数值 rank>=6
+    const preconditionOk = !!vLine && !!fLine && !!vTarget && !vTarget.absent
+      && vTarget.injected === false && typeof vTarget.rank === 'number' && vTarget.rank >= 6
+    if (!preconditionOk) { invalid.add(sc); continue }
+    // matched control 服务面断言（v4 ack 解释①）：cancelled 目标 utility 恒 0.5
+    if (sc === 'sc-cancelled-null' && fTarget && !fTarget.absent
+      && fTarget.util != null && Math.abs(fTarget.util - 0.5) > 1e-9) {
+      violations.push({ sc, kind: 'cancelled-target-utility-changed', util: fTarget.util })
     }
   }
   return { invalid: [...invalid], violations, flips }
