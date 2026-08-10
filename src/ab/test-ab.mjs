@@ -349,7 +349,21 @@ const runFull = async ({ injectMode, outcome, replica = null, identity = null, e
     const r = verifyFixtures({ expected: ['sc-credited-plasticity'], ...input })
     assert.ok(r.invalid.includes('sc-credited-plasticity'), `${name} 必须判 invalid_fixture`)
   }
-  ok('AB13 分组报表口径 + invalid_fixture fail-closed 六反例 + matched control 断言')
+  // full 侧三反例（round 2 复审 P1：full cancelled 证据 fail-closed）——
+  // 目标 absent / util null / util 非数值，全部必须记 violation，不许静默通过
+  const fullCases = [
+    ['full 目标 absent', [{ fact: 'cn-target', absent: true }], 'cancelled-target-missing'],
+    ['util null', [{ fact: 'cn-target', injected: false, rank: 7, util: null }], 'cancelled-target-utility-missing'],
+    ['util 字符串', [{ fact: 'cn-target', injected: false, rank: 7, util: '0.5' }], 'cancelled-target-utility-missing'],
+  ]
+  for (const [name, targets, kind] of fullCases) {
+    const r = verifyFixtures({ expected: ['sc-cancelled-null'],
+      vector: [goodVec('sc-cancelled-null', 'cn-target')],
+      full: [vLine('sc-cancelled-null', targets)] })
+    assert.equal(r.invalid.length, 0, `${name}：前置成立（vector 侧干净）`)
+    assert.ok(r.violations.some(v => v.kind === kind), `${name} 必须记 violation ${kind}`)
+  }
+  ok('AB13 分组报表口径 + invalid_fixture fail-closed 六反例 + full 侧证据三反例 + matched control 断言')
 }
 
 // ---------- AB14 v4 ack 两解释：paraphrase 冻结判据可机械复算 + cancelled 塑性 fail-closed ----------

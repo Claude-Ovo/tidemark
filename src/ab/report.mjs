@@ -67,10 +67,17 @@ export const verifyFixtures = ({ vector = [], full = [], expected = [] }) => {
     const preconditionOk = !!vLine && !!fLine && !!vTarget && !vTarget.absent
       && vTarget.injected === false && typeof vTarget.rank === 'number' && vTarget.rank >= 6
     if (!preconditionOk) { invalid.add(sc); continue }
-    // matched control 服务面断言（v4 ack 解释①）：cancelled 目标 utility 恒 0.5
-    if (sc === 'sc-cancelled-null' && fTarget && !fTarget.absent
-      && fTarget.util != null && Math.abs(fTarget.util - 0.5) > 1e-9) {
-      violations.push({ sc, kind: 'cancelled-target-utility-changed', util: fTarget.util })
+    // matched control 服务面断言（round 2 复审 P1 收紧：full 侧同样 fail-closed）——
+    // full cancelled 目标消失=证据失败（不是 fixture 漂移）；utility 必须为 numeric 且
+    // |util-0.5|<=1e-9 才通过；absent/null/非数值分别记 violation
+    if (sc === 'sc-cancelled-null') {
+      if (!fTarget || fTarget.absent) {
+        violations.push({ sc, kind: 'cancelled-target-missing' })
+      } else if (typeof fTarget.util !== 'number' || Number.isNaN(fTarget.util)) {
+        violations.push({ sc, kind: 'cancelled-target-utility-missing', util: fTarget.util ?? null })
+      } else if (Math.abs(fTarget.util - 0.5) > 1e-9) {
+        violations.push({ sc, kind: 'cancelled-target-utility-changed', util: fTarget.util })
+      }
     }
   }
   return { invalid: [...invalid], violations, flips }

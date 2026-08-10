@@ -170,12 +170,15 @@ export const SCENARIOS = [
   plasticityPairScenario({
     id: 'sc-cancelled-null', group: GROUPS.CONTROL, treatment: 'cancelled',
     title: 'cancelled 零塑性（credited 场景的 matched negative control）：取消的结果不得产生任何 rerank 提升',
+    // 槽位校准（exp d5f9f8d6e919 实测：原"保险续保"措辞与泛指 query 距离过远，目标进不了
+    // 候选集→前置 INVALID）——targetTail 并入泛指 token 带（日常巡检/台账），与 credited
+    // 场景同法：靠独有 token（归档/周一/复查）保定向命中，靠共享带保 rank 6 的坑位前置
     slot: {
       key: 'cn', domain: '仓储管理备忘',
-      targetTail: '保险续保的窗口，行政确认是每年三月第一周统一办理',
+      targetTail: '日常巡检台账的归档周期，行政确认是每周一统一复查',
       fillerTail: '日常巡检和台账要点汇总',
-      q1: '仓储保险续保是每年几月',
-      q2: '行政确认的仓储统一续保周是三月第一周吗',
+      q1: '仓储台账归档是每周几统一复查',
+      q2: '行政确认的仓储台账复查日是周一吗',
       generic: '仓储管理备忘日常巡检台账要点',
     },
   }),

@@ -20,7 +20,7 @@ checked_at: 2026-08-10（星数与 issue 状态取自当日 GitHub API；机制�
 
 ### 各行 primary URL 与精确星数（checked_at 2026-08-10，GitHub API）
 
-- mem0 62,933：https://github.com/mem0ai/mem0 ；Memory Decay=检索侧 0.3×–1.5× 重排，官方原话 "It's a soft re-rank, not a filter" / "Nothing gets deleted or hidden"，博客 2026-08-07（changelog 首发 2026-05-08）：https://mem0.ai/blog/introducing-memory-decay-in-mem0 ＋ https://docs.mem0.ai/platform/features/memory-decay ；TTL expiration_date（2026-06-27，仅托管 Platform，OSS 无）：https://docs.mem0.ai/changelog/highlights
+- mem0 62,933：https://github.com/mem0ai/mem0 ；Memory Decay=检索侧 0.3×–1.5× 重排，官方原话 "It's a soft re-rank, not a filter" / "Nothing gets deleted or hidden"，博客 2026-07-31（changelog 首发 2026-05-08）：https://mem0.ai/blog/introducing-memory-decay-in-mem0 ＋ https://docs.mem0.ai/platform/features/memory-decay ；TTL expiration_date（2026-06-27，仅托管 Platform，OSS 无）：https://docs.mem0.ai/changelog/highlights
 - Letta 24,171：https://github.com/letta-ai/letta
 - Zep/Graphiti 29,732：https://github.com/getzep/graphiti
 - LangMem 1,602：https://github.com/langchain-ai/langmem
