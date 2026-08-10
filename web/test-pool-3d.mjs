@@ -37,8 +37,9 @@ assert.ok(POOL_3D_CONFIG.water.waveNumber < 10, 'impact waves must stay broad en
 assert.ok(POOL_3D_CONFIG.water.semanticImpactLifetime >= 6, 'semantic waves need time to visibly spread')
 assert.ok(POOL_3D_CONFIG.water.ambientImpactLifetime < POOL_3D_CONFIG.water.semanticImpactLifetime,
   'rain ripples must be brief while semantic waves remain legible')
-assert.ok(POOL_3D_CONFIG.water.ringWidth > 0 && POOL_3D_CONFIG.water.ringWidth <= 0.012,
+assert.ok(POOL_3D_CONFIG.water.ringWidth > 0 && POOL_3D_CONFIG.water.ringWidth <= 0.02,
   'rain impacts must render as fine lines rather than raised circular bands')
+  // 2026-08-11 上界 0.012→0.02：参考图定稿的环线略粗于最初估计（0.016），仍是细线量级（<0.4% 盘径）
 assert.ok(POOL_3D_CONFIG.water.ambientDisplacement < POOL_3D_CONFIG.water.semanticDisplacement,
   'ambient rain may not deform the mirror as strongly as semantic feedback')
 assert.equal(POOL_3D_CONFIG.water.ambientImpactSlots + POOL_3D_CONFIG.water.semanticImpactSlots,
