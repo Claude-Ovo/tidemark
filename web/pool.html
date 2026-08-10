@@ -15,14 +15,19 @@
 <style>
   html, body { margin: 0; height: 100%; background: #07090c; color: #b8c7d9;
     font: 13px/1.5 system-ui, sans-serif; }
-  #stage { display: block; width: 100vw; height: 100vh; }
+  #stage, #stage3d { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #stage { display: block; }
+  #stage3d { display: none; overflow: hidden; background: #05080d; touch-action: none; }
+  #stage3d canvas { display: block; width: 100%; height: 100%; }
+  body.three-preview #stage { display: none; }
+  body.three-preview #stage3d { display: block; }
   /* 三审 P1-2：thesis 是首屏唯一解释文字；技术元数据降为暗色小字 */
-  #hud { position: fixed; left: 16px; top: 14px; right: 16px; user-select: none; pointer-events: none; }
+  #hud { position: fixed; left: 16px; top: 14px; right: 16px; z-index: 3; user-select: none; pointer-events: none; }
   #hud .thesis { font-size: 15px; font-weight: 600; color: #dfe9f5; letter-spacing: .05em; }
   #hud .meta { opacity: .32; font-size: 11px; margin-top: 3px; }
   #hud .script { color: #8fb8e8; font-size: 12px; margin-top: 8px; min-height: 1.2em; }
   /* 三审 P1-3：层名移出 canvas——固定 legend（结构编码），不与数据粒子争位 */
-  #legend { position: fixed; left: 16px; bottom: 14px; user-select: none; pointer-events: none;
+  #legend { position: fixed; left: 16px; bottom: 14px; z-index: 3; user-select: none; pointer-events: none;
     font-size: 11px; line-height: 1.9; opacity: .62; }
   #legend .row { display: flex; align-items: center; gap: 8px; }
   #legend .swatch { width: 18px; height: 0; border-top: 1px solid rgba(140,170,205,.7); }
@@ -69,7 +74,7 @@
     border: 1px solid #2c3a4c; color: #b8c7d9; border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   #curve { width: 100%; height: 72px; margin: 4px 0; }
   /* a11y overlay：每粒子一个真实可聚焦 button（canvas 命中配同步 DOM，契约） */
-  #overlay { position: fixed; inset: 0; pointer-events: none; }
+  #overlay { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
   #overlay button { position: absolute; left: 0; top: 0; width: 22px; height: 22px;
     background: transparent; border: none; border-radius: 50%; pointer-events: auto; cursor: pointer; padding: 0; }
   #overlay button:focus-visible { outline: 1.5px solid rgba(170,215,255,.9); outline-offset: 2px; }
@@ -80,6 +85,7 @@
 </style>
 </head>
 <body>
+<div id="stage3d" aria-hidden="true"></div>
 <canvas id="stage"></canvas>
 <div id="hud">
   <div class="thesis">召回只激起涟漪，结果才留下潮痕。</div>
@@ -102,18 +108,23 @@ import { layoutPool, fadeLineRadius, radiusOf, POOL_CFG } from '/src/pool/layout
 import { makeDrawerGuard } from '/src/pool/drawer-guard.mjs'
 import { makeLiveCoordinator, outcomeActions, eventCausesRefresh, diffSnapshot } from '/src/pool/live-coordinator.mjs'
 import { MOTION, easeOutStrong, easeInQuad, makeMotionState } from '/src/pool/motion-sync.mjs'
+import { wantsThreePreview } from '/src/pool/three/config.mjs'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
+const stage3d = document.getElementById('stage3d')
 const meta = document.getElementById('meta')
 const scriptline = document.getElementById('scriptline')
 const DPR = Math.min(window.devicePixelRatio || 1, 2)
+const THREE_REQUESTED = wantsThreePreview(location.search)
+let threePool = null
 // 四审 P2：运行中响应系统无障碍偏好变化，不只在 boot 读一次
 const rmQuery = matchMedia('(prefers-reduced-motion: reduce)')
 let REDUCED = rmQuery.matches
 // Gate 2 P2 债②：切到 reduce 不只影响后续事件——在跑动画当场 snap 到同一信息终态
 rmQuery.addEventListener?.('change', (e) => {
   REDUCED = e.matches
+  threePool?.setReducedMotion(REDUCED)
   if (!REDUCED) { requestDraw(); return }            // 关掉 reduce：重启常驻呼吸
   motion.reduceFlush()                               // 迁移直落终态并标 dirty（P1-1 反例②），生长/入场直落
   for (const d of drops) { if (d.spawn) { attachParticle(d.spawn); d.spawn = null } }  // 待生成粒子落下
@@ -157,12 +168,13 @@ const glowSprite = (() => {
 })()
 // 常驻氛围（Owner 裁定，覆盖"无活跃动画即停帧"的旧省帧项）：高保留粒子极缓亮度呼吸；
 // reduced-motion 或标签页隐藏时仍停帧（省电与无障碍边界保留）
-const ambientOn = () => !REDUCED && !document.hidden
+const ambientOn = () => !threePool && !REDUCED && !document.hidden
 document.addEventListener('visibilitychange', () => { if (!document.hidden) requestDraw() })
 const resize = () => {
   canvas.width = canvas.clientWidth * DPR
   canvas.height = canvas.clientHeight * DPR
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0)
+  threePool?.resize()
 }
 addEventListener('resize', () => { resize(); draw(performance.now()) })
 
@@ -227,6 +239,17 @@ const addRing = (p, kind) => {
 }
 
 const draw = (now = 0) => {
+  if (threePool?.active) {
+    threePool.setParticles(particles, {
+      pin: POOL_CFG.PIN_RING,
+      anchor: radiusOf({ pinned: false, effective_strength: POOL_CFG.ANCHOR_MIN }),
+      receding: radiusOf({ pinned: false, effective_strength: POOL_CFG.RECEDING_MAX }),
+      fade: fadeR,
+    })
+    threePool.syncRipples(ripples)
+    motion.consumeDirty()
+    return
+  }
   const { w, h, cx, cy, R } = geo()
   ctx.clearRect(0, 0, w, h)
   const ring = (r, alpha, dash = false) => {
@@ -342,6 +365,8 @@ let drawerOpener = null         // ESC 后焦点归还
 const LAYER_ZH = { anchor: '锚定层', active_tide: '活动潮带', receding_edge: '退潮边缘' }
 
 const anchorXY = (p) => {
+  const projected = threePool?.active ? threePool.projectParticle(p) : null
+  if (projected) return projected
   const { cx, cy, R } = geo()
   return [cx + p.pr * R * Math.cos(p.theta), cy + p.pr * R * Math.sin(p.theta)]
 }
@@ -513,6 +538,37 @@ const syncOverlay = (only = null) => { // draw 帧末：only=迁移中粒子（a
   if (only) { for (const p of only) { const b = btnOf.get(p); if (b) placeBtn(b, p) } return }
   for (const [p, b] of btnOf) placeBtn(b, p)
 }
+const setThreeVisible = (visible) => document.body.classList.toggle('three-preview', !!visible)
+const enableThreePreview = async () => {
+  if (!THREE_REQUESTED || threePool) return
+  try {
+    // Default 2D fallback must not pay the Three.js download/parse cost. The
+    // renderer chunk is fetched only for the explicit preview gate.
+    const { createTidePool3D, webglAvailable } = await import('/src/pool/three/tide-pool-3d.mjs')
+    if (!webglAvailable()) {
+      scriptline.textContent = 'WebGL 不可用，已使用签收版 2D 潮池。'
+      return
+    }
+    threePool = createTidePool3D({
+      host: stage3d,
+      reducedMotion: REDUCED,
+      onProjectionFrame: () => syncOverlay(),
+      onContextState: (state) => {
+        setThreeVisible(state === 'restored')
+        if (state === 'lost') scriptline.textContent = 'WebGL context lost，已即时回落 2D 潮池。'
+        else scriptline.textContent = '3D Tier 1 preview · 双击水面复位相机'
+        draw(performance.now())
+      },
+    })
+    setThreeVisible(true)
+    scriptline.textContent = '3D Tier 1 preview · 双击水面复位相机'
+  } catch (error) {
+    threePool?.dispose()
+    threePool = null
+    setThreeVisible(false)
+    scriptline.textContent = `3D 初始化失败，已使用 2D：${error.message}`
+  }
+}
 let resizeRaf = 0
 addEventListener('resize', () => {    // 二审 P1-1b：resize 不重建（重建会把 drawerOpener 变孤儿节点，
   cancelAnimationFrame(resizeRaf)     // 焦点归还失效）——按钮成员只随 particle 生命周期变，位置 rAF 同步
@@ -521,6 +577,7 @@ addEventListener('resize', () => {    // 二审 P1-1b：resize 不重建（重�
 
 const boot = async () => {
   resize()
+  await enableThreePreview()
   const snap = await fetchSnapshot()
   const { memories } = applySnapshot(snap, { initial: true })   // scripted 分支要用（一审 P1-1）
   draw(performance.now())
@@ -583,7 +640,8 @@ function applySnapshot(snap, { initial = false } = {}) {
   fadeR = fadeLineRadius(snap.fade_threshold)
   const { placed, overflow } = layoutPool(memories)
   meta.textContent = `${snap.total_memories} memories · ${snap.snapshot_at}` +
-    (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '')
+    (overflow.length ? ` · overflow ${overflow.length}（显式）` : '') + (snap.capped ? ' · CAPPED' : '') +
+    (threePool?.active ? ' · 3D PREVIEW' : '')
   if (initial) {
     particles = placed.map(p => ({ ...p, pr: p.r, pinned: !!memIndex.get(p.memory_id)?.pinned }))
     buildOverlay()
