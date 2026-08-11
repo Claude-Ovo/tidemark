@@ -131,7 +131,20 @@ export const vizActivity = async ({ principal, after, limit, graceMs }) => {
           ? r.items.map(i => ({ memory_id: i.memory_id, role: i.role, applied: i.applied === true, reason: i.reason ?? null }))
           : [] }))
 
-    const merged = [...remembers, ...recalls, ...outcomes].sort(tupleCmp)   // SQL 已保证 > cursor
+    // 第四源（证据前端 Verify 区）：agent action。attempt_events 里 agent 侧的执行痕迹——
+    // 没有它，"Remember → Recall → **Agent action** → Outcome → Plasticity" 这条链中间是断的。
+    // content-free：只出 ID/类型/工具名/时间，payload 一律不出（正文与证据细节归 detail 面）。
+    // memory_used 不在此源——它是 credited/blamed 的 item 级证据，归 outcome 的归因链。
+    const agentActions = await q('agent_action',
+      { select: `event_id, attempt_id, task_instance_id, episode_id, event_type, tool_name, created_at`,
+        col: 'created_at', id: 'event_id', from: 'attempt_events',
+        extra: `AND event_type IN ('attempt_start', 'tool_call', 'tool_error', 'attempt_end')` },
+      [tenant_id, agent_id],
+      r => ({ kind: 'agent_action', event_id: r.event_id, occurred_at: r.created_at, at_exact: r.at_exact,
+        attempt_id: r.attempt_id, task_instance_id: r.task_instance_id, episode_id: r.episode_id,
+        event_type: r.event_type, tool_name: r.tool_name ?? null }))
+
+    const merged = [...remembers, ...recalls, ...outcomes, ...agentActions].sort(tupleCmp)   // SQL 已保证 > cursor
     const events = merged.slice(0, n)
     const last = events[events.length - 1]
     const hasMore = merged.length > n

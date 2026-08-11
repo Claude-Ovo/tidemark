@@ -383,7 +383,14 @@ SPEC 变更时同一提交内同步：CODEX_CHANNEL.md 结论区（decision log�
 
 ## 14. Viz activity 流（2026-08-08，Gate 2 后增补；契约详文见 DESIGN-OCEAN.md 契约 B）
 
-- `GET /viz/activity?after=<cursor>`：三源派生（memories.created_at / recall_requests.created_at / outcomes.reported_at），确定性全序 `(occurred_at 微秒, source_kind, source_id)`。
+- `GET /viz/activity?after=<cursor>`：**四源**派生（memories.created_at / recall_requests.created_at / outcomes.reported_at / attempt_events.created_at），确定性全序 `(occurred_at 微秒, source_kind, source_id)`。
+- 第四源 `agent_action`（2026-08-12 增补，证据前端 Verify 区）：投影 `attempt_events` 中
+  `event_type IN (attempt_start, tool_call, tool_error, attempt_end)`——生命周期链
+  `Remember → Recall → Agent action → Outcome → Plasticity` 的中段证据。字段为
+  content-free 标识面：`event_id / attempt_id / task_instance_id / episode_id /
+  event_type / tool_name / occurred_at`；**`payload` 永不出现在活动流**（正文与证据细节
+  归 detail 面）。`memory_used` 不入此源——它是 credited/blamed 的 item 级证据，属归因链。
+  判别 A14 覆盖类型白名单、payload 零泄露、跨 agent 隔离、同微秒稳定序与去重规则。
 - **closed watermark**：durable cursor 只推进到 `DB now() - SAFETY_GRACE`；hot-window（watermark 之后至 now）事件立即返回但会在后续轮重放，客户端按 `(source_kind, source_id)` 幂等去重。
 - **配置冻结**：`SAFETY_GRACE = 30s`（`src/viz/activity.mjs ACTIVITY_CFG`）；**写路径事务 wall-clock 上限 = 15s**（`TIDEMARK_WRITE_TX_TIMEOUT_MS`，经 CRDB `transaction_timeout` 强制，整事务而非单 statement）。SAFETY_GRACE 必须 > 写事务上限。
 - 消费规则：remember 生成粒子 / recall 只涟漪 / 仅 `applied=true` 的 credited/blamed item 触发位移 / cancelled 无 item / `applied=false` 的 reason 只进 drawer。

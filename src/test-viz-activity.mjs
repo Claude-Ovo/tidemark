@@ -28,6 +28,7 @@ const t = async (name, fn) => { await fn(); passed++; console.log(`PASS ${name}`
 const cleanup = () => inSerializableTx(async (c) => {
   await c.query('DELETE FROM recall_requests WHERE tenant_id=$1', [T])
   await c.query('DELETE FROM outcomes WHERE tenant_id=$1', [T])
+  await c.query('DELETE FROM attempt_events WHERE tenant_id=$1', [T])
   await c.query('DELETE FROM memories WHERE tenant_id=$1', [T])
 }, 'activity-test-clean')
 
@@ -325,6 +326,60 @@ try {
       for (const k of ['ritems', 'items', 'receipt', 'receipt_json', 'similarity', 'final_score'])
         assert.ok(!(k in ev), `recall 事件不得泄露 ${k}`)
     } finally { await clean13() }
+  })
+
+  await t('A14 agent_action 第四源：类型白名单/content-free 投影/隔离/同微秒稳定序', async () => {
+    // 独立 tenant（同 A12/A13 式）：不与 A 系事件计数纠缠
+    const T14 = 'activity-a14-tenant', A14 = 'activity-a14-agent'
+    const vp = { tenant_id: T14, agent_id: A14, capabilities: [], scope: 'viz' }
+    const other = { tenant_id: T14, agent_id: 'a14-other-agent', capabilities: [], scope: 'viz' }
+    const clean14 = () => inSerializableTx(async (c) =>
+      c.query('DELETE FROM attempt_events WHERE tenant_id=$1', [T14]), 'a14-clean')
+    await clean14()
+    try {
+      const ins = (c, agent, rows) => c.query(
+        `INSERT INTO attempt_events (tenant_id, agent_id, episode_id, task_instance_id, attempt_id,
+           event_type, tool_name, payload)
+         SELECT $1, $2, 'ep-a14', 'task-a14', r->>'attempt', r->>'type', r->>'tool',
+                '{"secret":"must-not-leak"}'::JSONB
+         FROM unnest($3::JSONB[]) AS r`,
+        [T14, agent, rows.map(r => JSON.stringify(r))])
+      // 白名单四类 + 两个不应出现的类型（memory_used 属归因链、note 非 agent action）
+      const visible = ['attempt_start', 'tool_call', 'tool_error', 'attempt_end']
+      await inWriteTx(async (c) => {
+        await ins(c, A14, [
+          ...visible.map((type, i) => ({ attempt: `at-a14-${i}`, type, tool: type === 'tool_call' ? 'search_docs' : null })),
+          { attempt: 'at-a14-x', type: 'memory_used', tool: null },
+          { attempt: 'at-a14-y', type: 'note', tool: null },
+        ])
+        await ins(c, 'a14-other-agent', [{ attempt: 'at-a14-foreign', type: 'tool_call', tool: 'foreign_tool' }])
+      }, 'act-a14-ins')
+
+      const r = await vizActivity({ principal: vp })
+      assert.equal(r.ok, true)
+      const actions = r.events.filter(e => e.kind === 'agent_action')
+      assert.equal(actions.length, 4, '只投影四类 agent action，memory_used/note 不进此源')
+      assert.deepEqual([...new Set(actions.map(a => a.event_type))].sort(), [...visible].sort())
+      assert.ok(actions.some(a => a.tool_name === 'search_docs'), 'tool_name 必须透出（Verify 区要显示 agent 干了什么）')
+      // content-free：payload 及其内容一律不出现在响应任何位置
+      const raw = JSON.stringify(r)
+      assert.ok(!raw.includes('must-not-leak'), 'attempt_events.payload 不得进入公开活动流')
+      for (const a of actions) {
+        assert.ok(!('payload' in a), 'agent_action 事件不得携带 payload')
+        assert.ok(a.attempt_id && a.task_instance_id, '证据链需要 attempt/task 标识可点回')
+      }
+      // agent 隔离：另一 agent 的行不得出现
+      assert.ok(!raw.includes('foreign_tool'), '跨 agent 行不得泄漏进本 agent 的活动流')
+      const rOther = await vizActivity({ principal: other })
+      assert.equal(rOther.events.filter(e => e.kind === 'agent_action').length, 1, '另一 agent 只看到自己的行')
+      // 同微秒（单语句同 now()）稳定序 + 两轮字节级一致
+      const r2 = await vizActivity({ principal: vp })
+      assert.equal(JSON.stringify(r.events), JSON.stringify(r2.events), '同游标两轮事件序列必须字节级一致')
+      // 客户端去重规则对新 kind 同样成立
+      const dedupe = makeDedupe()
+      assert.equal(dedupe(r.events).length, r.events.length)
+      assert.equal(dedupe(r2.events).length, 0, '(kind,event_id) 去重覆盖 agent_action')
+    } finally { await clean14() }
   })
 
   await t('A9 配置守卫：29999 接受 / 30000 拒绝（严格不等式）', async () => {
