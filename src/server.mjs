@@ -16,6 +16,7 @@ import { forgetMemory } from './admin/forget.mjs'
 import { vizOcean, vizWaves } from './viz/ocean.mjs'
 import { vizActivity } from './viz/activity.mjs'
 import { vizMemoryDetail } from './viz/detail.mjs'
+import { vizCapability } from './viz/capability.mjs'
 import { embedModelId } from './lib/embed.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
@@ -106,6 +107,14 @@ app.get('/viz/memory/:memory_id', async (req, res) => {
   const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
   try { res.json(await vizMemoryDetail({ principal, memory_id: req.params.memory_id })) }
   catch (e) { console.error(JSON.stringify({ evt: 'viz_detail_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
+})
+// 证据前端（2026-08-12）：能力索引——StatusStrip 的真实状态与 System Map 的诚实来源。
+// 每个条目带 live / documented / evidence_pending / blocked_external / unavailable 状态，
+// 绝不把未完成的集成伪装成 live telemetry。
+app.get('/viz/capability', async (req, res) => {
+  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
+  try { res.json(await vizCapability({ principal })) }
+  catch (e) { console.error(JSON.stringify({ evt: 'viz_capability_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
 })
 // P0-11 v2 活动流（契约 B + SPEC §14）：closed watermark + hot-window 重放，客户端去重
 app.get('/viz/activity', async (req, res) => {
