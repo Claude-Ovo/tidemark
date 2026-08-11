@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { POOL_3D_CONFIG } from './config.mjs'
+import { POOL_3D_CONFIG, polarToWorld } from './config.mjs'
 
 export const stableEventHash = (value) => {
   let hash = 2166136261
@@ -9,6 +9,9 @@ export const stableEventHash = (value) => {
   }
   return hash >>> 0
 }
+
+const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback
+const hashUnit = (hash, shift = 0) => ((hash >>> shift) & 0xffff) / 0xffff
 
 export const buildStrandSpec = (event, target, durationMs) => {
   const cfg = POOL_3D_CONFIG.rain
@@ -20,17 +23,50 @@ export const buildStrandSpec = (event, target, durationMs) => {
     : event?.kind === 'remember' ? 0.82 : 0.68
   return {
     key: `${event?.kind}|${event?.event_id}`,
+    source: 'event',
     event,
-    x: Number(target?.x) || 0,
-    z: Number(target?.z) || 0,
+    x: finite(target?.x),
+    z: finite(target?.z),
     segments: cfg.minSegments + (hash % segmentRange),
     height: cfg.minHeight + (cfg.maxHeight - cfg.minHeight) * unit,
-    duration: Math.max(0.12, Number(durationMs) > 0
-      ? Number(durationMs) / 1000
+    duration: Math.max(0.12, finite(durationMs) > 0
+      ? finite(durationMs) / 1000
       : (cfg.minFallMs + (cfg.maxFallMs - cfg.minFallMs) * (1 - unit)) / 1000),
-    driftX: (((hash >>> 8) & 255) / 255 * 2 - 1) * cfg.maxDrift,
-    driftZ: (((hash >>> 16) & 255) / 255 * 2 - 1) * cfg.maxDrift,
+    phaseOffset: 0,
+    driftX: (hashUnit(hash, 6) * 2 - 1) * cfg.maxDrift,
+    driftZ: (hashUnit(hash, 14) * 2 - 1) * cfg.maxDrift,
     strength: kindStrength,
+    opacity: 0.72 + kindStrength * 0.24,
+    size: 0.052 + kindStrength * 0.038,
+  }
+}
+
+export const buildMemoryStrandSpec = (particle) => {
+  const cfg = POOL_3D_CONFIG.rain
+  const point = polarToWorld(particle)
+  const hash = stableEventHash(`memory|${particle?.memory_id}`)
+  const unit = hash / 0xffffffff
+  const segmentRange = cfg.maxSegments - cfg.minSegments + 1
+  const depth = THREE.MathUtils.clamp((point.z / POOL_3D_CONFIG.worldRadius + 1) * 0.5, 0, 1)
+  const strength = THREE.MathUtils.clamp(finite(particle?.s, 0.5), 0, 1)
+  const durationFactor = THREE.MathUtils.clamp(1 - depth * 0.45 + unit * 0.22, 0, 1)
+  return {
+    key: `memory|${particle?.memory_id}`,
+    source: 'memory',
+    event: null,
+    particle,
+    x: point.x,
+    z: point.z,
+    segments: cfg.minSegments + (hash % segmentRange),
+    height: cfg.minHeight + (cfg.maxHeight - cfg.minHeight) * (0.28 + unit * 0.72),
+    duration: (cfg.minMemoryFallMs
+      + (cfg.maxMemoryFallMs - cfg.minMemoryFallMs) * durationFactor) / 1000,
+    phaseOffset: hashUnit(hash, 8),
+    driftX: (hashUnit(hash, 4) * 2 - 1) * cfg.maxDrift,
+    driftZ: (hashUnit(hash, 12) * 2 - 1) * cfg.maxDrift,
+    strength: 0.42 + strength * 0.34,
+    opacity: 0.42 + depth * 0.34 + strength * 0.14,
+    size: 0.040 + depth * 0.040 + strength * 0.012,
   }
 }
 
@@ -38,6 +74,11 @@ export const advanceStrandLifecycle = ({ born, duration, landed = false }, secon
   const progress = Math.max(0, Math.min(1, (Number(seconds) - Number(born)) / Number(duration)))
   const landsNow = !landed && progress >= 1
   return { progress, landed: landed || landsNow, landsNow }
+}
+
+export const crossingCount = (previousSeconds, seconds, nextImpactAt, duration) => {
+  if (!(seconds >= previousSeconds) || !(duration > 0) || !(nextImpactAt > previousSeconds)) return 0
+  return nextImpactAt <= seconds ? 1 + Math.floor((seconds - nextImpactAt) / duration) : 0
 }
 
 const strandVertexShader = /* glsl */`
@@ -50,6 +91,7 @@ const strandVertexShader = /* glsl */`
   attribute float aOpacity;
   attribute float aSize;
   attribute float aEnabled;
+  attribute float aLoop;
   uniform float uTime;
   uniform float uWaterY;
   uniform float uTrailLength;
@@ -58,22 +100,27 @@ const strandVertexShader = /* glsl */`
   varying float vOpacity;
 
   void main() {
-    float elapsed = uTime - aBorn;
-    float progress = clamp(elapsed / max(aDuration, 0.001), 0.0, 1.0);
-    float beadProgress = clamp(progress - aPhase * 0.24, 0.0, 1.0);
-    float fall = beadProgress * beadProgress;
-    float driftFade = 1.0 - beadProgress;
+    float rawElapsed = uTime - aBorn;
+    float elapsed = max(0.0, rawElapsed);
+    float progress = aLoop > 0.5
+      ? fract(elapsed / max(aDuration, 0.001))
+      : clamp(elapsed / max(aDuration, 0.001), 0.0, 1.0);
+    float fall = progress * progress;
+    float tailLength = uTrailLength * mix(1.0, 0.72, progress);
+    float driftFade = 1.0 - progress;
     vec3 worldPosition = vec3(
-      aTarget.x + aDrift.x * driftFade * sin(aPhase * 19.0 + progress * 3.1),
-      mix(aHeight, uWaterY, fall) + aPhase * uTrailLength * 0.10,
-      aTarget.y + aDrift.y * driftFade * cos(aPhase * 17.0 + progress * 2.7)
+      aTarget.x + aDrift.x * driftFade * sin(aPhase * 18.0 + progress * 3.2),
+      mix(aHeight, uWaterY, fall) + aPhase * tailLength,
+      aTarget.y + aDrift.y * driftFade * cos(aPhase * 16.0 + progress * 2.8)
     );
     vec4 viewPosition = modelViewMatrix * vec4(worldPosition, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    float live = aEnabled * step(0.0, elapsed) * (1.0 - step(aDuration, elapsed));
-    float tip = 1.0 - smoothstep(0.0, 0.18, aPhase);
-    vOpacity = live * aOpacity * mix(0.38, 1.0, tip) * uDropBloom;
-    gl_PointSize = live * clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 1.4, 8.5);
+    float oneShotLive = step(0.0, rawElapsed) * (1.0 - step(aDuration, rawElapsed));
+    float live = aEnabled * mix(oneShotLive, 1.0, step(0.5, aLoop));
+    float tip = 1.0 - smoothstep(0.0, 0.16, aPhase);
+    float tailFade = 1.0 - smoothstep(0.62, 1.0, aPhase) * 0.64;
+    vOpacity = live * aOpacity * tailFade * mix(0.56, 1.0, tip) * uDropBloom;
+    gl_PointSize = live * clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 1.25, 8.5);
   }
 `
 
@@ -81,8 +128,9 @@ const strandFragmentShader = /* glsl */`
   uniform vec3 uColor;
   varying float vOpacity;
   void main() {
-    vec2 point = (gl_PointCoord - 0.5) * vec2(1.7, 1.0);
-    float alpha = (1.0 - smoothstep(0.18, 0.52, length(point))) * vOpacity;
+    vec2 point = (gl_PointCoord - 0.5) * vec2(2.05, 0.82);
+    float core = 1.0 - smoothstep(0.18, 0.54, length(point));
+    float alpha = core * vOpacity;
     if (alpha < 0.012) discard;
     gl_FragColor = vec4(uColor, alpha);
     #include <colorspace_fragment>
@@ -97,7 +145,7 @@ const contactVertexShader = /* glsl */`
   void main() {
     vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 3.0, 20.0);
+    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 3.0, 22.0);
     vOpacity = aOpacity;
   }
 `
@@ -153,18 +201,15 @@ const createPointPool = (count, material, name, renderOrder) => {
 
 export const createRainSystem = ({ onImpact } = {}) => {
   const cfg = POOL_3D_CONFIG.rain
-  const totalPoints = cfg.maxStrands * cfg.maxSegments
+  const strandCapacity = cfg.maxMemoryStrands + cfg.maxEventStrands
+  const totalPoints = strandCapacity * cfg.maxSegments
   const strandGeometry = new THREE.BufferGeometry()
   strandGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(totalPoints * 3), 3))
   strandGeometry.setAttribute('aTarget', new THREE.BufferAttribute(new Float32Array(totalPoints * 2), 2))
-  strandGeometry.setAttribute('aBorn', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
-  strandGeometry.setAttribute('aDuration', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
-  strandGeometry.setAttribute('aHeight', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
-  strandGeometry.setAttribute('aPhase', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  for (const name of ['aBorn', 'aDuration', 'aHeight', 'aPhase', 'aOpacity', 'aSize', 'aEnabled', 'aLoop'])
+    strandGeometry.setAttribute(name, new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
   strandGeometry.setAttribute('aDrift', new THREE.BufferAttribute(new Float32Array(totalPoints * 2), 2))
-  strandGeometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
-  strandGeometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
-  strandGeometry.setAttribute('aEnabled', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+
   const strandUniforms = {
     uTime: { value: 0 },
     uWaterY: { value: 0.06 },
@@ -183,16 +228,15 @@ export const createRainSystem = ({ onImpact } = {}) => {
     toneMapped: false,
   })
   const strands = new THREE.Points(strandGeometry, strandMaterial)
-  strands.name = 'LifecycleRainStrands'
+  strands.name = 'MemoryAndLifecycleRainStrands'
   strands.frustumCulled = false
   strands.renderOrder = 5
 
-  const contactUniforms = {
-    uViewportHeight: strandUniforms.uViewportHeight,
-    uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.coldGlint) },
-  }
   const contactMaterial = new THREE.ShaderMaterial({
-    uniforms: contactUniforms,
+    uniforms: {
+      uViewportHeight: strandUniforms.uViewportHeight,
+      uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.coldGlint) },
+    },
     vertexShader: contactVertexShader,
     fragmentShader: contactFragmentShader,
     transparent: true,
@@ -201,7 +245,7 @@ export const createRainSystem = ({ onImpact } = {}) => {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
-  const contacts = createPointPool(cfg.impactSlots, contactMaterial, 'LifecycleImpactFlashes', 6)
+  const contacts = createPointPool(cfg.impactSlots, contactMaterial, 'RainContactFlashes', 6)
 
   const crownMaterial = new THREE.ShaderMaterial({
     uniforms: {
@@ -216,23 +260,28 @@ export const createRainSystem = ({ onImpact } = {}) => {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
-  const crowns = createPointPool(cfg.impactSlots, crownMaterial, 'LifecycleImpactCrowns', 7)
+  const crowns = createPointPool(cfg.impactSlots, crownMaterial, 'RainImpactCrowns', 7)
   const group = new THREE.Group()
-  group.name = 'LifecycleRainSystem'
+  group.name = 'MemoryRainCurtain'
   group.add(strands, contacts, crowns)
 
-  const slots = Array.from({ length: cfg.maxStrands }, () => null)
+  const memorySlots = Array.from({ length: cfg.maxMemoryStrands }, () => null)
+  const memorySlotById = new Map()
+  const eventSlots = Array.from({ length: cfg.maxEventStrands }, () => null)
   const queue = []
   const seen = new Set()
   const impacts = []
   const recent = []
   let reduced = false
+  let frozenSeconds = 0
+  let lastSeconds = null
+  let collisionCount = 0
   let committedEventCount = 0
-  let visualImpactCount = 0
+  let eventImpactCount = 0
 
-  const updateSlotAttributes = (slotIndex, spec, born, enabled) => {
+  const writeSlot = (absoluteSlot, spec, born, enabled, loop) => {
     const attrs = strandGeometry.attributes
-    const start = slotIndex * cfg.maxSegments
+    const start = absoluteSlot * cfg.maxSegments
     for (let i = 0; i < cfg.maxSegments; i++) {
       const index = start + i
       const active = enabled && i < spec.segments ? 1 : 0
@@ -244,28 +293,76 @@ export const createRainSystem = ({ onImpact } = {}) => {
       attrs.aPhase.array[index] = i / Math.max(1, spec.segments - 1)
       attrs.aDrift.array[index * 2] = spec.driftX
       attrs.aDrift.array[index * 2 + 1] = spec.driftZ
-      attrs.aOpacity.array[index] = 0.70 + spec.strength * 0.28
-      attrs.aSize.array[index] = 0.050 + spec.strength * 0.040
+      attrs.aOpacity.array[index] = spec.opacity
+      attrs.aSize.array[index] = spec.size
       attrs.aEnabled.array[index] = active
+      attrs.aLoop.array[index] = loop ? 1 : 0
     }
     for (const attribute of Object.values(attrs)) attribute.needsUpdate = true
   }
 
-  const startQueued = (seconds) => {
-    for (let i = 0; i < slots.length && queue.length; i++) {
-      if (slots[i]) continue
-      const spec = queue.shift()
-      slots[i] = { ...spec, born: seconds, landed: false }
-      updateSlotAttributes(i, spec, seconds, true)
+  const disableSlot = (absoluteSlot, spec) => writeSlot(absoluteSlot, spec, 0, false, false)
+
+  const pushImpact = (spec, seconds) => {
+    collisionCount++
+    if (spec.source === 'event') eventImpactCount++
+    impacts.push({ x: spec.x, z: spec.z, born: seconds, strength: spec.strength, event: spec.event })
+    while (impacts.length > cfg.impactSlots) impacts.shift()
+    if (spec.event) {
+      recent.push({ x: spec.x, z: spec.z, born: seconds, event: spec.event })
+      while (recent.length > cfg.impactSlots) recent.shift()
+    }
+    onImpact?.({
+      x: spec.x,
+      z: spec.z,
+      strength: spec.strength,
+      seconds,
+      event: spec.event,
+      source: spec.source,
+    })
+  }
+
+  const initialiseMemorySlot = (state, seconds) => {
+    state.born = seconds - state.spec.phaseOffset * state.spec.duration
+    const elapsed = Math.max(0, seconds - state.born)
+    state.nextImpactAt = state.born + (Math.floor(elapsed / state.spec.duration) + 1) * state.spec.duration
+    writeSlot(state.slot, state.spec, state.born, true, true)
+  }
+
+  const syncMemoryStrands = (particles) => {
+    if (particles.length > cfg.maxMemoryStrands)
+      throw new Error(`memory_strand_capacity_exceeded:${particles.length}>${cfg.maxMemoryStrands}`)
+    const live = new Set(particles.map(particle => particle.memory_id))
+    for (const [id, slot] of memorySlotById) {
+      if (live.has(id)) continue
+      const state = memorySlots[slot]
+      if (state) disableSlot(slot, state.spec)
+      memorySlots[slot] = null
+      memorySlotById.delete(id)
+    }
+    for (const particle of particles) {
+      const spec = buildMemoryStrandSpec(particle)
+      const existingSlot = memorySlotById.get(particle.memory_id)
+      if (existingSlot != null) {
+        const state = memorySlots[existingSlot]
+        state.spec = spec
+        if (state.born != null) writeSlot(existingSlot, spec, state.born, true, true)
+        continue
+      }
+      const slot = memorySlots.findIndex(value => value == null)
+      if (slot < 0) throw new Error('memory_strand_capacity_exhausted')
+      memorySlots[slot] = { slot, spec, born: null, nextImpactAt: null }
+      memorySlotById.set(particle.memory_id, slot)
     }
   }
 
-  const pushImpact = (slot, seconds) => {
-    visualImpactCount++
-    impacts.push({ x: slot.x, z: slot.z, born: seconds, strength: slot.strength, event: slot.event })
-    while (impacts.length > cfg.impactSlots) impacts.shift()
-    recent.push({ x: slot.x, z: slot.z, born: seconds, event: slot.event })
-    onImpact?.({ x: slot.x, z: slot.z, strength: slot.strength, seconds, event: slot.event })
+  const startQueued = (seconds) => {
+    for (let i = 0; i < eventSlots.length && queue.length; i++) {
+      if (eventSlots[i]) continue
+      const spec = queue.shift()
+      eventSlots[i] = { ...spec, born: seconds, landed: false }
+      writeSlot(cfg.maxMemoryStrands + i, spec, seconds, true, false)
+    }
   }
 
   const updateImpactPool = (points, seconds, lifetime, crown = false) => {
@@ -275,13 +372,13 @@ export const createRainSystem = ({ onImpact } = {}) => {
       const progress = (seconds - impact.born) / lifetime
       if (progress < 0 || progress >= 1) continue
       attrs.position.array[count * 3] = impact.x
-      attrs.position.array[count * 3 + 1] = crown ? 0.07 + progress * 0.09 : 0.065
+      attrs.position.array[count * 3 + 1] = crown ? 0.07 + progress * 0.10 : 0.065
       attrs.position.array[count * 3 + 2] = impact.z
       attrs.aSize.array[count] = crown
-        ? 0.16 + impact.strength * 0.12
-        : 0.08 + impact.strength * 0.09 + progress * 0.05
-      attrs.aOpacity.array[count] = ((1 - progress) ** (crown ? 2.6 : 1.8))
-        * (0.48 + impact.strength * 0.52) * (crown ? cfg.crownBloom : cfg.impactBloom)
+        ? 0.18 + impact.strength * 0.14
+        : 0.10 + impact.strength * 0.11 + progress * 0.05
+      attrs.aOpacity.array[count] = ((1 - progress) ** (crown ? 2.45 : 1.7))
+        * (0.52 + impact.strength * 0.48) * (crown ? cfg.crownBloom : cfg.impactBloom)
       count++
     }
     points.geometry.setDrawRange(0, count)
@@ -292,14 +389,19 @@ export const createRainSystem = ({ onImpact } = {}) => {
 
   return {
     group,
+    setMemoryStrands: syncMemoryStrands,
     setReducedMotion(value) {
-      reduced = !!value
+      const next = !!value
+      if (next === reduced) return
+      reduced = next
       if (reduced) {
+        frozenSeconds = strandUniforms.uTime.value
         const seconds = performance.now() / 1000
-        for (let i = 0; i < slots.length; i++) {
-          if (slots[i] && !slots[i].landed) pushImpact(slots[i], seconds)
-          if (slots[i]) updateSlotAttributes(i, slots[i], slots[i].born, false)
-          slots[i] = null
+        for (let i = 0; i < eventSlots.length; i++) {
+          const slot = eventSlots[i]
+          if (slot && !slot.landed) pushImpact(slot, seconds)
+          if (slot) disableSlot(cfg.maxMemoryStrands + i, slot)
+          eventSlots[i] = null
         }
         while (queue.length) pushImpact(queue.shift(), seconds)
         impacts.length = 0
@@ -315,28 +417,45 @@ export const createRainSystem = ({ onImpact } = {}) => {
       committedEventCount++
       if (seen.size > 2048) seen.delete(seen.values().next().value)
       if (reduced) {
-        visualImpactCount++
-        onImpact?.({ x: spec.x, z: spec.z, strength: spec.strength, seconds: performance.now() / 1000, event })
+        pushImpact(spec, performance.now() / 1000)
         return true
       }
       if (queue.length >= cfg.maxQueuedStrands) throw new Error('lifecycle_strand_queue_overflow')
       queue.push(spec)
       return true
     },
-    resize(height) { strandUniforms.uViewportHeight.value = Math.max(1, Number(height) || 1) },
+    resize(height) { strandUniforms.uViewportHeight.value = Math.max(1, finite(height, 1)) },
     update(seconds) {
-      strandUniforms.uTime.value = seconds
+      if (!reduced) strandUniforms.uTime.value = seconds
+      else strandUniforms.uTime.value = frozenSeconds
+
+      for (const state of memorySlots) if (state && state.born == null) initialiseMemorySlot(state, seconds)
+      const frameGap = lastSeconds == null ? 0 : Math.max(0, seconds - lastSeconds)
+      if (!reduced && lastSeconds != null) {
+        for (const state of memorySlots) {
+          if (!state) continue
+          if (state.nextImpactAt <= lastSeconds) {
+            const skipped = 1 + Math.floor((lastSeconds - state.nextImpactAt) / state.spec.duration)
+            state.nextImpactAt += skipped * state.spec.duration
+          }
+          const count = crossingCount(lastSeconds, seconds, state.nextImpactAt, state.spec.duration)
+          if (frameGap <= cfg.maxVisibleFrameGap && count > 0) pushImpact(state.spec, seconds)
+          if (count > 0) state.nextImpactAt += count * state.spec.duration
+        }
+      }
+      lastSeconds = seconds
       if (reduced) return
+
       startQueued(seconds)
-      for (let i = 0; i < slots.length; i++) {
-        const slot = slots[i]
+      for (let i = 0; i < eventSlots.length; i++) {
+        const slot = eventSlots[i]
         if (!slot) continue
         const next = advanceStrandLifecycle(slot, seconds)
         if (next.landsNow) pushImpact(slot, seconds)
         slot.landed = next.landed
-        if (seconds < slot.born + slot.duration + 0.035) continue
-        updateSlotAttributes(i, slot, slot.born, false)
-        slots[i] = null
+        if (seconds < slot.born + slot.duration + 0.04) continue
+        disableSlot(cfg.maxMemoryStrands + i, slot)
+        eventSlots[i] = null
       }
       startQueued(seconds)
       while (impacts.length && seconds - impacts[0].born >= cfg.impactLifetime) impacts.shift()
@@ -347,7 +466,7 @@ export const createRainSystem = ({ onImpact } = {}) => {
     pick(clientX, clientY, camera, domElement) {
       const rect = domElement.getBoundingClientRect()
       const candidates = []
-      for (const slot of slots) {
+      for (const slot of eventSlots) {
         if (!slot) continue
         const state = advanceStrandLifecycle(slot, strandUniforms.uTime.value)
         const y = THREE.MathUtils.lerp(slot.height, 0.06, state.progress * state.progress)
@@ -366,10 +485,12 @@ export const createRainSystem = ({ onImpact } = {}) => {
     },
     metrics() {
       return {
+        collisionCount,
         committedEventCount,
-        visualImpactCount,
+        eventImpactCount,
         queuedEventCount: queue.length,
-        activeStrandCount: slots.filter(Boolean).length,
+        activeEventStrandCount: eventSlots.filter(Boolean).length,
+        memoryStrandCount: memorySlotById.size,
       }
     },
     dispose() {
@@ -383,6 +504,7 @@ export const createRainSystem = ({ onImpact } = {}) => {
       queue.length = 0
       impacts.length = 0
       recent.length = 0
+      memorySlotById.clear()
     },
   }
 }

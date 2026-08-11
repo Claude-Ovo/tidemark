@@ -40,7 +40,8 @@ export const createTidePool3D = ({
   const water = createWaterDisk({ radius: waterRadius, heightField })
   const dataModel = createDataModelGroup()
   const rain = createRainSystem({
-    onImpact: ({ x, z, strength, seconds }) => water.addImpact(x, z, seconds, strength, 'semantic'),
+    onImpact: ({ x, z, strength, seconds, source }) =>
+      water.addImpact(x, z, seconds, strength, source === 'event' ? 'semantic' : 'ambient'),
   })
   rain.setReducedMotion(reducedMotion)
   const lighting = new THREE.Group()
@@ -132,6 +133,7 @@ export const createTidePool3D = ({
     setParticles(nextParticles, guideRadii) {
       particles = nextParticles
       dataModel.setParticles(particles)
+      rain.setMemoryStrands(particles)
       if (guideRadii) dataModel.setGuides(guideRadii)
       requestFrame()
     },

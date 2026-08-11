@@ -90,7 +90,10 @@ const fragmentShader = /* glsl */`
       2.0 * uHeightTexel.x / max(uHeightScale, 0.0001),
       (down - up) * uNormalStrength
     ));
-    vec3 normal = normalize(mat3(modelMatrix) * localNormal);
+    // The water mesh is authored directly in world XZ and is never rotated.
+    // modelMatrix is not a fragment-stage built-in in Three ShaderMaterial;
+    // keeping this normal in world axes avoids a shader-link failure.
+    vec3 normal = localNormal;
     vec3 viewDir = normalize(cameraPosition - vWorldPosition);
     vec3 lightDir = normalize(vec3(-0.36, 0.90, 0.24));
     vec3 halfVector = normalize(viewDir + lightDir);
@@ -98,7 +101,7 @@ const fragmentShader = /* glsl */`
     float fresnel = pow(1.0 - facing, 3.6);
     float needle = pow(max(dot(normal, halfVector), 0.0), 168.0);
     float broad = pow(max(dot(normal, halfVector), 0.0), 34.0);
-    float fieldEnergy = min(1.0, (abs(left - right) + abs(down - up)) * 28.0);
+    float fieldEnergy = min(1.0, (abs(left - right) + abs(down - up)) * 180.0);
 
     vec3 markLight = vec3(0.0);
     for (int i = 0; i < ${MAX_TIDE_MARKS}; i++) {
@@ -113,19 +116,22 @@ const fragmentShader = /* glsl */`
       else markLight -= uDeepBlue * slash * fade * 0.22;
     }
 
-    float centralMirror = exp(-dot(vWorldPosition.xz, vWorldPosition.xz) * 0.075);
-    vec3 color = mix(uAbyss, uDeepBlue, 0.38 + centralMirror * 0.14 + fresnel * 0.18);
-    color += uSteel * (0.018 + fresnel * 0.035);
+    float nearField = smoothstep(-uRadius, uRadius, vWorldPosition.z);
+    float centralMirror = exp(-dot(vWorldPosition.xz, vWorldPosition.xz) * 0.045);
+    vec3 color = mix(uAbyss, uDeepBlue, 0.52 + nearField * 0.16 + centralMirror * 0.08);
+    color += uSteel * (0.016 + fresnel * 0.075);
     color += uPearl * needle * 0.78;
-    color += uColdGlint * broad * fieldEnergy * 0.20;
+    color += uColdGlint * broad * (0.028 + fieldEnergy * 0.34);
+    color += uColdGlint * fieldEnergy * (0.055 + fresnel * 0.12);
     color += markLight;
 
     float distanceToCamera = length(cameraPosition - vWorldPosition);
     float fog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
     color = mix(color, uFogColor, clamp(fog, 0.0, 0.34));
     float radial = length(vWorldPosition.xz) / uRadius;
-    float edgeAlpha = 1.0 - smoothstep(uEdgeFadeStart, 1.0, radial);
-    gl_FragColor = vec4(color, edgeAlpha * 0.97);
+    float edgeReveal = 1.0 - smoothstep(uEdgeFadeStart, 1.0, radial);
+    color = mix(uAbyss, color, edgeReveal);
+    gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
@@ -167,8 +173,9 @@ export const createWaterDisk = ({
     vertexShader,
     fragmentShader,
     side: THREE.DoubleSide,
-    transparent: true,
-    depthWrite: false,
+    transparent: false,
+    depthWrite: true,
+    blending: THREE.NoBlending,
     toneMapped: true,
   })
   const mesh = new THREE.Mesh(geometry, material)

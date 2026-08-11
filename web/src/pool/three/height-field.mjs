@@ -7,8 +7,8 @@ export const worldToFieldUv = (x, z, radius) => ({
 })
 
 // A texel is the simulation's indivisible write unit. Events that land in the
-// same texel are summed, never randomly discarded; eventCount remains exact for
-// the visualImpactCount === committedEventCount audit.
+// same texel are summed, never randomly discarded; eventCount remains exact
+// while collisionCount === heightfieldStampCount stays auditable upstream.
 export const mergeHeightFieldImpulses = (impulses, resolution) => {
   const cells = new Map()
   for (const impulse of impulses) {
@@ -196,7 +196,12 @@ export const createHeightField = ({ renderer, radius, resolution = POOL_3D_CONFI
       for (let i = 0; i < steps; i++) renderStep(dt, i === 0 ? batch : [])
     },
     metrics() {
-      return { committedImpactCount, visualImpactCount, queuedImpactCount: pending.reduce((n, x) => n + x.eventCount, 0) }
+      return {
+        heightfieldStampCount: committedImpactCount,
+        committedImpactCount,
+        visualImpactCount,
+        queuedImpactCount: pending.reduce((n, x) => n + x.eventCount, 0),
+      }
     },
     dispose() {
       read.dispose()
