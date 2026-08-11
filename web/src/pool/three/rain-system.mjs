@@ -23,7 +23,7 @@ const clampToPool = (x, z) => {
 const streakAppearance = (hash, depth, strength) => {
   const cfg = POOL_3D_CONFIG.rain
   return {
-    opacity: 0.31 + depth * 0.34 + strength * 0.13,
+    opacity: 0.27 + depth * 0.27 + strength * 0.10,
     streakLength: THREE.MathUtils.lerp(
       cfg.minStreakLength,
       cfg.maxStreakLength,
@@ -81,6 +81,7 @@ export const buildMemoryStrandSpec = (particle, lane = 0) => {
     point.z + Math.sin(offsetAngle) * offsetRadius,
   )
   const durationMix = THREE.MathUtils.clamp(hashUnit(hash, 9) * 0.72 + (1 - depth) * 0.28, 0, 1)
+  const appearance = streakAppearance(hash, depth, strength)
   return {
     key: `memory|${particle?.memory_id}|${safeLane}`,
     source: 'memory',
@@ -96,7 +97,11 @@ export const buildMemoryStrandSpec = (particle, lane = 0) => {
     driftX: (hashUnit(hash, 4) * 2 - 1) * cfg.maxDrift,
     driftZ: (hashUnit(hash, 12) * 2 - 1) * cfg.maxDrift,
     strength: 0.42 + strength * 0.34,
-    ...streakAppearance(hash, depth, strength),
+    ...appearance,
+    // Lane zero is the truthful, semantic landing. The five auxiliary lanes
+    // are render-only density tied to that same memory and stay deliberately
+    // dim; they never emit an impact or pretend to be telemetry.
+    opacity: appearance.opacity * (safeLane === 0 ? 1 : 0.46),
   }
 }
 
@@ -135,7 +140,9 @@ const strandVertexShader = /* glsl */`
     float progress = aLoop > 0.5
       ? fract(elapsed / max(aDuration, 0.001))
       : clamp(elapsed / max(aDuration, 0.001), 0.0, 1.0);
-    float fall = progress * progress;
+    // A short ease-out makes the downward travel read immediately instead of
+    // hanging as beads near the top. Full travel remains 0.70-1.05 seconds.
+    float fall = 1.0 - pow(1.0 - progress, 1.55);
     float driftFade = 1.0 - progress;
     vec3 worldPosition = vec3(
       aTarget.x + aDrift.x * driftFade * sin(aBorn * 8.7 + progress * 3.1),
@@ -195,16 +202,36 @@ const contactFragmentShader = /* glsl */`
   }
 `
 
-const crownFragmentShader = /* glsl */`
-  uniform vec3 uColor;
+const rippleVertexShader = /* glsl */`
+  attribute float aSize;
+  attribute float aOpacity;
+  attribute float aProgress;
+  uniform float uViewportHeight;
   varying float vOpacity;
+  varying float vProgress;
   void main() {
-    vec2 point = (gl_PointCoord - 0.5) * vec2(2.0, 3.2);
+    vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewPosition;
+    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 3.0, 58.0);
+    vOpacity = aOpacity;
+    vProgress = aProgress;
+  }
+`
+
+const rippleFragmentShader = /* glsl */`
+  uniform vec3 uColor;
+  uniform float uSurfaceRatio;
+  varying float vOpacity;
+  varying float vProgress;
+  void main() {
+    vec2 point = (gl_PointCoord - 0.5) * 2.0;
+    point.y /= max(0.28, uSurfaceRatio);
     float radial = length(point);
-    float rim = 1.0 - smoothstep(0.055, 0.16, abs(radial - 0.54));
-    float contact = exp(-dot(point, point) * 8.0) * 0.58;
-    float alpha = max(rim, contact) * vOpacity;
-    if (alpha < 0.025) discard;
+    float outer = 1.0 - smoothstep(0.026, 0.072, abs(radial - 0.72));
+    float innerLife = smoothstep(0.20, 0.36, vProgress) * (1.0 - smoothstep(0.72, 0.94, vProgress));
+    float inner = (1.0 - smoothstep(0.024, 0.070, abs(radial - 0.42))) * innerLife * 0.62;
+    float alpha = max(outer, inner) * vOpacity;
+    if (alpha < 0.018) discard;
     gl_FragColor = vec4(uColor, alpha);
     #include <colorspace_fragment>
   }
@@ -215,6 +242,7 @@ const createPointPool = (count, material, name, renderOrder) => {
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3))
   geometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(count), 1))
   geometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(count), 1))
+  geometry.setAttribute('aProgress', new THREE.BufferAttribute(new Float32Array(count), 1))
   geometry.setDrawRange(0, 0)
   const points = new THREE.Points(geometry, material)
   points.name = name
@@ -255,7 +283,7 @@ export const createRainSystem = ({ onImpact } = {}) => {
   const strands = new THREE.Points(strandGeometry, strandMaterial)
   strands.name = 'IndependentMemoryRainStreaks'
   strands.frustumCulled = false
-  strands.renderOrder = 5
+  strands.renderOrder = 1
 
   const contactMaterial = new THREE.ShaderMaterial({
     uniforms: {
@@ -270,25 +298,26 @@ export const createRainSystem = ({ onImpact } = {}) => {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
-  const contacts = createPointPool(cfg.impactSlots, contactMaterial, 'RainContactFlashes', 6)
+  const contacts = createPointPool(cfg.impactSlots, contactMaterial, 'RainContactFlashes', 4)
 
-  const crownMaterial = new THREE.ShaderMaterial({
+  const rippleMaterial = new THREE.ShaderMaterial({
     uniforms: {
       uViewportHeight: strandUniforms.uViewportHeight,
-      uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.pearl) },
+      uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.coldGlint) },
+      uSurfaceRatio: { value: 0.4 },
     },
-    vertexShader: contactVertexShader,
-    fragmentShader: crownFragmentShader,
+    vertexShader: rippleVertexShader,
+    fragmentShader: rippleFragmentShader,
     transparent: true,
     depthWrite: false,
     depthTest: false,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
-  const crowns = createPointPool(cfg.impactSlots, crownMaterial, 'ShortRainContactCrowns', 7)
+  const ripples = createPointPool(cfg.impactSlots, rippleMaterial, 'LocalImpactRipples', 3)
   const group = new THREE.Group()
   group.name = 'MemoryRainCurtain'
-  group.add(strands, contacts, crowns)
+  group.add(strands, ripples, contacts)
 
   const memorySlots = Array.from({ length: memoryCapacity }, () => null)
   const memorySlotsById = new Map()
@@ -303,6 +332,7 @@ export const createRainSystem = ({ onImpact } = {}) => {
   let collisionCount = 0
   let committedEventCount = 0
   let eventImpactCount = 0
+  const cameraDirection = new THREE.Vector3()
 
   const flushStrandAttributes = () => {
     for (const attribute of Object.values(strandGeometry.attributes)) attribute.needsUpdate = true
@@ -400,33 +430,36 @@ export const createRainSystem = ({ onImpact } = {}) => {
     if (dirty) flushStrandAttributes()
   }
 
-  const updateImpactPool = (points, seconds, lifetime, crown = false) => {
+  const updateImpactPool = (points, seconds, lifetime, mode) => {
     const attrs = points.geometry.attributes
     let count = 0
     for (const impact of impacts) {
       const progress = (seconds - impact.born) / lifetime
       if (progress < 0 || progress >= 1 || count >= cfg.impactSlots) continue
       attrs.position.array[count * 3] = impact.x
-      attrs.position.array[count * 3 + 1] = crown ? 0.068 + progress * 0.025 : 0.064
+      attrs.position.array[count * 3 + 1] = mode === 'ripple' ? 0.061 : 0.064
       attrs.position.array[count * 3 + 2] = impact.z
-      attrs.aSize.array[count] = crown
-        ? 0.10 + impact.strength * 0.085 + progress * 0.045
-        : 0.07 + impact.strength * 0.075 + progress * 0.035
-      attrs.aOpacity.array[count] = ((1 - progress) ** (crown ? 2.8 : 2.1))
-        * (0.45 + impact.strength * 0.45) * (crown ? cfg.crownBloom : cfg.impactBloom)
+      attrs.aSize.array[count] = mode === 'ripple'
+        ? 0.14 + progress * (0.68 + impact.strength * 0.14)
+        : 0.065 + impact.strength * 0.07 + progress * 0.025
+      attrs.aOpacity.array[count] = mode === 'ripple'
+        ? ((1 - progress) ** 1.6) * (0.24 + impact.strength * 0.20)
+        : ((1 - progress) ** 2.4) * (0.42 + impact.strength * 0.42) * cfg.impactBloom
+      attrs.aProgress.array[count] = progress
       count++
     }
     points.geometry.setDrawRange(0, count)
     attrs.position.needsUpdate = true
     attrs.aSize.needsUpdate = true
     attrs.aOpacity.needsUpdate = true
+    attrs.aProgress.needsUpdate = true
   }
 
   return {
     group,
     setContactFeedbackVisible(value) {
       contacts.visible = !!value
-      crowns.visible = !!value
+      ripples.visible = !!value
     },
     setMemoryStrands: syncMemoryStrands,
     setReducedMotion(value) {
@@ -445,7 +478,7 @@ export const createRainSystem = ({ onImpact } = {}) => {
         while (queue.length) pushImpact(queue.shift(), seconds)
         impacts.length = 0
         contacts.geometry.setDrawRange(0, 0)
-        crowns.geometry.setDrawRange(0, 0)
+        ripples.geometry.setDrawRange(0, 0)
         flushStrandAttributes()
       }
     },
@@ -467,9 +500,15 @@ export const createRainSystem = ({ onImpact } = {}) => {
     resize(height) {
       strandUniforms.uViewportHeight.value = Math.max(1, Number(height) || 1)
     },
-    update(seconds) {
+    update(seconds, camera) {
       const renderSeconds = reduced ? frozenSeconds : seconds
       strandUniforms.uTime.value = renderSeconds
+      if (camera) {
+        camera.getWorldDirection(cameraDirection)
+        rippleMaterial.uniforms.uSurfaceRatio.value = THREE.MathUtils.clamp(
+          Math.abs(cameraDirection.y), 0.32, 1,
+        )
+      }
       if (lastSeconds == null) lastSeconds = seconds
       if (!reduced) {
         let dirty = false
@@ -507,11 +546,11 @@ export const createRainSystem = ({ onImpact } = {}) => {
         }
         if (dirty) flushStrandAttributes()
       }
-      const maxLifetime = Math.max(cfg.impactLifetime, cfg.crownLifetime)
+      const maxLifetime = Math.max(cfg.impactLifetime, cfg.rippleLifetime)
       while (impacts.length && seconds - impacts[0].born >= maxLifetime) impacts.shift()
       while (recent.length && seconds - recent[0].born > cfg.recentPickMs / 1000) recent.shift()
-      updateImpactPool(contacts, seconds, cfg.impactLifetime, false)
-      updateImpactPool(crowns, seconds, cfg.crownLifetime, true)
+      updateImpactPool(contacts, seconds, cfg.impactLifetime, 'flash')
+      updateImpactPool(ripples, seconds, cfg.rippleLifetime, 'ripple')
       lastSeconds = seconds
     },
     pick(clientX, clientY, camera, canvas) {
@@ -520,9 +559,10 @@ export const createRainSystem = ({ onImpact } = {}) => {
       for (const state of eventSlots) {
         if (!state) continue
         const progress = THREE.MathUtils.clamp((strandUniforms.uTime.value - state.born) / state.duration, 0, 1)
+        const fall = 1 - (1 - progress) ** 1.55
         candidates.push({
           x: state.x,
-          y: THREE.MathUtils.lerp(state.height, 0.06, progress * progress),
+          y: THREE.MathUtils.lerp(state.height, 0.06, fall),
           z: state.z,
           event: state.event,
         })
@@ -550,12 +590,13 @@ export const createRainSystem = ({ onImpact } = {}) => {
         collisionCount,
         committedEventCount,
         eventImpactCount,
+        activeLocalRippleCount: ripples.geometry.drawRange.count,
       }
     },
     dispose() {
       strandGeometry.dispose()
       strandMaterial.dispose()
-      for (const points of [contacts, crowns]) {
+      for (const points of [contacts, ripples]) {
         points.geometry.dispose()
         points.material.dispose()
       }

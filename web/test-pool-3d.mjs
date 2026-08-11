@@ -42,16 +42,23 @@ assert.equal(camera.fov, 35, 'Owner low-angle framing uses the specified ~35 deg
 
 assert.ok(POOL_3D_CONFIG.water.heightFieldResolution >= 512
   && POOL_3D_CONFIG.water.heightFieldResolution <= 768, 'height field must stay in the accepted desktop range')
-assert.ok(POOL_3D_CONFIG.water.edgeFadeStart >= 0.8 && POOL_3D_CONFIG.water.edgeFadeStart <= 0.9,
-  'water must disappear into darkness instead of exposing a hard disk edge')
-assert.ok(POOL_3D_CONFIG.rain.trailsPerMemory >= 2.5 && POOL_3D_CONFIG.rain.trailsPerMemory <= 4,
-  'deterministic render tracks must raise visible rain density 2.5-4x')
+assert.ok(POOL_3D_CONFIG.water.edgeFadeStart >= 0.4 && POOL_3D_CONFIG.water.edgeFadeStart <= 0.55,
+  'the oversized water base needs a broad feather instead of a hard disk edge')
+assert.ok(POOL_3D_CONFIG.water.baseAlpha >= 0.06 && POOL_3D_CONFIG.water.baseAlpha <= 0.12,
+  'submission water must remain a nearly invisible transparent base')
+assert.ok(POOL_3D_CONFIG.waterRadiusScale >= 3,
+  'water geometry must extend beyond the normal camera framing')
+assert.equal(POOL_3D_CONFIG.rain.trailsPerMemory, 6,
+  'six deterministic tracks are the requested 1.5x increase over the previous four')
+assert.ok(POOL_3D_CONFIG.rain.minMemoryFallMs >= 700
+  && POOL_3D_CONFIG.rain.maxMemoryFallMs <= 1300,
+  'persisted rain must complete its full fall inside the 0.7-1.3 second acceptance window')
+assert.ok(POOL_3D_CONFIG.rain.impactSlots >= 16 && POOL_3D_CONFIG.rain.impactSlots <= 24,
+  'local feedback must stay inside the 16-24 active impact budget')
+assert.ok(POOL_3D_CONFIG.rain.rippleLifetime >= 0.5 && POOL_3D_CONFIG.rain.rippleLifetime <= 0.9,
+  'local rings must disappear within the requested lifetime')
 assert.ok(POOL_3D_CONFIG.water.impulseRadius <= 0.012 * 0.55,
   'impact radius must shrink to the requested 35-55% range')
-assert.ok(POOL_3D_CONFIG.water.transmission >= 0.7 && POOL_3D_CONFIG.water.transmission <= 0.9)
-assert.ok(POOL_3D_CONFIG.water.roughness >= 0.08 && POOL_3D_CONFIG.water.roughness <= 0.18)
-assert.equal(POOL_3D_CONFIG.water.ior, 1.333)
-assert.equal(POOL_3D_CONFIG.water.f0, 0.02)
 assert.ok(POOL_3D_CONFIG.water.waveCoefficient * POOL_3D_CONFIG.water.simulationStep ** 2 < 0.5,
   'height-field wave coefficient must stay inside the explicit integrator stability budget')
 
@@ -128,16 +135,26 @@ const anchorSource = readFileSync(new URL('./src/pool/three/data-model-group.mjs
 assert.doesNotMatch(anchorSource, /Sprite|CanvasTexture|SpriteMaterial/,
   'underwater memories must stay in one shared GPU point buffer')
 assert.match(anchorSource, /new THREE\.Points/,
-  'persisted memory records must remain visible below the refracting surface')
+  'persisted memory records must remain in one readable GPU point buffer')
 assert.match(anchorSource, /cfg\.water\.underwaterY/,
   'memory points must be physically placed below water rather than floating above it')
+assert.match(anchorSource, /depthTest:\s*false/,
+  'the nearly transparent base may never occlude persisted memory points')
+assert.match(anchorSource, /points\.renderOrder\s*=\s*2/,
+  'persisted memory points must render after the transparent water base')
 const rainSource = readFileSync(new URL('./src/pool/three/rain-system.mjs', import.meta.url), 'utf8')
 assert.doesNotMatch(rainSource, /new THREE\.Mesh/,
   'rain and contact feedback must use shared point pools rather than per-drop mesh churn')
 assert.doesNotMatch(rainSource, /aPhase|segments:/,
   'rain must render independent short streaks instead of evenly spaced bead necklaces')
+assert.match(rainSource, /state\.spec\.lane === 0/,
+  'only the truthful lane may generate persisted-memory landing feedback')
+assert.match(rainSource, /LocalImpactRipples/,
+  'rain hits need a bounded local ripple pool instead of a global water texture')
 const waterSource = readFileSync(new URL('./src/pool/three/water-disk.mjs', import.meta.url), 'utf8')
-assert.match(waterSource, /uSceneColor/,
-  'water must sample the actual underwater scene color for normal-driven refraction')
+assert.doesNotMatch(waterSource, /shortDash|shardMask|shardCell|microSlope|uSceneColor|uRefraction/i,
+  'the final water path may not contain the rejected global streak or refraction layer')
+assert.match(waterSource, /transparent:\s*true/)
+assert.match(waterSource, /depthWrite:\s*false/)
 
-console.log('ok - persisted memories drive independent rain streaks, underwater refraction and a ring-free HalfFloat height field')
+console.log('ok - persisted memories render above a quiet transparent base with the rejected global streak layer absent')

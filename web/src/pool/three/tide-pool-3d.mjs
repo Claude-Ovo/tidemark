@@ -35,8 +35,6 @@ export const createTidePool3D = ({
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(POOL_3D_CONFIG.palette.abyss)
   scene.fog = new THREE.FogExp2(POOL_3D_CONFIG.palette.abyss, POOL_3D_CONFIG.fogDensity)
-  const underwaterScene = new THREE.Scene()
-  underwaterScene.background = new THREE.Color(POOL_3D_CONFIG.palette.abyss)
   const requestedStage = new URLSearchParams(window.location.search).get('visualStage')
   const visualStage = new Set(['rain', 'water', 'waves']).has(requestedStage) ? requestedStage : 'final'
 
@@ -56,24 +54,12 @@ export const createTidePool3D = ({
     new THREE.DirectionalLight(POOL_3D_CONFIG.palette.pearl, 1.35),
   )
   lighting.children[1].position.set(-4, 7, 2)
-  scene.add(water.mesh, rain.group, lighting)
-  underwaterScene.add(dataModel.group)
+  scene.add(water.mesh, dataModel.group, rain.group, lighting)
   water.mesh.visible = visualStage !== 'rain'
   rain.group.visible = visualStage === 'rain' || visualStage === 'final'
   rain.setContactFeedbackVisible(visualStage !== 'rain')
   dataModel.group.visible = visualStage === 'water' || visualStage === 'final'
 
-  const bufferSize = renderer.getDrawingBufferSize(new THREE.Vector2())
-  const underwaterTarget = new THREE.WebGLRenderTarget(bufferSize.x, bufferSize.y, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-    format: THREE.RGBAFormat,
-    depthBuffer: true,
-    stencilBuffer: false,
-  })
-  underwaterTarget.texture.name = 'UnderwaterMemorySceneColor'
-  underwaterTarget.texture.generateMipmaps = false
-  water.setSceneColor(underwaterTarget.texture, bufferSize.x, bufferSize.y)
   renderer.domElement.dataset.visualStage = visualStage
 
   let reduce = reducedMotion
@@ -101,15 +87,24 @@ export const createTidePool3D = ({
       requestFrame()
     },
   })
+  // Screenshot-only acceptance view. The default camera and every user camera
+  // interaction remain untouched when this query parameter is absent.
+  const cameraView = new URLSearchParams(window.location.search).get('cameraView')
+  if (cameraView === 'top') {
+    cameraRig.controls.autoRotate = false
+    cameraRig.controls.minPolarAngle = 0.01
+    cameraRig.controls.maxPolarAngle = 0.08
+    cameraRig.camera.position.set(0, 16.5, 0.01)
+    cameraRig.controls.target.set(0, 0, 0)
+    cameraRig.camera.lookAt(0, 0, 0)
+  }
+  renderer.domElement.dataset.cameraView = cameraView === 'top' ? 'top' : 'default'
 
   const resize = () => {
     const width = Math.max(1, host.clientWidth)
     const height = Math.max(1, host.clientHeight)
     renderer.setPixelRatio(cappedPixelRatio(window.devicePixelRatio))
     renderer.setSize(width, height, false)
-    renderer.getDrawingBufferSize(bufferSize)
-    underwaterTarget.setSize(bufferSize.x, bufferSize.y)
-    water.setSceneColor(underwaterTarget.texture, bufferSize.x, bufferSize.y)
     rain.resize(height)
     dataModel.resize(height)
     cameraRig.resize(width / height)
@@ -125,7 +120,7 @@ export const createTidePool3D = ({
     renderer.info.reset()
     const cameraMoved = cameraRig.update(now)
     const dataMoved = dataModel.update(seconds, reduce)
-    if (visualStage !== 'water') rain.update(seconds)
+    if (visualStage !== 'water') rain.update(seconds, cameraRig.camera)
     if (visualStage === 'waves' && seconds - lastStageImpactAt >= 0.10) {
       lastStageImpactAt = seconds
       for (let i = 0; i < 2; i++) {
@@ -140,12 +135,6 @@ export const createTidePool3D = ({
     }
     if (visualStage !== 'rain') heightField.update(seconds, reduce)
     water.update(seconds, reduce)
-    if (visualStage !== 'rain') {
-      renderer.setRenderTarget(underwaterTarget)
-      renderer.clear()
-      renderer.render(underwaterScene, cameraRig.camera)
-      renderer.setRenderTarget(null)
-    }
     renderer.render(scene, cameraRig.camera)
     measuredDrawCalls = renderer.info.render.calls
     measuredTriangles = renderer.info.render.triangles
@@ -258,11 +247,9 @@ export const createTidePool3D = ({
       rain.dispose()
       water.dispose()
       heightField.dispose()
-      underwaterTarget.dispose()
       renderer.dispose()
       renderer.domElement.remove()
       scene.clear()
-      underwaterScene.clear()
     },
   }
 }

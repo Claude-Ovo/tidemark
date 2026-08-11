@@ -9,7 +9,9 @@ const pointVertexShader = /* glsl */`
   void main() {
     vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 2.4, 9.0);
+    // Preserve the data-driven aSize while guaranteeing a 50%-screenshot-safe
+    // raster footprint. This is a display floor, not a new data encoding.
+    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 3.2, 10.0);
     vOpacity = aOpacity;
   }
 `
@@ -30,9 +32,9 @@ const pointFragmentShader = /* glsl */`
   }
 `
 
-// The visual points live below the surface and are seen only through the
-// water's scene-color refraction pass. Invisible anchors retain the exact
-// truthful XZ coordinate for hover, keyboard focus and detail selection.
+// Visual points keep their truthful below-surface position but render after the
+// almost transparent water base so submission readability never depends on a
+// refraction pass. Invisible anchors retain the same XZ interaction source.
 export const createDataModelGroup = () => {
   const cfg = POOL_3D_CONFIG
   const capacity = cfg.rain.maxMemoryStrands
@@ -56,13 +58,14 @@ export const createDataModelGroup = () => {
     fragmentShader: pointFragmentShader,
     transparent: true,
     depthWrite: false,
-    depthTest: true,
+    depthTest: false,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
   const points = new THREE.Points(geometry, material)
-  points.name = 'RefractedPersistedMemoryPoints'
+  points.name = 'ReadablePersistedMemoryPoints'
   points.frustumCulled = false
+  points.renderOrder = 2
   group.add(points)
 
   const createNode = (particle) => {
