@@ -2,32 +2,24 @@ import * as THREE from 'three'
 import { POOL_3D_CONFIG, polarToWorld } from './config.mjs'
 
 const pointVertexShader = /* glsl */`
-  attribute float aOpacity;
-  attribute float aSize;
-  uniform float uViewportHeight;
-  varying float vOpacity;
+  attribute float aSizeCss;
+  attribute float aScale;
+  uniform float uPixelRatio;
   void main() {
     vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    // Preserve the data-driven aSize while guaranteeing a 50%-screenshot-safe
-    // raster footprint. This is a display floor, not a new data encoding.
-    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 3.2, 10.0);
-    vOpacity = aOpacity;
+    gl_PointSize = clamp(aSizeCss * aScale * uPixelRatio, 8.0 * uPixelRatio, 14.3 * uPixelRatio);
   }
 `
 
 const pointFragmentShader = /* glsl */`
-  uniform vec3 uPearl;
-  uniform vec3 uColdGlint;
-  varying float vOpacity;
+  uniform vec3 uPointWhite;
   void main() {
     vec2 point = gl_PointCoord - 0.5;
     float radial = length(point) * 2.0;
-    float core = 1.0 - smoothstep(0.0, 0.24, radial);
-    float halo = (1.0 - smoothstep(0.08, 1.0, radial)) * 0.38;
-    float alpha = max(core, halo) * vOpacity;
-    if (alpha < 0.012) discard;
-    gl_FragColor = vec4(mix(uColdGlint, uPearl, core), alpha);
+    float alpha = 1.0 - smoothstep(0.88, 1.0, radial);
+    if (alpha < 0.01) discard;
+    gl_FragColor = vec4(uPointWhite, alpha);
     #include <colorspace_fragment>
   }
 `
@@ -37,20 +29,19 @@ const pointFragmentShader = /* glsl */`
 // refraction pass. Invisible anchors retain the same XZ interaction source.
 export const createDataModelGroup = () => {
   const cfg = POOL_3D_CONFIG
-  const capacity = cfg.rain.maxMemoryStrands
+  const capacity = cfg.maxMemoryPoints
   const group = new THREE.Group()
   group.name = 'UnderwaterMemoryField'
   const nodes = new Map()
 
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(capacity * 3), 3))
-  geometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(capacity), 1))
-  geometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(capacity), 1))
+  geometry.setAttribute('aSizeCss', new THREE.BufferAttribute(new Float32Array(capacity), 1))
+  geometry.setAttribute('aScale', new THREE.BufferAttribute(new Float32Array(capacity).fill(1), 1))
   geometry.setDrawRange(0, 0)
   const uniforms = {
-    uViewportHeight: { value: Math.max(1, window.innerHeight) },
-    uPearl: { value: new THREE.Color(cfg.palette.pearl) },
-    uColdGlint: { value: new THREE.Color(cfg.palette.coldGlint) },
+    uPixelRatio: { value: 1 },
+    uPointWhite: { value: new THREE.Color(0xf8fcff) },
   }
   const material = new THREE.ShaderMaterial({
     uniforms,
@@ -59,13 +50,13 @@ export const createDataModelGroup = () => {
     transparent: true,
     depthWrite: false,
     depthTest: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     toneMapped: false,
   })
   const points = new THREE.Points(geometry, material)
   points.name = 'ReadablePersistedMemoryPoints'
   points.frustumCulled = false
-  points.renderOrder = 2
+  points.renderOrder = 20
   group.add(points)
 
   const createNode = (particle) => {
@@ -79,8 +70,7 @@ export const createDataModelGroup = () => {
 
   const writePoints = () => {
     const positions = geometry.attributes.position.array
-    const opacity = geometry.attributes.aOpacity.array
-    const sizes = geometry.attributes.aSize.array
+    const sizes = geometry.attributes.aSizeCss.array
     let index = 0
     for (const node of nodes.values()) {
       const point = polarToWorld(node.userData.particle)
@@ -88,14 +78,12 @@ export const createDataModelGroup = () => {
       positions[index * 3] = point.x
       positions[index * 3 + 1] = cfg.water.underwaterY
       positions[index * 3 + 2] = point.z
-      opacity[index] = cfg.water.underwaterPointTransmission * (0.80 + strength * 0.20)
-      sizes[index] = 0.075 + strength * 0.045
+      sizes[index] = 8 + strength * 3
       index++
     }
     geometry.setDrawRange(0, index)
     geometry.attributes.position.needsUpdate = true
-    geometry.attributes.aOpacity.needsUpdate = true
-    geometry.attributes.aSize.needsUpdate = true
+    geometry.attributes.aSizeCss.needsUpdate = true
   }
 
   const setParticles = (particles) => {
@@ -118,7 +106,7 @@ export const createDataModelGroup = () => {
     for (const node of nodes.values()) {
       const point = polarToWorld(node.userData.particle)
       if (node.position.x !== point.x || node.position.z !== point.z) moved = true
-      node.position.set(point.x, point.y, point.z)
+      node.position.set(point.x, cfg.water.underwaterY, point.z)
     }
     if (moved) writePoints()
     return moved
@@ -140,7 +128,15 @@ export const createDataModelGroup = () => {
     points,
     setGuides() {},
     setParticles,
-    resize(height) { uniforms.uViewportHeight.value = Math.max(1, Number(height) || 1) },
+    resize(_height, pixelRatio = 1) { uniforms.uPixelRatio.value = Math.max(1, Number(pixelRatio) || 1) },
+    setInteractionState({ hoveredId = null, selectedId = null } = {}) {
+      const scales = geometry.attributes.aScale.array
+      let index = 0
+      for (const [id] of nodes) {
+        scales[index++] = id === hoveredId ? 1.3 : id === selectedId ? 1.18 : 1
+      }
+      geometry.attributes.aScale.needsUpdate = true
+    },
     update,
     project,
     metrics() { return { underwaterPointCount: geometry.drawRange.count } },

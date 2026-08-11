@@ -87,9 +87,10 @@
   #curve { width: 100%; height: 72px; margin: 4px 0; }
   /* a11y overlay：每粒子一个真实可聚焦 button（canvas 命中配同步 DOM，契约） */
   #overlay { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
-  #overlay button { position: absolute; left: 0; top: 0; width: 22px; height: 22px;
+  #overlay button { position: absolute; left: 0; top: 0; width: 36px; height: 36px;
     background: transparent; border: none; border-radius: 50%; pointer-events: auto; cursor: pointer; padding: 0; }
   #overlay button:focus-visible { outline: 1.5px solid rgba(170,215,255,.9); outline-offset: 2px; }
+  @media (pointer: coarse) { #overlay button { width: 44px; height: 44px; } }
   @media (max-width: 480px) {
     #hud .thesis { font-size: 13px; }
     #legend { font-size: 10px; line-height: 1.7; }
@@ -287,7 +288,6 @@ const draw = (now = 0) => {
       fade: fadeR,
     })
     threePool.syncRipples(ripples)
-    threePool.syncDrops(drops)
     threePool.syncRings(rings)
     motion.consumeDirty()
     return
@@ -404,7 +404,13 @@ const drawer = document.getElementById('drawer')
 const overlay = document.getElementById('overlay')
 const memIndex = new Map()      // memory_id -> 快照 memory 行
 let drawerOpener = null         // ESC 后焦点归还
+let hoveredMemoryId = null, selectedMemoryId = null
 const LAYER_ZH = { anchor: '锚定层', active_tide: '活动潮带', receding_edge: '退潮边缘' }
+
+const syncPointInteraction = () => threePool?.setPointInteraction({
+  hoveredId: hoveredMemoryId,
+  selectedId: selectedMemoryId,
+})
 
 const anchorXY = (p) => {
   const projected = threePool?.active ? threePool.projectParticle(p) : null
@@ -523,6 +529,9 @@ const guard = makeDrawerGuard()
 const scrim = document.getElementById('scrim')
 scrim.addEventListener('click', () => closeDrawer())
 const openDrawer = async (p, opener, selectedEvent = null) => {
+  selectedMemoryId = p.memory_id
+  drawer.dataset.selectedMemoryId = p.memory_id
+  syncPointInteraction()
   drawerOpener = opener ?? drawerOpener
   const token = guard.begin()
   drawer.removeAttribute('inert'); drawer.setAttribute('aria-hidden', 'false')
@@ -589,6 +598,9 @@ const openDrawer = async (p, opener, selectedEvent = null) => {
   newClose.focus()          // 二审 P1-1a：innerHTML 重写销毁了持焦的旧 close——稳定详情态显式移焦
 }
 const openEventOnly = (event, opener) => {
+  selectedMemoryId = null
+  delete drawer.dataset.selectedMemoryId
+  syncPointInteraction()
   drawerOpener = opener ?? drawerOpener
   guard.begin()
   drawer.removeAttribute('inert'); drawer.setAttribute('aria-hidden', 'false')
@@ -614,15 +626,33 @@ const closeDrawer = () => {
   drawer.setAttribute('inert', ''); drawer.setAttribute('aria-hidden', 'true')  // 关闭态移出 Tab/可访问树
   overlay.removeAttribute('inert')                  // 先还按钮可聚焦，再归还焦点
   if (drawerOpener) { drawerOpener.focus(); drawerOpener = null }
+  selectedMemoryId = null
+  delete drawer.dataset.selectedMemoryId
+  syncPointInteraction()
 }
 addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDrawer(); hideHover() } })
 
 // a11y overlay：按钮与 particle 生命周期同步（P1-5）——新粒子即时得按钮，
 // 位置用 transform 在【同一 draw 帧】跟随 presentation pr（不写 layout 属性）
 const btnOf = new Map()   // particle -> button
+const hitDiameter = () => matchMedia('(pointer: coarse)').matches ? 44 : 36
 const placeBtn = (b, p) => {
   const [x, y] = anchorXY(p)
-  b.style.transform = `translate(${(x - 11).toFixed(1)}px, ${(y - 11).toFixed(1)}px)`
+  const half = hitDiameter() / 2
+  b.style.transform = `translate(${(x - half).toFixed(1)}px, ${(y - half).toFixed(1)}px)`
+}
+const nearestParticleAt = (clientX, clientY, fallback) => {
+  let best = fallback, bestDistance = Infinity
+  const radius = hitDiameter() / 2
+  for (const candidate of particles) {
+    const [x, y] = anchorXY(candidate)
+    const distance = Math.hypot(clientX - x, clientY - y)
+    if (distance <= radius && distance < bestDistance) {
+      best = candidate
+      bestDistance = distance
+    }
+  }
+  return best
 }
 // 二审 P1-2：粒子入场收口成一个函数——三条路径（drop 完成/切 reduce flush/初始 reduce 直落）
 // 共用，粒子与按钮永远同步
@@ -635,12 +665,22 @@ const attachParticle = (p) => {
 const addOverlayButton = (p) => {
   const m = memIndex.get(p.memory_id)
   const b = document.createElement('button')
+  b.dataset.memoryId = p.memory_id
+  b.dataset.layer = p.layer
   b.setAttribute('aria-label', `${LAYER_ZH[p.layer]} 记忆：${(m?.content_preview ?? '').slice(0, 40)}`)
-  b.addEventListener('mouseenter', (ev) => hoverIntent(p, [ev.clientX, ev.clientY]))  // 卡出现在鼠标位（Owner 裁定）
-  b.addEventListener('mouseleave', hideHover)
-  b.addEventListener('focus', () => showHover(p))          // 键盘路径：无坐标，贴粒子 anchor
-  b.addEventListener('blur', hideHover)
-  b.addEventListener('click', (ev) => openDrawer(p, ev.currentTarget))
+  b.addEventListener('mouseenter', (ev) => {
+    const nearest = nearestParticleAt(ev.clientX, ev.clientY, p)
+    hoveredMemoryId = nearest.memory_id
+    syncPointInteraction()
+    hoverIntent(nearest, [ev.clientX, ev.clientY])
+  })
+  b.addEventListener('mouseleave', () => { hoveredMemoryId = null; syncPointInteraction(); hideHover() })
+  b.addEventListener('focus', () => { hoveredMemoryId = p.memory_id; syncPointInteraction(); showHover(p) })
+  b.addEventListener('blur', () => { hoveredMemoryId = null; syncPointInteraction(); hideHover() })
+  b.addEventListener('click', (ev) => {
+    const target = ev.detail > 0 ? nearestParticleAt(ev.clientX, ev.clientY, p) : p
+    openDrawer(target, btnOf.get(target) ?? ev.currentTarget)
+  })
   placeBtn(b, p)
   overlay.append(b)
   btnOf.set(p, b)
@@ -668,16 +708,15 @@ const enableThreePreview = async () => {
       host: stage3d,
       reducedMotion: REDUCED,
       onProjectionFrame: () => syncOverlay(),
-      onSelectEvent: ({ event }) => selectLifecycleEvent(event, null),
       onContextState: (state) => {
         setThreeVisible(state === 'restored')
         if (state === 'lost') scriptline.textContent = 'WebGL context lost，已即时回落 2D 潮池。'
-        else scriptline.textContent = '3D HEIGHTFIELD · 持久化事件入水 · 双击复位相机'
+        else scriptline.textContent = '3D HEIGHTFIELD · 固定三分之四视角 · 持久化事件入水'
         draw(performance.now())
       },
     })
     setThreeVisible(true)
-    scriptline.textContent = '3D HEIGHTFIELD · 持久化事件入水 · 双击复位相机'
+    scriptline.textContent = '3D HEIGHTFIELD · 固定三分之四视角 · 持久化事件入水'
   } catch (error) {
     threePool?.dispose()
     threePool = null
