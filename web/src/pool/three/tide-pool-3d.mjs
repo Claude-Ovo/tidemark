@@ -2,17 +2,23 @@ import * as THREE from 'three'
 import { createCameraRig } from './camera-rig.mjs'
 import { POOL_3D_CONFIG, cappedPixelRatio, polarToWorld } from './config.mjs'
 import { createDataModelGroup } from './data-model-group.mjs'
+import { createHeightField } from './height-field.mjs'
 import { createRainSystem } from './rain-system.mjs'
-import { createTideMarkGroup } from './tide-mark-group.mjs'
 import { createWaterDisk } from './water-disk.mjs'
 
 export const webglAvailable = () => {
   try {
     const canvas = document.createElement('canvas')
-    return !!(canvas.getContext('webgl2') || canvas.getContext('webgl'))
+    return !!canvas.getContext('webgl2')
   } catch { return false }
 }
-export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFrame, onContextState }) => {
+export const createTidePool3D = ({
+  host,
+  reducedMotion = false,
+  onProjectionFrame,
+  onContextState,
+  onSelectEvent,
+}) => {
   if (!host || !webglAvailable()) throw new Error('webgl_unavailable')
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' })
@@ -22,19 +28,19 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.25
   renderer.domElement.setAttribute('aria-hidden', 'true')
-  renderer.domElement.dataset.poolRenderer = 'three-tier1'
+  renderer.domElement.dataset.poolRenderer = 'three-heightfield'
   host.append(renderer.domElement)
 
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(POOL_3D_CONFIG.palette.abyss)
   scene.fog = new THREE.FogExp2(POOL_3D_CONFIG.palette.abyss, POOL_3D_CONFIG.fogDensity)
 
-  const water = createWaterDisk()
+  const waterRadius = POOL_3D_CONFIG.worldRadius * POOL_3D_CONFIG.waterRadiusScale
+  const heightField = createHeightField({ renderer, radius: waterRadius })
+  const water = createWaterDisk({ radius: waterRadius, heightField })
   const dataModel = createDataModelGroup()
-  const tideMarks = createTideMarkGroup()
   const rain = createRainSystem({
-    radius: water.radius,
-    onImpact: (x, z, strength, seconds) => water.addImpact(x, z, seconds, strength, 'ambient'),
+    onImpact: ({ x, z, strength, seconds }) => water.addImpact(x, z, seconds, strength, 'semantic'),
   })
   rain.setReducedMotion(reducedMotion)
   const lighting = new THREE.Group()
@@ -44,7 +50,7 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
     new THREE.DirectionalLight(POOL_3D_CONFIG.palette.pearl, 1.35),
   )
   lighting.children[1].position.set(-4, 7, 2)
-  scene.add(water.mesh, dataModel.group, tideMarks.group, rain.group, lighting)
+  scene.add(water.mesh, dataModel.group, rain.group, lighting)
 
   let reduce = reducedMotion
   let contextLost = false
@@ -53,19 +59,14 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
   let particles = []
   let rippleKeys = new Set()
 
-  const raycaster = new THREE.Raycaster()
-  const pointer = new THREE.Vector2()
   const cameraRig = createCameraRig({
     domElement: renderer.domElement,
     aspect: Math.max(1, host.clientWidth) / Math.max(1, host.clientHeight),
     reducedMotion: reduce,
     onProjectionChange: () => requestFrame(),
     onTap: (clientX, clientY) => {
-      const rect = renderer.domElement.getBoundingClientRect()
-      pointer.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
-      raycaster.setFromCamera(pointer, cameraRig.camera)
-      const hit = raycaster.intersectObject(water.mesh, false)[0]
-      if (hit) water.addImpact(hit.point.x, hit.point.z, performance.now() / 1000, 0.72)
+      const selected = rain.pick(clientX, clientY, cameraRig.camera, renderer.domElement)
+      if (selected) onSelectEvent?.(selected)
       requestFrame()
     },
   })
@@ -88,9 +89,9 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
     const seconds = now / 1000
     const cameraMoved = cameraRig.update(now)
     const dataMoved = dataModel.update(seconds, reduce)
-    water.update(seconds, reduce)
     rain.update(seconds)
-    tideMarks.update(now, reduce)
+    heightField.update(seconds, reduce)
+    water.update(seconds, reduce)
     renderer.render(scene, cameraRig.camera)
     if (cameraMoved || dataMoved || cameraRig.consumeProjectionDirty()) onProjectionFrame?.()
     if (!reduce || cameraRig.controls.autoRotate) requestFrame()
@@ -135,25 +136,39 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
       requestFrame()
     },
     syncRipples(ripples) {
-      const nextKeys = new Set()
-      for (const ripple of ripples) {
-        const key = `${ripple.t0}|${ripple.theta}|${ripple.r}`
-        nextKeys.add(key)
-        if (rippleKeys.has(key)) continue
-        const point = polarToWorld({ pr: ripple.r, theta: ripple.theta })
-        water.addImpact(point.x, point.z, ripple.t0 / 1000, ripple.small ? 0.42 : 0.9)
-      }
-      rippleKeys = nextKeys
+      rippleKeys = new Set(ripples.map(ripple => `${ripple.t0}|${ripple.theta}|${ripple.r}`))
       requestFrame()
     },
     syncDrops(drops) {
-      rain.syncRememberDrops(drops)
+      for (const drop of drops) {
+        if (!drop.spawn?.memory_id) continue
+        const event = {
+          kind: 'remember',
+          event_id: drop.spawn.memory_id,
+          occurred_at: new Date(drop.t0).toISOString(),
+          memory_ids: [drop.spawn.memory_id],
+        }
+        rain.emitStrand(event, polarToWorld(drop.spawn), { durationMs: POOL_3D_CONFIG.rain.rememberFallMs })
+      }
       requestFrame()
     },
     syncRings(rings) {
-      tideMarks.setRings(rings)
+      water.syncTideMarks(rings)
       requestFrame()
     },
+    emitLifecycleEvent(event, targetParticles = []) {
+      const points = targetParticles.map(particle => polarToWorld(particle))
+      const target = points.length
+        ? {
+            x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+            z: points.reduce((sum, point) => sum + point.z, 0) / points.length,
+          }
+        : { x: 0, z: 0 }
+      const emitted = rain.emitStrand(event, target)
+      if (emitted) requestFrame()
+      return emitted
+    },
+    metrics() { return { strands: rain.metrics(), heightField: heightField.metrics() } },
     projectParticle(particle) { return dataModel.project(particle, cameraRig.camera, renderer.domElement) },
     requestRender: requestFrame,
     resize,
@@ -166,9 +181,9 @@ export const createTidePool3D = ({ host, reducedMotion = false, onProjectionFram
       renderer.domElement.removeEventListener('webglcontextrestored', restored)
       cameraRig.dispose()
       dataModel.dispose()
-      tideMarks.dispose()
       rain.dispose()
       water.dispose()
+      heightField.dispose()
       renderer.dispose()
       renderer.domElement.remove()
       scene.clear()

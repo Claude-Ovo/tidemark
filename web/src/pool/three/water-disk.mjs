@@ -1,28 +1,8 @@
 import * as THREE from 'three'
 import { POOL_3D_CONFIG } from './config.mjs'
+import { selectShaderTideMarks } from './tide-mark-group.mjs'
 
-const MAX_IMPACTS = POOL_3D_CONFIG.water.impactSlots
-const AMBIENT_IMPACTS = POOL_3D_CONFIG.water.ambientImpactSlots
-
-// Ambient rain is intentionally noisy, while recall/remember/click impacts carry
-// product meaning. Separate rings prevent a storm from evicting a semantic wave
-// before its configured lifetime has elapsed.
-export const createImpactSlotAllocator = ({ ambientSlots, semanticSlots }) => {
-  if (!Number.isInteger(ambientSlots) || ambientSlots < 1
-      || !Number.isInteger(semanticSlots) || semanticSlots < 1) {
-    throw new Error('impact slot partitions must be positive integers')
-  }
-  let ambientCursor = 0
-  let semanticCursor = 0
-  return {
-    total: ambientSlots + semanticSlots,
-    next(kind = 'semantic') {
-      if (kind === 'ambient') return ambientCursor++ % ambientSlots
-      if (kind === 'semantic') return ambientSlots + semanticCursor++ % semanticSlots
-      throw new Error(`unknown impact kind: ${kind}`)
-    },
-  }
-}
+const MAX_TIDE_MARKS = POOL_3D_CONFIG.water.tideMarkSlots
 
 export const createRadialDiskGeometry = (radius, radialSegments, angularSegments) => {
   const radial = Math.max(2, Math.floor(radialSegments))
@@ -63,66 +43,26 @@ export const createRadialDiskGeometry = (radius, radialSegments, angularSegments
 }
 
 const vertexShader = /* glsl */`
-  uniform float uTime;
-  uniform float uRadius;
-  uniform vec4 uImpacts[${MAX_IMPACTS}];
-  uniform float uAmbientImpactLifetime;
-  uniform float uSemanticImpactLifetime;
-  uniform float uDimpleDuration;
-  uniform float uDimpleDisplacement;
-  uniform float uImpactAmplitude;
-  uniform float uAmbientDisplacement;
-  uniform float uSemanticDisplacement;
-  uniform float uWaveSpeed;
-  uniform float uWaveNumber;
-  uniform float uAmbientAmplitude;
+  uniform sampler2D uHeightField;
+  uniform float uHeightScale;
+  varying vec2 vSurfaceUv;
   varying vec3 vWorldPosition;
-  varying vec3 vWorldNormal;
-  varying float vRippleEnergy;
-
-  float waterHeight(vec2 p, out float energy) {
-    float edge = 1.0 - smoothstep(uRadius * 0.78, uRadius, length(p));
-    float h = (sin(p.x * 1.16 + p.y * 0.24 + uTime * 0.20)
-      + sin(p.y * 0.91 - p.x * 0.18 - uTime * 0.16)) * uAmbientAmplitude;
-    energy = 0.0;
-    for (int i = 0; i < ${MAX_IMPACTS}; i++) {
-      vec4 impact = uImpacts[i];
-      float age = uTime - impact.z;
-      float lifetime = i < ${AMBIENT_IMPACTS} ? uAmbientImpactLifetime : uSemanticImpactLifetime;
-      float alive = step(0.0, age) * step(age, lifetime);
-      float d = distance(p, impact.xy);
-      float front = age * uWaveSpeed;
-      float delta = d - front;
-      float packet = exp(-delta * delta * 2.8) * exp(-(age / max(lifetime, 0.001)) * 1.8);
-      float pulse = sin(delta * uWaveNumber) * packet;
-      float dimple = exp(-d * d * 72.0) * exp(-age * 12.0) * step(age, uDimpleDuration);
-      float displacement = i < ${AMBIENT_IMPACTS} ? uAmbientDisplacement : uSemanticDisplacement;
-      h += pulse * impact.w * uImpactAmplitude * displacement * alive * edge;
-      h -= dimple * impact.w * uImpactAmplitude * uDimpleDisplacement * alive * edge;
-      energy += (abs(pulse) + dimple) * impact.w * alive;
-    }
-    return h * edge;
-  }
 
   void main() {
-    vec3 displaced = position;
-    float eps = 0.035;
-    float energy;
-    float unusedEnergy;
-    float h = waterHeight(position.xz, energy);
-    float hx = waterHeight(position.xz + vec2(eps, 0.0), unusedEnergy);
-    float hz = waterHeight(position.xz + vec2(0.0, eps), unusedEnergy);
-    displaced.y += h;
-    vec3 localNormal = normalize(vec3(h - hx, eps, h - hz));
+    vSurfaceUv = uv;
+    float height = texture2D(uHeightField, uv).r * uHeightScale;
+    vec3 displaced = position + vec3(0.0, height, 0.0);
     vec4 world = modelMatrix * vec4(displaced, 1.0);
     vWorldPosition = world.xyz;
-    vWorldNormal = normalize(mat3(modelMatrix) * localNormal);
-    vRippleEnergy = energy;
     gl_Position = projectionMatrix * viewMatrix * world;
   }
 `
 
 const fragmentShader = /* glsl */`
+  uniform sampler2D uHeightField;
+  uniform vec2 uHeightTexel;
+  uniform float uHeightScale;
+  uniform float uNormalStrength;
   uniform float uTime;
   uniform vec3 uAbyss;
   uniform vec3 uDeepBlue;
@@ -133,88 +73,76 @@ const fragmentShader = /* glsl */`
   uniform float uFogDensity;
   uniform float uRadius;
   uniform float uEdgeFadeStart;
-  uniform vec4 uImpacts[${MAX_IMPACTS}];
-  uniform float uAmbientImpactLifetime;
-  uniform float uSemanticImpactLifetime;
-  uniform float uWaveSpeed;
-  uniform float uRingWidth;
-  uniform float uRingIntensity;
-  uniform float uSecondaryRingIntensity;
+  uniform int uMarkCount;
+  uniform vec4 uMarks[${MAX_TIDE_MARKS}];
+  uniform float uMarkStay;
+  uniform float uMarkFade;
+  varying vec2 vSurfaceUv;
   varying vec3 vWorldPosition;
-  varying vec3 vWorldNormal;
-  varying float vRippleEnergy;
-
-  float lineRing(float distanceFromImpact, float radius, float width) {
-    return 1.0 - smoothstep(width, width * 2.6, abs(distanceFromImpact - radius));
-  }
 
   void main() {
-    vec3 normal = normalize(vWorldNormal);
+    float left = texture2D(uHeightField, vSurfaceUv - vec2(uHeightTexel.x, 0.0)).r;
+    float right = texture2D(uHeightField, vSurfaceUv + vec2(uHeightTexel.x, 0.0)).r;
+    float down = texture2D(uHeightField, vSurfaceUv - vec2(0.0, uHeightTexel.y)).r;
+    float up = texture2D(uHeightField, vSurfaceUv + vec2(0.0, uHeightTexel.y)).r;
+    vec3 localNormal = normalize(vec3(
+      (left - right) * uNormalStrength,
+      2.0 * uHeightTexel.x / max(uHeightScale, 0.0001),
+      (down - up) * uNormalStrength
+    ));
+    vec3 normal = normalize(mat3(modelMatrix) * localNormal);
     vec3 viewDir = normalize(cameraPosition - vWorldPosition);
-    vec3 lightDir = normalize(vec3(-0.46, 0.86, 0.22));
+    vec3 lightDir = normalize(vec3(-0.36, 0.90, 0.24));
+    vec3 halfVector = normalize(viewDir + lightDir);
     float facing = clamp(dot(normal, viewDir), 0.0, 1.0);
-    float fresnel = pow(1.0 - facing, 3.2);
-    float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 86.0);
-    vec2 surface = vWorldPosition.xz;
-    float ringGlow = 0.0;
-    for (int i = 0; i < ${MAX_IMPACTS}; i++) {
-      vec4 impact = uImpacts[i];
-      float age = uTime - impact.z;
-      float lifetime = i < ${AMBIENT_IMPACTS} ? uAmbientImpactLifetime : uSemanticImpactLifetime;
-      float alive = step(0.0, age) * step(age, lifetime);
-      float fade = pow(max(0.0, 1.0 - age / max(lifetime, 0.001)), 1.65);
-      float radius = age * uWaveSpeed;
-      float distanceFromImpact = distance(surface, impact.xy);
-      float primary = lineRing(distanceFromImpact, radius, uRingWidth);
-      float secondaryRadius = max(0.0, radius - 0.13);
-      float secondary = lineRing(distanceFromImpact, secondaryRadius, uRingWidth * 0.82)
-        * step(0.16, radius) * uSecondaryRingIntensity;
-      ringGlow += (primary + secondary) * impact.w * fade * alive;
+    float fresnel = pow(1.0 - facing, 3.6);
+    float needle = pow(max(dot(normal, halfVector), 0.0), 168.0);
+    float broad = pow(max(dot(normal, halfVector), 0.0), 34.0);
+    float fieldEnergy = min(1.0, (abs(left - right) + abs(down - up)) * 28.0);
+
+    vec3 markLight = vec3(0.0);
+    for (int i = 0; i < ${MAX_TIDE_MARKS}; i++) {
+      if (i >= uMarkCount) break;
+      vec4 mark = uMarks[i];
+      float age = max(0.0, uTime - mark.z);
+      float fade = age < uMarkStay ? 1.0 : max(0.0, 1.0 - (age - uMarkStay) / max(uMarkFade, 0.001));
+      vec2 delta = vWorldPosition.xz - mark.xy;
+      float slash = exp(-(delta.x * delta.x * 68.0 + delta.y * delta.y * 260.0));
+      float grain = 0.62 + 0.38 * sin((delta.x * 0.73 + delta.y) * 118.0 + mark.z * 7.0);
+      if (mark.w > 0.0) markLight += uColdGlint * slash * grain * fade * 0.42;
+      else markLight -= uDeepBlue * slash * fade * 0.22;
     }
 
-    float centralMirror = exp(-dot(surface, surface) * 0.12);
-    vec3 color = mix(uAbyss, uDeepBlue, 0.055 + centralMirror * 0.055 + fresnel * 0.08);
-    color += uSteel * fresnel * 0.052;
-    color += uPearl * specular * 0.32;
-    color += uColdGlint * min(ringGlow * uRingIntensity, 1.35);
+    float centralMirror = exp(-dot(vWorldPosition.xz, vWorldPosition.xz) * 0.075);
+    vec3 color = mix(uAbyss, uDeepBlue, 0.38 + centralMirror * 0.14 + fresnel * 0.18);
+    color += uSteel * (0.018 + fresnel * 0.035);
+    color += uPearl * needle * 0.78;
+    color += uColdGlint * broad * fieldEnergy * 0.20;
+    color += markLight;
 
     float distanceToCamera = length(cameraPosition - vWorldPosition);
     float fog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    color = mix(color, uFogColor, clamp(fog, 0.0, 0.35));
+    color = mix(color, uFogColor, clamp(fog, 0.0, 0.34));
     float radial = length(vWorldPosition.xz) / uRadius;
     float edgeAlpha = 1.0 - smoothstep(uEdgeFadeStart, 1.0, radial);
-    gl_FragColor = vec4(color, edgeAlpha * 0.96);
+    gl_FragColor = vec4(color, edgeAlpha * 0.97);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
 `
 
-export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_CONFIG.waterRadiusScale } = {}) => {
-  const allocator = createImpactSlotAllocator({
-    ambientSlots: POOL_3D_CONFIG.water.ambientImpactSlots,
-    semanticSlots: POOL_3D_CONFIG.water.semanticImpactSlots,
-  })
-  if (allocator.total !== MAX_IMPACTS) throw new Error('impact slot partitions must fill impactSlots')
-  // One vec4 per impact keeps the vertex-uniform budget viable on WebGL1:
-  // center.xy + time + strength. Lifetime is derived from the fixed partition.
-  const impacts = Array.from({ length: MAX_IMPACTS }, () => new THREE.Vector4(999, 999, -999, 0))
+export const createWaterDisk = ({
+  radius = POOL_3D_CONFIG.worldRadius * POOL_3D_CONFIG.waterRadiusScale,
+  heightField,
+} = {}) => {
+  if (!heightField) throw new Error('heightfield_required')
+  const markVectors = Array.from({ length: MAX_TIDE_MARKS }, () => new THREE.Vector4(999, 999, -999, 0))
   const uniforms = {
+    uHeightField: { value: heightField.texture },
+    uHeightTexel: { value: new THREE.Vector2(1 / heightField.resolution, 1 / heightField.resolution) },
+    uHeightScale: { value: POOL_3D_CONFIG.water.heightScale },
+    uNormalStrength: { value: POOL_3D_CONFIG.water.normalStrength },
     uTime: { value: 0 },
-    uRadius: { value: radius },
-    uImpacts: { value: impacts },
-    uAmbientImpactLifetime: { value: POOL_3D_CONFIG.water.ambientImpactLifetime },
-    uSemanticImpactLifetime: { value: POOL_3D_CONFIG.water.semanticImpactLifetime },
-    uDimpleDuration: { value: POOL_3D_CONFIG.water.dimpleDuration },
-    uDimpleDisplacement: { value: POOL_3D_CONFIG.water.dimpleDisplacement },
-    uImpactAmplitude: { value: POOL_3D_CONFIG.water.impactAmplitude },
-    uAmbientDisplacement: { value: POOL_3D_CONFIG.water.ambientDisplacement },
-    uSemanticDisplacement: { value: POOL_3D_CONFIG.water.semanticDisplacement },
-    uWaveSpeed: { value: POOL_3D_CONFIG.water.waveSpeed },
-    uWaveNumber: { value: POOL_3D_CONFIG.water.waveNumber },
-    uRingWidth: { value: POOL_3D_CONFIG.water.ringWidth },
-    uRingIntensity: { value: POOL_3D_CONFIG.water.ringIntensity },
-    uSecondaryRingIntensity: { value: POOL_3D_CONFIG.water.secondaryRingIntensity },
-    uAmbientAmplitude: { value: POOL_3D_CONFIG.water.ambientAmplitude },
     uAbyss: { value: new THREE.Color(POOL_3D_CONFIG.palette.abyss) },
     uDeepBlue: { value: new THREE.Color(POOL_3D_CONFIG.palette.deepBlue) },
     uSteel: { value: new THREE.Color(POOL_3D_CONFIG.palette.steel) },
@@ -222,7 +150,12 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
     uColdGlint: { value: new THREE.Color(POOL_3D_CONFIG.palette.coldGlint) },
     uFogColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.abyss) },
     uFogDensity: { value: POOL_3D_CONFIG.fogDensity },
+    uRadius: { value: radius },
     uEdgeFadeStart: { value: POOL_3D_CONFIG.water.edgeFadeStart },
+    uMarkCount: { value: 0 },
+    uMarks: { value: markVectors },
+    uMarkStay: { value: POOL_3D_CONFIG.tideMark.stayMs / 1000 },
+    uMarkFade: { value: POOL_3D_CONFIG.tideMark.fadeMs / 1000 },
   }
   const geometry = createRadialDiskGeometry(
     radius,
@@ -239,7 +172,7 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
     toneMapped: true,
   })
   const mesh = new THREE.Mesh(geometry, material)
-  mesh.name = 'WaterDisk'
+  mesh.name = 'HeightFieldWater'
   mesh.renderOrder = 0
 
   let frozenSeconds = 0
@@ -248,23 +181,30 @@ export const createWaterDisk = ({ radius = POOL_3D_CONFIG.worldRadius * POOL_3D_
     mesh,
     radius,
     update(seconds, reducedMotion = false) {
+      uniforms.uHeightField.value = heightField.texture
       if (reducedMotion) {
         if (!wasReduced) frozenSeconds = uniforms.uTime.value
         uniforms.uTime.value = frozenSeconds
-      } else {
-        uniforms.uTime.value = seconds
-      }
+      } else uniforms.uTime.value = seconds
       wasReduced = reducedMotion
     },
-    addImpact(x, z, seconds, strength = 1, kind = 'semantic') {
-      const slot = allocator.next(kind)
-      impacts[slot].set(
-        x,
-        z,
-        seconds,
-        Math.max(0, Math.min(1, strength)),
-      )
+    addImpact(x, z, _seconds, strength = 1, kind = 'semantic') {
+      const base = kind === 'ambient'
+        ? POOL_3D_CONFIG.water.ambientImpact
+        : POOL_3D_CONFIG.water.semanticImpact
+      heightField.addImpact(x, z, Math.max(0.05, Number(strength)) * base)
     },
-    dispose() { geometry.dispose(); material.dispose() },
+    syncTideMarks(rings) {
+      const marks = selectShaderTideMarks(rings, MAX_TIDE_MARKS)
+      uniforms.uMarkCount.value = marks.length
+      for (let i = 0; i < MAX_TIDE_MARKS; i++) {
+        const mark = marks[i]
+        markVectors[i].set(mark?.x ?? 999, mark?.z ?? 999, mark?.born ?? -999, mark?.polarity ?? 0)
+      }
+    },
+    dispose() {
+      geometry.dispose()
+      material.dispose()
+    },
   }
 }

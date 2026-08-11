@@ -1,242 +1,214 @@
 import * as THREE from 'three'
-import { POOL_3D_CONFIG, polarToWorld } from './config.mjs'
+import { POOL_3D_CONFIG } from './config.mjs'
 
-const mulberry32 = (seed) => {
-  let value = seed >>> 0
-  return () => {
-    value += 0x6d2b79f5
-    let t = value
-    t = Math.imul(t ^ (t >>> 15), t | 1)
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+export const stableEventHash = (value) => {
+  let hash = 2166136261
+  for (const char of String(value ?? '')) {
+    hash ^= char.charCodeAt(0)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+export const buildStrandSpec = (event, target, durationMs) => {
+  const cfg = POOL_3D_CONFIG.rain
+  const hash = stableEventHash(`${event?.kind}|${event?.event_id}`)
+  const unit = hash / 0xffffffff
+  const segmentRange = cfg.maxSegments - cfg.minSegments + 1
+  const kindStrength = event?.kind === 'outcome'
+    ? (event?.items?.some(item => item.applied === true) ? 1 : 0.52)
+    : event?.kind === 'remember' ? 0.82 : 0.68
+  return {
+    key: `${event?.kind}|${event?.event_id}`,
+    event,
+    x: Number(target?.x) || 0,
+    z: Number(target?.z) || 0,
+    segments: cfg.minSegments + (hash % segmentRange),
+    height: cfg.minHeight + (cfg.maxHeight - cfg.minHeight) * unit,
+    duration: Math.max(0.12, Number(durationMs) > 0
+      ? Number(durationMs) / 1000
+      : (cfg.minFallMs + (cfg.maxFallMs - cfg.minFallMs) * (1 - unit)) / 1000),
+    driftX: (((hash >>> 8) & 255) / 255 * 2 - 1) * cfg.maxDrift,
+    driftZ: (((hash >>> 16) & 255) / 255 * 2 - 1) * cfg.maxDrift,
+    strength: kindStrength,
   }
 }
 
-// Area-uniform disk sampling: a linear radius would visibly bunch rain at the
-// centre and falsely make the anchor layer look more active.
-export const seededUnitDiskSamples = (count, seed = POOL_3D_CONFIG.rain.seed) => {
-  const random = mulberry32(seed)
-  return Array.from({ length: count }, () => {
-    const radius = Math.sqrt(random())
-    const theta = random() * Math.PI * 2
-    return { x: radius * Math.cos(theta), z: radius * Math.sin(theta) }
-  })
+export const advanceStrandLifecycle = ({ born, duration, landed = false }, seconds) => {
+  const progress = Math.max(0, Math.min(1, (Number(seconds) - Number(born)) / Number(duration)))
+  const landsNow = !landed && progress >= 1
+  return { progress, landed: landed || landsNow, landsNow }
 }
 
-// Rejection sampling against a radial Gaussian produces a soft central rain
-// field without a visible circular boundary. Density is per unit area, so the
-// result does not secretly encode memory strength or any other data field.
-export const seededGaussianDiskSamples = (count, {
-  seed = POOL_3D_CONFIG.rain.seed,
-  sigma = POOL_3D_CONFIG.rain.sigma,
-  maxRadius = POOL_3D_CONFIG.rain.maxRadius,
-  centerDensity = POOL_3D_CONFIG.rain.centerDensity,
-  edgeDensity = POOL_3D_CONFIG.rain.edgeDensity,
-} = {}) => {
-  const random = mulberry32(seed)
-  const samples = []
-  while (samples.length < count) {
-    const radius = Math.sqrt(random()) * maxRadius
-    const theta = random() * Math.PI * 2
-    const gaussian = Math.exp(-((radius / sigma) ** 2))
-    const density = edgeDensity + (centerDensity - edgeDensity) * gaussian
-    if (random() * centerDensity > density) continue
-    samples.push({
-      x: radius * Math.cos(theta),
-      z: radius * Math.sin(theta),
-      intensity: Math.max(0, Math.min(1, gaussian)),
-    })
-  }
-  return samples
-}
-
-export const advanceRainDrop = (height, speed, dt, waterHeight = 0.06) => {
-  const nextHeight = Number(height) - Number(speed) * Number(dt)
-  return nextHeight <= waterHeight
-    ? { height: waterHeight, landed: true }
-    : { height: nextHeight, landed: false }
-}
-
-const vertexShader = /* glsl */`
-  attribute float aLength;
+const strandVertexShader = /* glsl */`
+  attribute vec2 aTarget;
+  attribute float aBorn;
+  attribute float aDuration;
+  attribute float aHeight;
+  attribute float aPhase;
+  attribute vec2 aDrift;
   attribute float aOpacity;
+  attribute float aSize;
+  attribute float aEnabled;
+  uniform float uTime;
+  uniform float uWaterY;
+  uniform float uTrailLength;
   uniform float uViewportHeight;
   uniform float uDropBloom;
   varying float vOpacity;
 
   void main() {
-    vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+    float elapsed = uTime - aBorn;
+    float progress = clamp(elapsed / max(aDuration, 0.001), 0.0, 1.0);
+    float beadProgress = clamp(progress - aPhase * 0.24, 0.0, 1.0);
+    float fall = beadProgress * beadProgress;
+    float driftFade = 1.0 - beadProgress;
+    vec3 worldPosition = vec3(
+      aTarget.x + aDrift.x * driftFade * sin(aPhase * 19.0 + progress * 3.1),
+      mix(aHeight, uWaterY, fall) + aPhase * uTrailLength * 0.10,
+      aTarget.y + aDrift.y * driftFade * cos(aPhase * 17.0 + progress * 2.7)
+    );
+    vec4 viewPosition = modelViewMatrix * vec4(worldPosition, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    gl_PointSize = clamp(aLength * uViewportHeight / max(1.0, -viewPosition.z), 4.0, 40.0);
-    vOpacity = aOpacity * uDropBloom;
+    float live = aEnabled * step(0.0, elapsed) * (1.0 - step(aDuration, elapsed));
+    float tip = 1.0 - smoothstep(0.0, 0.18, aPhase);
+    vOpacity = live * aOpacity * mix(0.38, 1.0, tip) * uDropBloom;
+    gl_PointSize = live * clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 1.4, 8.5);
   }
 `
 
-const fragmentShader = /* glsl */`
+const strandFragmentShader = /* glsl */`
   uniform vec3 uColor;
   varying float vOpacity;
-
   void main() {
-    vec2 point = gl_PointCoord;
-    float dx = abs(point.x - 0.5);
-    float tail = (1.0 - smoothstep(0.024, 0.066, dx))
-      * smoothstep(0.04, 0.20, point.y) * (1.0 - smoothstep(0.84, 0.98, point.y));
-    float tip = 1.0 - smoothstep(0.02, 0.065, distance(point, vec2(0.5, 0.84)));
-    float alpha = max(tail * (0.30 + point.y * 0.66), tip * 0.62) * vOpacity;
-    if (alpha < 0.015) discard;
+    vec2 point = (gl_PointCoord - 0.5) * vec2(1.7, 1.0);
+    float alpha = (1.0 - smoothstep(0.18, 0.52, length(point))) * vOpacity;
+    if (alpha < 0.012) discard;
     gl_FragColor = vec4(uColor, alpha);
-    #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
 `
 
-const createDropPoints = (count, material) => {
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3))
-  geometry.setAttribute('aLength', new THREE.BufferAttribute(new Float32Array(count), 1))
-  geometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(count), 1))
-  const points = new THREE.Points(geometry, material)
-  points.frustumCulled = false
-  points.renderOrder = 5
-  return points
-}
-
-const crownVertexShader = /* glsl */`
+const contactVertexShader = /* glsl */`
   attribute float aSize;
   attribute float aOpacity;
   uniform float uViewportHeight;
   varying float vOpacity;
-
   void main() {
     vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * viewPosition;
-    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 5.0, 18.0);
+    gl_PointSize = clamp(aSize * uViewportHeight / max(1.0, -viewPosition.z), 3.0, 20.0);
     vOpacity = aOpacity;
+  }
+`
+
+const contactFragmentShader = /* glsl */`
+  uniform vec3 uColor;
+  varying float vOpacity;
+  void main() {
+    float radial = length(gl_PointCoord - 0.5) * 2.0;
+    float alpha = (1.0 - smoothstep(0.0, 1.0, radial)) * vOpacity;
+    if (alpha < 0.02) discard;
+    gl_FragColor = vec4(uColor, alpha);
+    #include <colorspace_fragment>
   }
 `
 
 const crownFragmentShader = /* glsl */`
   uniform vec3 uColor;
   varying float vOpacity;
-
   float segmentDistance(vec2 point, vec2 start, vec2 end) {
     vec2 line = end - start;
     float projection = clamp(dot(point - start, line) / dot(line, line), 0.0, 1.0);
     return length(point - start - line * projection);
   }
-
   void main() {
     vec2 point = (gl_PointCoord - 0.5) * 2.0;
-    float leftJet = segmentDistance(point, vec2(-0.34, -0.38), vec2(-0.56, 0.34));
-    float centreJet = segmentDistance(point, vec2(0.0, -0.42), vec2(0.02, 0.62));
-    float rightJet = segmentDistance(point, vec2(0.34, -0.38), vec2(0.58, 0.28));
-    float jets = 1.0 - smoothstep(0.045, 0.105, min(leftJet, min(centreJet, rightJet)));
-    float tips = max(
-      1.0 - smoothstep(0.05, 0.16, distance(point, vec2(-0.56, 0.34))),
-      max(
-        1.0 - smoothstep(0.05, 0.16, distance(point, vec2(0.02, 0.62))),
-        1.0 - smoothstep(0.05, 0.16, distance(point, vec2(0.58, 0.28)))
-      )
+    float jets = min(
+      segmentDistance(point, vec2(-0.28, -0.34), vec2(-0.52, 0.34)),
+      min(segmentDistance(point, vec2(0.0, -0.40), vec2(0.0, 0.62)),
+        segmentDistance(point, vec2(0.28, -0.34), vec2(0.52, 0.34)))
     );
-    float bowlDistance = abs(length(vec2(point.x, (point.y + 0.40) * 1.75)) - 0.50);
-    float bowl = (1.0 - smoothstep(0.045, 0.11, bowlDistance))
-      * (1.0 - smoothstep(-0.20, 0.16, point.y));
-    float alpha = max(max(jets * 0.72, tips), bowl * 0.70) * vOpacity;
+    float bowlDistance = abs(length(vec2(point.x, (point.y + 0.38) * 1.7)) - 0.48);
+    float bowl = (1.0 - smoothstep(0.04, 0.11, bowlDistance)) * (1.0 - smoothstep(-0.18, 0.14, point.y));
+    float alpha = max(1.0 - smoothstep(0.035, 0.105, jets), bowl * 0.72) * vOpacity;
     if (alpha < 0.025) discard;
     gl_FragColor = vec4(uColor, alpha);
     #include <colorspace_fragment>
   }
 `
 
-const createCrownPoints = (count, material) => {
+const createPointPool = (count, material, name, renderOrder) => {
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3))
   geometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(count), 1))
   geometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(count), 1))
   geometry.setDrawRange(0, 0)
   const points = new THREE.Points(geometry, material)
-  points.name = 'RainImpactCrowns'
+  points.name = name
   points.frustumCulled = false
-  points.renderOrder = 6
+  points.renderOrder = renderOrder
   return points
 }
 
-const createSplashTexture = () => {
-  const canvas = document.createElement('canvas')
-  canvas.width = canvas.height = 96
-  const ctx = canvas.getContext('2d')
-  const glow = ctx.createRadialGradient(48, 48, 0, 48, 48, 46)
-  glow.addColorStop(0, 'rgba(235,248,255,.7)')
-  glow.addColorStop(0.09, 'rgba(205,235,250,.38)')
-  glow.addColorStop(0.22, 'rgba(175,215,238,.07)')
-  glow.addColorStop(1, 'rgba(175,215,238,0)')
-  ctx.fillStyle = glow
-  ctx.fillRect(0, 0, 96, 96)
-  ctx.strokeStyle = 'rgba(220,242,252,.62)'
-  ctx.lineWidth = 2.4
-  for (const [radius, start, end] of [[19, -0.15, 0.72], [23, 2.2, 3.05], [16, 4.05, 4.72]]) {
-    ctx.beginPath()
-    ctx.arc(48, 48, radius, start, end)
-    ctx.stroke()
-  }
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.SRGBColorSpace
-  return texture
-}
-
-export const createRainSystem = ({ radius, onImpact } = {}) => {
+export const createRainSystem = ({ onImpact } = {}) => {
   const cfg = POOL_3D_CONFIG.rain
-  const waterRadius = radius ?? POOL_3D_CONFIG.worldRadius * POOL_3D_CONFIG.waterRadiusScale
-  const uniforms = {
+  const totalPoints = cfg.maxStrands * cfg.maxSegments
+  const strandGeometry = new THREE.BufferGeometry()
+  strandGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(totalPoints * 3), 3))
+  strandGeometry.setAttribute('aTarget', new THREE.BufferAttribute(new Float32Array(totalPoints * 2), 2))
+  strandGeometry.setAttribute('aBorn', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  strandGeometry.setAttribute('aDuration', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  strandGeometry.setAttribute('aHeight', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  strandGeometry.setAttribute('aPhase', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  strandGeometry.setAttribute('aDrift', new THREE.BufferAttribute(new Float32Array(totalPoints * 2), 2))
+  strandGeometry.setAttribute('aOpacity', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  strandGeometry.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  strandGeometry.setAttribute('aEnabled', new THREE.BufferAttribute(new Float32Array(totalPoints), 1))
+  const strandUniforms = {
+    uTime: { value: 0 },
+    uWaterY: { value: 0.06 },
+    uTrailLength: { value: cfg.trailLength },
     uViewportHeight: { value: Math.max(1, window.innerHeight) },
     uDropBloom: { value: cfg.dropBloom },
     uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.pearl) },
   }
-  const material = new THREE.ShaderMaterial({
-    uniforms,
-    vertexShader,
-    fragmentShader,
+  const strandMaterial = new THREE.ShaderMaterial({
+    uniforms: strandUniforms,
+    vertexShader: strandVertexShader,
+    fragmentShader: strandFragmentShader,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
+  const strands = new THREE.Points(strandGeometry, strandMaterial)
+  strands.name = 'LifecycleRainStrands'
+  strands.frustumCulled = false
+  strands.renderOrder = 5
 
-  const group = new THREE.Group()
-  group.name = 'RainSystem'
-  const ambient = createDropPoints(cfg.count, material)
-  const directed = createDropPoints(16, material)
-  const splashTexture = createSplashTexture()
-  const splashGeometry = new THREE.PlaneGeometry(1, 1)
-  const splashMaterial = new THREE.MeshBasicMaterial({
-    map: splashTexture,
-    color: POOL_3D_CONFIG.palette.coldGlint,
-    vertexColors: true,
+  const contactUniforms = {
+    uViewportHeight: strandUniforms.uViewportHeight,
+    uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.coldGlint) },
+  }
+  const contactMaterial = new THREE.ShaderMaterial({
+    uniforms: contactUniforms,
+    vertexShader: contactVertexShader,
+    fragmentShader: contactFragmentShader,
     transparent: true,
-    opacity: cfg.impactBloom,
     depthWrite: false,
     depthTest: false,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
-    side: THREE.DoubleSide,
   })
-  const splashMesh = new THREE.InstancedMesh(splashGeometry, splashMaterial, cfg.splashSlots)
-  splashMesh.name = 'RainImpactFlashes'
-  splashMesh.count = 0
-  splashMesh.frustumCulled = false
-  splashMesh.renderOrder = 4
-  splashMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-  const splashDummy = new THREE.Object3D()
-  const splashColor = new THREE.Color()
-  const splashes = Array.from({ length: cfg.splashSlots }, () => null)
-  let splashCursor = 0
-  const crownUniforms = {
-    uViewportHeight: uniforms.uViewportHeight,
-    uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.pearl) },
-  }
+  const contacts = createPointPool(cfg.impactSlots, contactMaterial, 'LifecycleImpactFlashes', 6)
+
   const crownMaterial = new THREE.ShaderMaterial({
-    uniforms: crownUniforms,
-    vertexShader: crownVertexShader,
+    uniforms: {
+      uViewportHeight: strandUniforms.uViewportHeight,
+      uColor: { value: new THREE.Color(POOL_3D_CONFIG.palette.pearl) },
+    },
+    vertexShader: contactVertexShader,
     fragmentShader: crownFragmentShader,
     transparent: true,
     depthWrite: false,
@@ -244,167 +216,173 @@ export const createRainSystem = ({ radius, onImpact } = {}) => {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   })
-  const crowns = createCrownPoints(cfg.splashSlots, crownMaterial)
-  group.add(ambient, directed, splashMesh, crowns)
+  const crowns = createPointPool(cfg.impactSlots, crownMaterial, 'LifecycleImpactCrowns', 7)
+  const group = new THREE.Group()
+  group.name = 'LifecycleRainSystem'
+  group.add(strands, contacts, crowns)
 
-  const samples = seededGaussianDiskSamples(cfg.count)
-  const random = mulberry32(cfg.seed ^ 0xa53c91e7)
-  const positions = ambient.geometry.attributes.position.array
-  const lengths = ambient.geometry.attributes.aLength.array
-  const opacities = ambient.geometry.attributes.aOpacity.array
-  const speeds = new Float32Array(cfg.count)
-  const impactStrengths = new Float32Array(cfg.count)
-  const respawn = (index, initial = false) => {
-    const sample = samples[index]
-    positions[index * 3] = sample.x * waterRadius
-    positions[index * 3 + 1] = initial
-      ? cfg.minHeight + random() * (cfg.maxHeight - cfg.minHeight)
-      : cfg.maxHeight + random() * cfg.respawnJitter
-    positions[index * 3 + 2] = sample.z * waterRadius
-    speeds[index] = cfg.minSpeed + random() * (cfg.maxSpeed - cfg.minSpeed)
-    lengths[index] = cfg.minLength + random() * (cfg.maxLength - cfg.minLength)
-    opacities[index] = (cfg.edgeOpacity
-      + sample.intensity * (cfg.centerOpacity - cfg.edgeOpacity)) * (0.78 + random() * 0.22)
-    impactStrengths[index] = cfg.edgeImpact
-      + sample.intensity * (cfg.centerImpact - cfg.edgeImpact)
-  }
-  for (let i = 0; i < cfg.count; i++) respawn(i, true)
-  ambient.geometry.attributes.position.needsUpdate = true
-  ambient.geometry.attributes.aLength.needsUpdate = true
-  ambient.geometry.attributes.aOpacity.needsUpdate = true
-  ambient.geometry.setDrawRange(0, cfg.count)
-  directed.geometry.setDrawRange(0, 0)
-
+  const slots = Array.from({ length: cfg.maxStrands }, () => null)
+  const queue = []
+  const seen = new Set()
+  const impacts = []
+  const recent = []
   let reduced = false
-  let lastSeconds = null
-  let rememberDrops = []
+  let committedEventCount = 0
+  let visualImpactCount = 0
 
-  const spawnSplash = (x, z, seconds, strength) => {
-    splashes[splashCursor++ % splashes.length] = { x, z, born: seconds, strength }
-  }
-
-  const updateSplashes = (seconds) => {
-    if (reduced) {
-      splashMesh.count = 0
-      crowns.geometry.setDrawRange(0, 0)
-      return
+  const updateSlotAttributes = (slotIndex, spec, born, enabled) => {
+    const attrs = strandGeometry.attributes
+    const start = slotIndex * cfg.maxSegments
+    for (let i = 0; i < cfg.maxSegments; i++) {
+      const index = start + i
+      const active = enabled && i < spec.segments ? 1 : 0
+      attrs.aTarget.array[index * 2] = spec.x
+      attrs.aTarget.array[index * 2 + 1] = spec.z
+      attrs.aBorn.array[index] = born
+      attrs.aDuration.array[index] = spec.duration
+      attrs.aHeight.array[index] = spec.height
+      attrs.aPhase.array[index] = i / Math.max(1, spec.segments - 1)
+      attrs.aDrift.array[index * 2] = spec.driftX
+      attrs.aDrift.array[index * 2 + 1] = spec.driftZ
+      attrs.aOpacity.array[index] = 0.70 + spec.strength * 0.28
+      attrs.aSize.array[index] = 0.050 + spec.strength * 0.040
+      attrs.aEnabled.array[index] = active
     }
-    const crownPosition = crowns.geometry.attributes.position.array
-    const crownSize = crowns.geometry.attributes.aSize.array
-    const crownOpacity = crowns.geometry.attributes.aOpacity.array
-    let drawIndex = 0
-    let crownIndex = 0
-    for (let i = 0; i < splashes.length; i++) {
-      const splash = splashes[i]
-      if (!splash) continue
-      const progress = (seconds - splash.born) / cfg.splashLifetime
-      if (progress < 0 || progress >= 1) { splashes[i] = null; continue }
-      const crownProgress = (seconds - splash.born) / cfg.crownLifetime
-      if (crownProgress >= 0 && crownProgress < 1) {
-        crownPosition[crownIndex * 3] = splash.x
-        crownPosition[crownIndex * 3 + 1] = 0.065 + crownProgress * 0.08
-        crownPosition[crownIndex * 3 + 2] = splash.z
-        crownSize[crownIndex] = 0.17 + splash.strength * 0.12
-        crownOpacity[crownIndex] = ((1 - crownProgress) ** 3)
-          * (0.52 + splash.strength * 0.48) * cfg.crownBloom
-        crownIndex++
-      }
-      const fade = (1 - progress) ** 2
-      const size = (0.045 + splash.strength * 0.035) + progress * (0.09 + splash.strength * 0.04)
-      splashDummy.position.set(splash.x, 0.026, splash.z)
-      splashDummy.rotation.set(-Math.PI / 2, 0, 0)
-      splashDummy.scale.setScalar(size)
-      splashDummy.updateMatrix()
-      splashMesh.setMatrixAt(drawIndex, splashDummy.matrix)
-      splashColor.setScalar(Math.min(1, fade * (0.42 + splash.strength * 1.15)))
-      splashMesh.setColorAt(drawIndex, splashColor)
-      drawIndex++
+    for (const attribute of Object.values(attrs)) attribute.needsUpdate = true
+  }
+
+  const startQueued = (seconds) => {
+    for (let i = 0; i < slots.length && queue.length; i++) {
+      if (slots[i]) continue
+      const spec = queue.shift()
+      slots[i] = { ...spec, born: seconds, landed: false }
+      updateSlotAttributes(i, spec, seconds, true)
     }
-    splashMesh.count = drawIndex
-    splashMesh.instanceMatrix.needsUpdate = true
-    if (splashMesh.instanceColor) splashMesh.instanceColor.needsUpdate = true
-    crowns.geometry.setDrawRange(0, crownIndex)
-    crowns.geometry.attributes.position.needsUpdate = true
-    crowns.geometry.attributes.aSize.needsUpdate = true
-    crowns.geometry.attributes.aOpacity.needsUpdate = true
   }
 
-  const setReducedMotion = (value) => {
-    reduced = !!value
-    ambient.geometry.setDrawRange(0, reduced ? cfg.reducedCount : cfg.count)
-    if (reduced) {
-      splashes.fill(null)
-      splashMesh.count = 0
-      crowns.geometry.setDrawRange(0, 0)
-    }
-    if (!reduced) lastSeconds = null
+  const pushImpact = (slot, seconds) => {
+    visualImpactCount++
+    impacts.push({ x: slot.x, z: slot.z, born: seconds, strength: slot.strength, event: slot.event })
+    while (impacts.length > cfg.impactSlots) impacts.shift()
+    recent.push({ x: slot.x, z: slot.z, born: seconds, event: slot.event })
+    onImpact?.({ x: slot.x, z: slot.z, strength: slot.strength, seconds, event: slot.event })
   }
 
-  const syncRememberDrops = (drops) => {
-    rememberDrops = drops.slice(0, 16)
-  }
-
-  const updateDirected = (seconds) => {
-    const attr = directed.geometry.attributes
-    const out = attr.position.array
-    const outLength = attr.aLength.array
-    const outOpacity = attr.aOpacity.array
-    const nowMs = seconds * 1000
+  const updateImpactPool = (points, seconds, lifetime, crown = false) => {
+    const attrs = points.geometry.attributes
     let count = 0
-    for (const drop of rememberDrops) {
-      const age = Math.max(0, nowMs - Number(drop.t0))
-      const progress = Math.min(1, age / 380)
-      if (progress >= 1) continue
-      const point = polarToWorld({ pr: drop.r, theta: drop.theta })
-      out[count * 3] = point.x
-      out[count * 3 + 1] = point.y + cfg.rememberStartHeight * (1 - progress * progress)
-      out[count * 3 + 2] = point.z
-      outLength[count] = 0.24
-      outOpacity[count] = 0.88
+    for (const impact of impacts) {
+      const progress = (seconds - impact.born) / lifetime
+      if (progress < 0 || progress >= 1) continue
+      attrs.position.array[count * 3] = impact.x
+      attrs.position.array[count * 3 + 1] = crown ? 0.07 + progress * 0.09 : 0.065
+      attrs.position.array[count * 3 + 2] = impact.z
+      attrs.aSize.array[count] = crown
+        ? 0.16 + impact.strength * 0.12
+        : 0.08 + impact.strength * 0.09 + progress * 0.05
+      attrs.aOpacity.array[count] = ((1 - progress) ** (crown ? 2.6 : 1.8))
+        * (0.48 + impact.strength * 0.52) * (crown ? cfg.crownBloom : cfg.impactBloom)
       count++
     }
-    directed.geometry.setDrawRange(0, count)
-    attr.position.needsUpdate = true
-    attr.aLength.needsUpdate = true
-    attr.aOpacity.needsUpdate = true
+    points.geometry.setDrawRange(0, count)
+    attrs.position.needsUpdate = true
+    attrs.aSize.needsUpdate = true
+    attrs.aOpacity.needsUpdate = true
   }
 
   return {
     group,
-    setReducedMotion,
-    syncRememberDrops,
-    resize(height) { uniforms.uViewportHeight.value = Math.max(1, Number(height) || 1) },
-    update(seconds) {
-      updateDirected(seconds)
-      updateSplashes(seconds)
-      if (reduced) { lastSeconds = seconds; return }
-      const dt = lastSeconds == null ? 0 : Math.min(0.08, Math.max(0, seconds - lastSeconds))
-      lastSeconds = seconds
-      if (!dt) return
-      for (let i = 0; i < cfg.count; i++) {
-        const step = advanceRainDrop(positions[i * 3 + 1], speeds[i], dt)
-        positions[i * 3 + 1] = step.height
-        if (!step.landed) continue
-        const x = positions[i * 3]
-        const z = positions[i * 3 + 2]
-        spawnSplash(x, z, seconds, impactStrengths[i])
-        onImpact?.(x, z, impactStrengths[i], seconds)
-        respawn(i)
+    setReducedMotion(value) {
+      reduced = !!value
+      if (reduced) {
+        const seconds = performance.now() / 1000
+        for (let i = 0; i < slots.length; i++) {
+          if (slots[i] && !slots[i].landed) pushImpact(slots[i], seconds)
+          if (slots[i]) updateSlotAttributes(i, slots[i], slots[i].born, false)
+          slots[i] = null
+        }
+        while (queue.length) pushImpact(queue.shift(), seconds)
+        impacts.length = 0
+        contacts.geometry.setDrawRange(0, 0)
+        crowns.geometry.setDrawRange(0, 0)
       }
-      ambient.geometry.attributes.position.needsUpdate = true
-      ambient.geometry.attributes.aLength.needsUpdate = true
-      ambient.geometry.attributes.aOpacity.needsUpdate = true
+    },
+    emitStrand(event, target, { durationMs } = {}) {
+      if (!event?.kind || !event?.event_id) return false
+      const spec = buildStrandSpec(event, target, durationMs)
+      if (seen.has(spec.key)) return false
+      seen.add(spec.key)
+      committedEventCount++
+      if (seen.size > 2048) seen.delete(seen.values().next().value)
+      if (reduced) {
+        visualImpactCount++
+        onImpact?.({ x: spec.x, z: spec.z, strength: spec.strength, seconds: performance.now() / 1000, event })
+        return true
+      }
+      if (queue.length >= cfg.maxQueuedStrands) throw new Error('lifecycle_strand_queue_overflow')
+      queue.push(spec)
+      return true
+    },
+    resize(height) { strandUniforms.uViewportHeight.value = Math.max(1, Number(height) || 1) },
+    update(seconds) {
+      strandUniforms.uTime.value = seconds
+      if (reduced) return
+      startQueued(seconds)
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i]
+        if (!slot) continue
+        const next = advanceStrandLifecycle(slot, seconds)
+        if (next.landsNow) pushImpact(slot, seconds)
+        slot.landed = next.landed
+        if (seconds < slot.born + slot.duration + 0.035) continue
+        updateSlotAttributes(i, slot, slot.born, false)
+        slots[i] = null
+      }
+      startQueued(seconds)
+      while (impacts.length && seconds - impacts[0].born >= cfg.impactLifetime) impacts.shift()
+      while (recent.length && (seconds - recent[0].born) * 1000 >= cfg.recentPickMs) recent.shift()
+      updateImpactPool(contacts, seconds, cfg.impactLifetime, false)
+      updateImpactPool(crowns, seconds, cfg.crownLifetime, true)
+    },
+    pick(clientX, clientY, camera, domElement) {
+      const rect = domElement.getBoundingClientRect()
+      const candidates = []
+      for (const slot of slots) {
+        if (!slot) continue
+        const state = advanceStrandLifecycle(slot, strandUniforms.uTime.value)
+        const y = THREE.MathUtils.lerp(slot.height, 0.06, state.progress * state.progress)
+        candidates.push({ x: slot.x, y, z: slot.z, event: slot.event })
+      }
+      for (const impact of recent) candidates.push({ x: impact.x, y: 0.06, z: impact.z, event: impact.event })
+      let best = null
+      for (const candidate of candidates) {
+        const projected = new THREE.Vector3(candidate.x, candidate.y, candidate.z).project(camera)
+        const px = rect.left + (projected.x * 0.5 + 0.5) * rect.width
+        const py = rect.top + (-projected.y * 0.5 + 0.5) * rect.height
+        const distance = Math.hypot(px - clientX, py - clientY)
+        if (distance <= 24 && (!best || distance < best.distance)) best = { ...candidate, distance }
+      }
+      return best ? { event: best.event, clientX, clientY } : null
+    },
+    metrics() {
+      return {
+        committedEventCount,
+        visualImpactCount,
+        queuedEventCount: queue.length,
+        activeStrandCount: slots.filter(Boolean).length,
+      }
     },
     dispose() {
-      ambient.geometry.dispose()
-      directed.geometry.dispose()
-      material.dispose()
-      splashGeometry.dispose()
-      splashMaterial.dispose()
-      splashTexture.dispose()
+      strandGeometry.dispose()
+      strandMaterial.dispose()
+      contacts.geometry.dispose()
+      contactMaterial.dispose()
       crowns.geometry.dispose()
       crownMaterial.dispose()
       group.clear()
+      queue.length = 0
+      impacts.length = 0
+      recent.length = 0
     },
   }
 }

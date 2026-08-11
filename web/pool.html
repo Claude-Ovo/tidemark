@@ -3,10 +3,8 @@
      零 React 零依赖；dev 走 vite 代理注入 viz key，production 由 CloudFront origin header
      贴 viz key（浏览器零凭证语义两端一致）。本页已进 vite build input（check-dist.mjs 把门）。
      ?script=1 播放 scripted 因果序列（明示 SCRIPTED，只演动态语法；真实动画只认 /viz/activity）。
-     三审动效修订：remember 真生成并留存粒子（走正常 layout target）；per-particle
-     presentation radius（迁移持久、从当前呈现值可中断 retarget，不回跳）；credited 完整
-     潮痕环 / blamed 断裂侵蚀环（全页唯一 signature）；prefers-reduced-motion 直落终态；
-     rAF 只在有活跃动画时调度。 -->
+     3D 语义层：一条持久化生命周期事件对应一条雨丝；入水后由 HalfFloat 高度场传播，
+     outcome 只留下局部潮痕，圆形拓扑不绘制轨道。2D 是无 WebGL2 时的有标识回退。 -->
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -26,12 +24,26 @@
   #hud .thesis { font-size: 15px; font-weight: 600; color: #dfe9f5; letter-spacing: .05em; }
   #hud .meta { opacity: .32; font-size: 11px; margin-top: 3px; }
   #hud .script { color: #8fb8e8; font-size: 12px; margin-top: 8px; min-height: 1.2em; }
+  #proof-flow { position: fixed; right: 16px; top: 16px; z-index: 4; width: min(520px, calc(100vw - 32px));
+    color: rgba(205,220,232,.42); font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+    text-align: right; user-select: none; }
+  #proof-flow .mode { color: rgba(231,245,250,.8); letter-spacing: .16em; margin-bottom: 5px; }
+  #proof-flow .steps { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 3px 7px; }
+  #proof-flow .step { transition: color 140ms ease, text-shadow 140ms ease; }
+  #proof-flow .step::after { content: '→'; margin-left: 7px; color: rgba(143,165,179,.28); }
+  #proof-flow .step:last-child::after { content: ''; margin: 0; }
+  #proof-flow .step.done { color: rgba(143,165,179,.72); }
+  #proof-flow .step.current { color: #e7f5fa; text-shadow: 0 0 9px rgba(185,207,218,.42); }
+  #eventrail { display: flex; justify-content: flex-end; gap: 8px; min-height: 17px; margin-top: 7px; }
+  #eventrail button { border: 0; border-top: 1px solid rgba(143,165,179,.24); background: transparent;
+    color: rgba(185,207,218,.58); padding: 3px 0 0; font: inherit; cursor: pointer; }
+  #eventrail button:hover, #eventrail button:focus-visible { color: #e7f5fa; border-top-color: rgba(231,245,250,.8); outline: none; }
   /* 三审 P1-3：层名移出 canvas——固定 legend（结构编码），不与数据粒子争位 */
   #legend { position: fixed; left: 16px; bottom: 14px; z-index: 3; user-select: none; pointer-events: none;
     font-size: 11px; line-height: 1.9; opacity: .62; }
   #legend .row { display: flex; align-items: center; gap: 8px; }
-  #legend .swatch { width: 18px; height: 0; border-top: 1px solid rgba(140,170,205,.7); }
-  #legend .swatch.dash { border-top-style: dashed; }
+  #legend .swatch { width: 4px; height: 4px; border-radius: 50%; background: rgba(170,205,225,.72); }
+  #legend .swatch.dash { border-radius: 1px; background: rgba(125,150,166,.42); }
   #legend .dir { opacity: .6; margin-top: 2px; }
   #err { position: fixed; inset: 0; display: none; place-items: center; color: #d98c8c; }
   /* hover 卡（Owner 裁定改稿：出现在鼠标当前位置，不再固定角落）：
@@ -81,6 +93,9 @@
   @media (max-width: 480px) {
     #hud .thesis { font-size: 13px; }
     #legend { font-size: 10px; line-height: 1.7; }
+    #proof-flow { top: auto; right: 12px; bottom: 92px; width: calc(100vw - 24px); }
+    #proof-flow .steps { gap: 2px 5px; }
+    #proof-flow .step::after { margin-left: 5px; }
   }
 </style>
 </head>
@@ -92,11 +107,22 @@
   <div class="meta" id="meta"></div>
   <div class="script" id="scriptline"></div>
 </div>
+<aside id="proof-flow" aria-label="Memory lifecycle proof">
+  <div class="mode">LIVE · PERSISTED EVENTS</div>
+  <div class="steps">
+    <span class="step" data-stage="1">Remember</span>
+    <span class="step" data-stage="2">Recall receipt</span>
+    <span class="step" data-stage="3">Agent action</span>
+    <span class="step" data-stage="4">Outcome attribution</span>
+    <span class="step" data-stage="5">Plasticity</span>
+  </div>
+  <div id="eventrail" aria-label="Recent lifecycle events"></div>
+</aside>
 <div id="legend">
-  <div class="row"><span class="swatch"></span>内环 锚定层 · 长时记忆 / 高保留</div>
-  <div class="row"><span class="swatch"></span>中环 活动潮带 · 在用 / 等待结果</div>
-  <div class="row"><span class="swatch dash"></span>外缘虚线 fade · 越线即将遗忘</div>
-  <div class="dir">半径 = 保留强度（越靠中心越稳定）</div>
+  <div class="row"><span class="swatch"></span>锚定层 · 长时记忆 / 高保留</div>
+  <div class="row"><span class="swatch"></span>活动潮带 · 在用 / 等待结果</div>
+  <div class="row"><span class="swatch dash"></span>消退水域 · 越靠外越接近遗忘</div>
+  <div class="dir">位置半径 = 保留强度（拓扑存在，但不绘制轨道）</div>
 </div>
 <div id="err"></div>
 <div id="hovercard" role="status"></div>
@@ -115,6 +141,8 @@ const ctx = canvas.getContext('2d')
 const stage3d = document.getElementById('stage3d')
 const meta = document.getElementById('meta')
 const scriptline = document.getElementById('scriptline')
+const proofSteps = [...document.querySelectorAll('#proof-flow .step')]
+const eventrail = document.getElementById('eventrail')
 const DPR = Math.min(window.devicePixelRatio || 1, 2)
 const THREE_REQUESTED = wantsThreePreview(location.search)
 // The 3D framing has room for denser visual LOD than the frozen 2D baseline.
@@ -436,12 +464,65 @@ const hoverIntent = (p, at) => {
 }
 
 const esc = (s) => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML }
+const recentLifecycle = []
+const lifecycleKey = (event) => `${event?.kind}|${event?.event_id}`
+const lifecycleMemoryIds = (event) => {
+  if (event?.kind === 'outcome') return [...new Set((event.items ?? []).map(item => item.memory_id).filter(Boolean))]
+  return [...new Set((event?.memory_ids ?? []).filter(Boolean))]
+}
+const lifecycleTargets = (event) => lifecycleMemoryIds(event)
+  .map(id => particles.find(p => p.memory_id === id)).filter(Boolean)
+const lifecycleStage = (event) => {
+  if (event?.kind === 'remember') return 1
+  if (event?.kind === 'recall') return 2
+  if (event?.kind === 'outcome') return outcomeActions(event).length ? 5 : 4
+  return 0
+}
+const noteLifecycleEvent = (event) => {
+  if (!event?.kind || !event?.event_id) return
+  const stage = lifecycleStage(event)
+  for (const step of proofSteps) {
+    const n = Number(step.dataset.stage)
+    step.classList.toggle('done', stage > n)
+    step.classList.toggle('current', stage === n)
+  }
+  const key = lifecycleKey(event)
+  const old = recentLifecycle.findIndex(item => lifecycleKey(item) === key)
+  if (old >= 0) recentLifecycle.splice(old, 1)
+  recentLifecycle.unshift(event)
+  recentLifecycle.splice(4)
+  eventrail.replaceChildren(...recentLifecycle.map((item) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = `${item.kind} ${String(item.event_id).slice(0, 7)}`
+    button.setAttribute('aria-label', `Open ${item.kind} event ${item.event_id}`)
+    button.onclick = () => selectLifecycleEvent(item, button)
+    return button
+  }))
+}
+const lifecycleEvidenceHtml = (event) => {
+  if (!event) return ''
+  const applied = event.kind === 'outcome' ? (event.items ?? []).filter(item => item.applied === true).length : null
+  const rows = [
+    ['event type', event.kind],
+    [event.kind === 'recall' ? 'receipt ID' : 'event ID', event.event_id],
+    ['attempt ID', event.attempt_id ?? 'unavailable'],
+    ['episode ID', event.episode_id ?? 'unavailable'],
+    ['terminal outcome', event.status ?? 'unavailable'],
+    ['attribution', applied == null ? 'unavailable' : `${applied} applied / ${(event.items ?? []).length} reported`],
+    ['committed timestamp', event.occurred_at ?? 'unavailable'],
+    ['CockroachDB evidence', 'persisted /viz/activity row'],
+    ['AWS request / trace ID', 'unavailable in current activity schema'],
+  ]
+  return `<div class="sec">Selected lifecycle event</div>${rows.map(([key, value]) =>
+    `<div class="attr">${esc(key)}<span class="amt">${esc(String(value))}</span></div>`).join('')}`
+}
 // 请求生命周期守卫（P1-4）：A→B 竞态与 close 后迟到响应统一由 guard 判废；
 // 打开即移交焦点，关闭 inert+aria-hidden 移出可访问树并归还 opener
 const guard = makeDrawerGuard()
 const scrim = document.getElementById('scrim')
 scrim.addEventListener('click', () => closeDrawer())
-const openDrawer = async (p, opener) => {
+const openDrawer = async (p, opener, selectedEvent = null) => {
   drawerOpener = opener ?? drawerOpener
   const token = guard.begin()
   drawer.removeAttribute('inert'); drawer.setAttribute('aria-hidden', 'false')
@@ -486,6 +567,7 @@ const openDrawer = async (p, opener) => {
   const fadeY = (64 - d.fade_threshold * 60).toFixed(2)
   drawer.innerHTML = `
     <button class="close" aria-label="关闭">ESC</button>
+    ${lifecycleEvidenceHtml(selectedEvent)}
     <h2>${esc(m.kind ?? 'memory')} · ${m.pinned ? 'pinned' : esc(m.state)}</h2>
     <div class="meta">${esc(m.memory_id.slice(0, 8))} · ${esc(m.episode_id ?? 'loose')} · ${ageDays(m.created_at)} 天前 · 保留 ${(m.effective_strength * 100).toFixed(1)}%</div>
     <div class="content">${esc(m.content)}</div>
@@ -505,6 +587,25 @@ const openDrawer = async (p, opener) => {
   const newClose = drawer.querySelector('.close')
   newClose.onclick = closeDrawer
   newClose.focus()          // 二审 P1-1a：innerHTML 重写销毁了持焦的旧 close——稳定详情态显式移焦
+}
+const openEventOnly = (event, opener) => {
+  drawerOpener = opener ?? drawerOpener
+  guard.begin()
+  drawer.removeAttribute('inert'); drawer.setAttribute('aria-hidden', 'false')
+  overlay.setAttribute('inert', '')
+  scrim.classList.add('show')
+  hideHover()
+  drawer.innerHTML = `<button class="close" aria-label="关闭">ESC</button>${lifecycleEvidenceHtml(event)}
+    <div class="meta">No in-scope memory record is available for this event.</div>`
+  drawer.classList.add('open')
+  const close = drawer.querySelector('.close')
+  close.onclick = closeDrawer
+  close.focus()
+}
+const selectLifecycleEvent = (event, opener) => {
+  const particle = lifecycleTargets(event)[0]
+  if (particle) openDrawer(particle, opener, event)
+  else openEventOnly(event, opener)
 }
 const closeDrawer = () => {
   guard.close()
@@ -567,15 +668,16 @@ const enableThreePreview = async () => {
       host: stage3d,
       reducedMotion: REDUCED,
       onProjectionFrame: () => syncOverlay(),
+      onSelectEvent: ({ event }) => selectLifecycleEvent(event, null),
       onContextState: (state) => {
         setThreeVisible(state === 'restored')
         if (state === 'lost') scriptline.textContent = 'WebGL context lost，已即时回落 2D 潮池。'
-        else scriptline.textContent = '3D Tier 1 preview · 双击水面复位相机'
+        else scriptline.textContent = '3D HEIGHTFIELD · 持久化事件入水 · 双击复位相机'
         draw(performance.now())
       },
     })
     setThreeVisible(true)
-    scriptline.textContent = '3D Tier 1 preview · 双击水面复位相机'
+    scriptline.textContent = '3D HEIGHTFIELD · 持久化事件入水 · 双击复位相机'
   } catch (error) {
     threePool?.dispose()
     threePool = null
@@ -725,7 +827,9 @@ function startActivityLoop(bootSnap) {
       } catch { return null }
     },
     onEvent: (e) => {
+      noteLifecycleEvent(e)
       if (e.kind === 'recall') {
+        threePool?.emitLifecycleEvent(e, lifecycleTargets(e))
         // recall 只涟漪不移动（契约）；REDUCED 下零位移动画——与 scripted 同一 gate（三审 P1-2）。
         // 涟漪打在被召回的粒子上（事件 memory_ids=injected receipt items，与 scripted 同语法）；
         // 无一命中（overflow/已移除）时回退池心，recall 仍可见
@@ -739,6 +843,7 @@ function startActivityLoop(bootSnap) {
           requestDraw()
         }
       } else if (e.kind === 'outcome') {
+        threePool?.emitLifecycleEvent(e, lifecycleTargets(e))
         for (const act of outcomeActions(e)) {          // 零动作规则集中在纯函数（L6）
           const p = particles.find(x => x.memory_id === act.memory_id)
           if (p) addRing(p, act.role)
