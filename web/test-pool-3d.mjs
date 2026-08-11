@@ -44,8 +44,14 @@ assert.ok(POOL_3D_CONFIG.water.heightFieldResolution >= 512
   && POOL_3D_CONFIG.water.heightFieldResolution <= 768, 'height field must stay in the accepted desktop range')
 assert.ok(POOL_3D_CONFIG.water.edgeFadeStart >= 0.8 && POOL_3D_CONFIG.water.edgeFadeStart <= 0.9,
   'water must disappear into darkness instead of exposing a hard disk edge')
-assert.ok(POOL_3D_CONFIG.rain.minSegments >= 16 && POOL_3D_CONFIG.rain.maxSegments <= 32,
-  'one memory strand must contain 16-32 visual beads')
+assert.ok(POOL_3D_CONFIG.rain.trailsPerMemory >= 2.5 && POOL_3D_CONFIG.rain.trailsPerMemory <= 4,
+  'deterministic render tracks must raise visible rain density 2.5-4x')
+assert.ok(POOL_3D_CONFIG.water.impulseRadius <= 0.012 * 0.55,
+  'impact radius must shrink to the requested 35-55% range')
+assert.ok(POOL_3D_CONFIG.water.transmission >= 0.7 && POOL_3D_CONFIG.water.transmission <= 0.9)
+assert.ok(POOL_3D_CONFIG.water.roughness >= 0.08 && POOL_3D_CONFIG.water.roughness <= 0.18)
+assert.equal(POOL_3D_CONFIG.water.ior, 1.333)
+assert.equal(POOL_3D_CONFIG.water.f0, 0.02)
 assert.ok(POOL_3D_CONFIG.water.waveCoefficient * POOL_3D_CONFIG.water.simulationStep ** 2 < 0.5,
   'height-field wave coefficient must stay inside the explicit integrator stability budget')
 
@@ -54,7 +60,8 @@ const strandA = buildStrandSpec(event, { x: 1.2, z: -0.4 })
 const strandB = buildStrandSpec(event, { x: 1.2, z: -0.4 })
 assert.deepEqual(strandA, strandB, 'one committed event must always produce the same strand grammar')
 assert.equal(strandA.key, 'recall|req-123')
-assert.ok(strandA.segments >= 16 && strandA.segments <= 32)
+assert.ok(strandA.streakLength >= POOL_3D_CONFIG.rain.minStreakLength)
+assert.ok(strandA.streakLength <= POOL_3D_CONFIG.rain.maxStreakLength)
 assert.equal(stableEventHash('recall|req-123'), stableEventHash('recall|req-123'))
 assert.deepEqual(advanceStrandLifecycle({ born: 1, duration: 0.5, landed: false }, 1.49),
   { progress: 0.98, landed: false, landsNow: false })
@@ -64,14 +71,19 @@ assert.deepEqual(advanceStrandLifecycle({ born: 1, duration: 0.5, landed: true }
   { progress: 1, landed: true, landsNow: false }, 'a strand may inject exactly one water impact')
 
 const particle = { memory_id: 'memory-123', pr: 0.42, theta: 1.25, s: 0.8 }
-const memoryStrandA = buildMemoryStrandSpec(particle)
-const memoryStrandB = buildMemoryStrandSpec(particle)
+const memoryStrandA = buildMemoryStrandSpec(particle, 0)
+const memoryStrandB = buildMemoryStrandSpec(particle, 0)
+const auxiliaryStrand = buildMemoryStrandSpec(particle, 1)
 const memoryLanding = polarToWorld(particle)
 assert.deepEqual(memoryStrandA, memoryStrandB, 'memory strands must be deterministic across renders')
 assert.equal(memoryStrandA.source, 'memory')
 assert.equal(memoryStrandA.x, memoryLanding.x, 'strand and interaction anchor must share landing X')
 assert.equal(memoryStrandA.z, memoryLanding.z, 'strand and interaction anchor must share landing Z')
-assert.ok(memoryStrandA.segments >= 16 && memoryStrandA.segments <= 32)
+assert.equal(auxiliaryStrand.particle.memory_id, particle.memory_id,
+  'render-only density tracks must preserve their source memory_id')
+assert.ok(Math.hypot(auxiliaryStrand.x - memoryLanding.x, auxiliaryStrand.z - memoryLanding.z)
+  <= POOL_3D_CONFIG.rain.maxTrackOffset + 1e-9,
+  'auxiliary tracks may only make a small deterministic offset around the truthful topology')
 assert.ok(memoryStrandA.duration >= POOL_3D_CONFIG.rain.minMemoryFallMs / 1000)
 assert.ok(memoryStrandA.duration <= POOL_3D_CONFIG.rain.maxMemoryFallMs / 1000)
 assert.equal(crossingCount(1, 1.1, 1.05, 2.4), 1, 'one visible landing must count once')
@@ -114,9 +126,18 @@ for (const file of [
 
 const anchorSource = readFileSync(new URL('./src/pool/three/data-model-group.mjs', import.meta.url), 'utf8')
 assert.doesNotMatch(anchorSource, /Sprite|CanvasTexture|SpriteMaterial/,
-  'memory records must not reappear as a flat point layer on the water')
+  'underwater memories must stay in one shared GPU point buffer')
+assert.match(anchorSource, /new THREE\.Points/,
+  'persisted memory records must remain visible below the refracting surface')
+assert.match(anchorSource, /cfg\.water\.underwaterY/,
+  'memory points must be physically placed below water rather than floating above it')
 const rainSource = readFileSync(new URL('./src/pool/three/rain-system.mjs', import.meta.url), 'utf8')
 assert.doesNotMatch(rainSource, /new THREE\.Mesh/,
   'rain and contact feedback must use shared point pools rather than per-drop mesh churn')
+assert.doesNotMatch(rainSource, /aPhase|segments:/,
+  'rain must render independent short streaks instead of evenly spaced bead necklaces')
+const waterSource = readFileSync(new URL('./src/pool/three/water-disk.mjs', import.meta.url), 'utf8')
+assert.match(waterSource, /uSceneColor/,
+  'water must sample the actual underwater scene color for normal-driven refraction')
 
-console.log('ok - 3D pool maps persisted memories to pooled rain strands and a ring-free HalfFloat height field')
+console.log('ok - persisted memories drive independent rain streaks, underwater refraction and a ring-free HalfFloat height field')
