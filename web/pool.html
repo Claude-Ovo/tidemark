@@ -341,7 +341,7 @@ const draw = (now = 0) => {
     ctx.lineWidth = 1.5; ctx.stroke()
   }
   for (const d of drops) {
-    // 雨滴（参考 rainform「data into rain」）：从上方 0.12R 处匀加速落体（ease-in=重力），
+    // 雨滴（原创实现）：从上方 0.12R 处匀加速落体（ease-in=重力），
     // 滴头 + 短拖尾；着水事件在 step 里触发微涟漪与 spawn 留存
     const k = Math.min(1, (now - d.t0) / MOTION.RAIN_FALL_MS)
     const g = easeInQuad(k)

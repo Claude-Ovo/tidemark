@@ -20,3 +20,5 @@ infra/.fn-cfg.json
 infra/.targets.json
 infra/.dlq-attrs.json
 infra/.event-invoke.json
+.artifacts/
+web/dist/
