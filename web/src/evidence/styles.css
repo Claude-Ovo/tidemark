@@ -278,6 +278,110 @@ code {
    Selection adds luminance, a white edge, and white text together; hue carries
    no state. */
 .tide-ledger { display: flex; flex-direction: column; border-bottom: 1px solid var(--line); }
+.tide-ledger--cards { border-bottom: 0; }
+.tide-ledger--cards .tide-ledger__body { padding: 16px; }
+.tide-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.tide-card {
+  appearance: none;
+  min-width: 0;
+  min-height: 160px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 10px;
+  border: 1px solid var(--line);
+  background: var(--slate-soft);
+  color: var(--muted);
+  padding: 14px;
+  cursor: pointer;
+  text-align: left;
+  position: relative;
+}
+.tide-card::before {
+  content: "";
+  position: absolute;
+  inset: 8px auto 8px 0;
+  width: 2px;
+  background: transparent;
+}
+.tide-card:hover { border-color: var(--line-strong); background: var(--wash-raise); }
+.tide-card[data-active], .tide-card[data-current] { color: var(--ivory); }
+.tide-card[data-active]::before, .tide-card[data-current]::before { background: var(--ivory); }
+.tide-card:disabled { cursor: default; opacity: .58; background: var(--slate-soft); }
+.tide-card__head, .tide-card__meta { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.tide-card__head strong { color: inherit; font: 400 18px/1 Georgia, "Times New Roman", serif; }
+.tide-card__head b { color: inherit; font: 500 11px/1 ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.tide-card__meta small, .tide-card__meta em, .tide-card__action {
+  color: var(--quiet);
+  font: 500 8px/1.25 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  font-style: normal;
+}
+.tide-card__meta em { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.tide-card__distribution { width: 100%; height: 48px; align-self: end; overflow: visible; }
+.tide-card__distribution path { fill: none; stroke: var(--muted); vector-effect: non-scaling-stroke; }
+.tide-card[data-active] .tide-card__distribution path, .tide-card[data-current] .tide-card__distribution path { stroke: var(--ivory); }
+.tide-card__empty-line { display: block; align-self: center; height: 1px; background: var(--line-strong); }
+.tide-card__action { display: block; padding-top: 9px; border-top: 1px solid var(--line); }
+
+body.has-tide-dialog { overflow: hidden; }
+.tide-dialog-scrim {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .76);
+  animation: tide-scrim-in 220ms ease-out both;
+}
+.tide-dialog-scrim[data-closing] { animation: tide-scrim-out 160ms ease-in both; }
+.tide-dialog {
+  width: min(920px, 100%);
+  max-height: min(82vh, 780px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  outline: none;
+  border: 1px solid var(--line-strong);
+  background: var(--slate);
+  box-shadow: 0 28px 100px rgba(0, 0, 0, .58);
+  animation: tide-dialog-in 220ms cubic-bezier(.2, .75, .25, 1) both;
+}
+.tide-dialog[data-closing] { animation: tide-dialog-out 160ms ease-in both; }
+.tide-dialog__head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px 15px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.tide-dialog__head span { color: var(--quiet); font: 600 8px/1 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .12em; }
+.tide-dialog__head h2 { margin: 5px 0 0; font: 400 24px/1 Georgia, "Times New Roman", serif; }
+.tide-dialog__head p { margin: 7px 0 0; color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .06em; }
+.tide-dialog__head button {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 10px;
+  cursor: pointer;
+  font: 600 9px/1 ui-monospace, monospace;
+  text-transform: uppercase;
+}
+.tide-dialog__head button:hover { color: var(--ivory); border-color: var(--ivory); }
+.tide-dialog__ledger { min-height: 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 8px; }
+.tide-dialog__ledger .tide-ledger__scale { position: sticky; top: 0; z-index: 3; background: var(--slate); }
+
+@keyframes tide-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tide-scrim-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes tide-dialog-in { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
+@keyframes tide-dialog-out { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(.96); } }
 .tide-ledger__scale {
   display: grid;
   grid-template-columns: 34% 1fr 42px;
@@ -626,6 +730,20 @@ code {
     -webkit-line-clamp: 2;
   }
   .judge-rail button { grid-column: 2; grid-row: 1; white-space: nowrap; }
+  .tide-ledger--cards .tide-ledger__body { padding: 10px; }
+  .tide-cards { grid-template-columns: 1fr; gap: 8px; }
+  .tide-card { min-height: 122px; grid-template-columns: auto 1fr; grid-template-rows: auto auto auto; }
+  .tide-card__head, .tide-card__meta { grid-column: 1; min-width: 120px; }
+  .tide-card__distribution { grid-column: 2; grid-row: 1 / span 2; height: 48px; align-self: center; }
+  .tide-card__action { grid-column: 1 / -1; }
+  .tide-dialog-scrim { padding: 10px; }
+  .tide-dialog { width: 100%; max-height: calc(100dvh - 20px); }
+  .tide-dialog__head { padding: 14px 13px 12px; }
+  .tide-dialog__head h2 { font-size: 21px; }
+  .tide-dialog__ledger .tide-ledger__scale, .tide-dialog__ledger .tide-row {
+    grid-template-columns: 44% 1fr 38px;
+    gap: 7px;
+  }
 }
 
 @media (forced-colors: active) {
@@ -638,4 +756,9 @@ code {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .tide-dialog-scrim,
+  .tide-dialog { animation-name: tide-scrim-in !important; animation-duration: 220ms !important; }
+  .tide-dialog-scrim[data-closing='true'],
+  .tide-dialog-scrim[data-closing='true'] .tide-dialog { animation-name: tide-scrim-out !important; animation-duration: 160ms !important; }
+  .tide-dialog { transform: none !important; }
 }

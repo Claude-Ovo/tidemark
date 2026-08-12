@@ -67,3 +67,9 @@ export const displayCount = (count) => Number(count) > 0 ? String(count) : '—'
 export const groupCrossesFade = (rows, fadeThreshold) =>
   rows.some((row) => row.effective_strength <= fadeThreshold) &&
   rows.some((row) => row.effective_strength > fadeThreshold)
+
+export const retentionRange = (rows) => {
+  if (!rows.length) return null
+  const values = rows.map((row) => Math.min(1, Math.max(0, Number(row.effective_strength))))
+  return { min: Math.min(...values), max: Math.max(...values) }
+}

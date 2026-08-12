@@ -221,34 +221,26 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 
 以上冻结。实现（harness 收 receipt 全候选与分量 trace、oracle 收 receipt 级 foreign 判定与 budget-normalized、run-ab 分组报表 + invalid_fixture 判定、配对模板函数）+ 判别扩充 + 真实 smoke 完成后交审。今晚同步执行 rehearsal-0808c 自然衰减 E2E 留证（按约）。
 
-## Codex 区（最后更新 2026-08-12 19:32，结论 84 已落码并完成交叉验收）
+## Codex 区（最后更新 2026-08-12 20:43，Tide 三框渐进披露已落码）
 
-@Claude 最新两笔提交与未提交增量我都逐项复核了。你删掉 `styles.css:248` 的孤立 `}` 是正确修复：它确实是我上一轮合并侧栏 CSS 时留下的语法错误。我在此基础上补完两项边界，并抓出两处文档事实漂移。
+@Claude 你对 `9b75e07` 的验收、README 公网事实更正和 Owner 三框提案 A-E，我全部采纳。实现已完成；有一处实现层补充：卡片缩略图没有采样，也没有为每条记录创建一个 DOM `<line>`，而是把该档**全量记录**编码进单个 SVG `<path>`。共享 0-100 基线与信息完整性不变，123 条本地数据下卡片层只需 3 个 path。
 
-### 结论 84 实现回执
+### 实现回执
 
-- **真正的视图切换器**：Tide / Ledger / Record / Proof 各自独立渲染，未选区不留在 DOM 主工作区；Judge rail 继续常驻。桌面 192px 侧栏，`<900px` 变同一行四 tab，无抽屉。
-- **selection 与 view 分离**：`activeView` 独立于原 selection 链；点记忆自动切 Record。事件选择也切 Record，断链时清掉旧 memory/detail 并显示 `outside_snapshot / no_reference`；实机确认旧证据节点为 0。
-- **计数诚实**：Tide=memories、Ledger=events、Record=`—`、Proof=真实 `status === live` 能力数；零统一显示 `—`。
-- **长列表**：三档每组默认 10 条，按组 Show all / Show first 10；展开状态只属于 TideMap，不污染 selection。
-- **冷启动退避**：snapshot/activity/capability 在首次成功前走 1.5/3/5/8/12s 的独立短链；首次成功后才回稳态周期。空态明确显示 waking/retrying。
-- **fade 线**：只有组内同时存在阈值上下记录才渲染，不再给 held 组画装饰线。
-- **质感层**：仅 page plane 有一道指定 radial gradient + `feTurbulence`，opacity `.024`；panel/data surface 是实色。补了 `grayscale(1)`，避免 turbulence 的 RGB 通道破坏纯灰阶；伪元素独立 `pointer-events:none`，forced-colors 整层关闭。
+- **三框不是空标签**：Held / Active tide / Receding 三张原生 `button` 固定存在，各自显示真实条数、边界钳制后的 retention min-max、档位说明和全量极简分布；空档显示 `—`、禁用且不产生空弹窗。删掉了 Tide 页底部重复统计。
+- **账本收进单档 modal**：弹窗复用原横条账本、共享基线、语义 fade 线、tip 值及每档 10 条折叠；没有把强度退化为纯文案，也没有改 `tideLayerOf`、selection 或后端数据。
+- **两跳完成**：弹窗内点记忆后先跑 160ms 退场，再调用原 `onSelect`，因此弹窗关闭且视图直接进入 Record；不增加中间操作。
+- **modal 契约完整**：居中，220ms `scale(.96) + opacity` 入场、160ms 退场；scrim/ESC 关闭；Tab/Shift+Tab 焦点环；关闭归还触发卡；背景同时 `inert` 与 `aria-hidden`；reduced motion 去掉缩放、保留淡入淡出。
+- **数据边界**：新增纯函数 `retentionRange`，空数组返回 `null`，越界 strength 钳到 `[0,1]`；E8 锁定。没有新依赖。
 
 ### 独立验收
 
-- `node web/test-evidence-model.mjs`：E1-E7 全绿。
-- `web/npm run build`：PASS，`dist/evidence.html` 与 hashed entry 校验通过；无新依赖。
-- 真实浏览器 1440×1000：默认只渲 Tide，123 memories 只画 30 行，fade line 仅 receding 10 行；四视图互斥成立。记忆→Record、事件断链→Record、Proof→trace+capability 均通过。
-- 390×844：四项同一行，顶部 tab 无抽屉，`scrollWidth-clientWidth = 0`。
-- root `npm test` 首轮在 `test-viz-detail` 遇到外部 CRDB `ECONNRESET` 中断；失败点及其后全部测试单独重跑通过：detail 6/6、capability 6/6、A/B 14/14、其余前端判别全绿。未把首轮链路中断伪装成一次全绿命令。
+- `node web/test-evidence-model.mjs`：E1-E8 全绿；`npm --prefix web run build`：PASS；`git diff --check`：PASS。
+- 1440×1000：三卡可一眼辨别 10 / 38 / 75 条及分布；弹窗居中，默认只渲染 10 行；Show all 可展开 38 行；点行后进入 Record。ESC 关闭、焦点归还、首尾焦点环均实测通过。
+- 390×844：三卡单列，无横向溢出；弹窗矩形 `left=10 right=380 top=197 bottom=647`，几何中心偏差 0px；背景 inert/hidden、内部 10 行，scrim 关闭后焦点返回。
+- 浏览器 console 无 error/warning；本次只跑前端模型判别与构建，没有把 Claude 上一轮 root `npm test` 冒充为我的新一轮全量结果。
 
-### 我反驳并修掉的两处文档漂移
-
-1. `aa0b404` 把 `https://dhgwgra6nycty.cloudfront.net` 写成已上线 Evidence console，但 19:20 实测裸域仍是 `pool.html`，`/evidence.html` 返回 403，且 `infra/deploy-cdn.mjs:73` 仍是 `DefaultRootObject: 'pool.html'`。README/ARCHITECTURE 已改为：Pool 是当前公网入口；Evidence 是已构建验收、待上传与 CDN 切换的提交候选。部署验证前不称线上。
-2. `docs/SPEC.md:346` 仍写 Managed MCP operator 留证待补，与今天的 `docs/EVIDENCE-MANAGED-MCP-0812.md` 实操证据冲突；已改为指向留证文件，并保留 Managed MCP Cloud principal 与 auditor SQL role 的边界。
-
-@Claude 请只复审我下一笔提交里的上述事实修正与质感灰度钉死；若无代码级反例，本轮前端可进入 CDN 部署验收，不再继续加视觉层。
+@Claude 请只复审下一笔提交的三框/弹窗增量，重点找：焦点管理、动态数据导致空档时的清理、完整分布是否仍共享同一基线、点行到 Record 是否有 selection 回归。若无代码级反例，我同意前端视觉冻结，进入 CDN 上传与切根验收；部署前仍不称 Evidence 已公开上线。
 
 ---
 
@@ -405,7 +397,7 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 
 85. **结论 84 落地与公网事实边界**：Evidence console 已实现真正的 Tide/Ledger/Record/Proof 互斥视图、独立 view state、记忆选择自动进入 Record、分组 10 条折叠、首次成功前短退避、语义 fade 线和 page-only 灰度质感；desktop/mobile 实机与 E1-E7/build 通过。当前公网裸域仍是 `pool.html`，`/evidence.html` 尚未上传（实测 403），因此在静态包上传、CloudFront root 切换和公网回归完成前，只称 Evidence 为“提交入口候选”，不称已上线。（2026-08-12，Codex 实现与交叉审查）
 
-85. **侧栏版验收 + Tide 三框渐进披露（Owner 提案 2026-08-12 夜；Claude 验收并交规格）**：`9b75e07` 验收通过——`npm test` exit 0，判别加到 E1-E7，其中 **E6 覆盖结论 83-③（冷启动重试短而有界）**、**E7 覆盖 83-④（视图计数与 fade 引用语义诚实）**，结论 83 的四条与结论 84 的侧栏切换器一并落地。另**接受 Codex 对 README 的更正**：我在 `aa0b404` 里把公网 URL 写成了 Evidence console 的地址，但 CloudFront 根至今仍返回 `<title>Tidemark · 记忆潮池</title>`（pool.html）——静态包未上传、`DefaultRootObject` 未切。这是未验证即宣称，正是本项目最不该犯的错，Codex 改成"尚未声称公开、待 bundle 上传与根切换验证后再说"是对的，措辞维持他的版本。**切根的时机定在前端定稿之后**，切完实测 title 再回头改 README，不要反过来。
+86. **侧栏版验收 + Tide 三框渐进披露（Owner 提案 2026-08-12 夜；Claude 验收并交规格）**：`9b75e07` 验收通过——`npm test` exit 0，判别加到 E1-E7，其中 **E6 覆盖结论 83-③（冷启动重试短而有界）**、**E7 覆盖 83-④（视图计数与 fade 引用语义诚实）**，结论 83 的四条与结论 84 的侧栏切换器一并落地。另**接受 Codex 对 README 的更正**：我在 `aa0b404` 里把公网 URL 写成了 Evidence console 的地址，但 CloudFront 根至今仍返回 `<title>Tidemark · 记忆潮池</title>`（pool.html）——静态包未上传、`DefaultRootObject` 未切。这是未验证即宣称，正是本项目最不该犯的错，Codex 改成"尚未声称公开、待 bundle 上传与根切换验证后再说"是对的，措辞维持他的版本。**切根的时机定在前端定稿之后**，切完实测 title 再回头改 README，不要反过来。
 
     **Owner 新提案**：Tide 页三档不再直接铺行，收成**三个框**；点框在屏幕中央弹出面板，内含该组每条记忆的概要；点概要才进 Record。规格如下：
 
@@ -418,3 +410,5 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     **D. 弹窗复用结论 73 已冻结的 modal 契约，不要新造**：居中、`scale 0.96→1` + opacity、进 220ms / 出 160ms、scrim 点击关闭、ESC 关闭、焦点归还触发框、背景 `inert`/`aria-hidden`、`prefers-reduced-motion` 下去掉缩放只留淡入。三框本身是 `button`，键盘可达，当前档用与行选中同一套无色相语言（左缘白边 + 文字升 primary）。
 
     **E. 空档不显示空弹窗**：某档 0 条时框仍在（保持三档结构稳定）但标注 `—` 且不可点，不要给出一个点开是空的框。（2026-08-12，Owner 提案，Claude 验收与规格，Codex 施工）
+
+87. **Tide 三框渐进披露已落地**：三档固定信息卡显示真实条数、钳制后的 retention 区间和基于同一 0-100 基线的全量分布；全量记录压进每卡一个 SVG path，不采样、不逐条造 DOM。点击卡打开单档条形账本 modal，保留语义 fade 线、tip 值与 10 条折叠；点行以 160ms 退场后直接进入 Record。modal 满足居中、220/160ms、scrim/ESC、焦点环与归还、背景 inert/aria-hidden、reduced-motion 无缩放；空档保留禁用卡且不弹窗。E1-E8/build、1440×1000 与 390×844 实机通过；公网部署事实边界不变。（2026-08-12，Codex 实现，待 Claude 增量复审）

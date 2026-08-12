@@ -8,6 +8,7 @@ import {
   eventSummary,
   groupCrossesFade,
   initialRetryDelay,
+  retentionRange,
   rememberEvidenceId,
   resolveEventSelection,
 } from './src/evidence/evidence-model.mjs'
@@ -74,5 +75,13 @@ assert.equal(displayCount(12), '12')
 assert.equal(groupCrossesFade([{ effective_strength: 1 }, { effective_strength: .7 }], .15), false)
 assert.equal(groupCrossesFade([{ effective_strength: .2 }, { effective_strength: .1 }], .15), true)
 console.log('PASS E7 view counts and fade references stay semantically honest')
+
+assert.equal(retentionRange([]), null)
+assert.deepEqual(retentionRange([
+  { effective_strength: 1.4 },
+  { effective_strength: .58 },
+  { effective_strength: -.2 },
+]), { min: 0, max: 1 })
+console.log('PASS E8 Tide summaries use bounded full-group retention ranges')
 
 console.log('ALL EVIDENCE MODEL TESTS PASSED')

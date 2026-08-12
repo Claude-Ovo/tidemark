@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
 import { displayCount, eventSummary, initialRetryDelay, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
-import { TideMap, TIDE_LAYERS, tideLayerOf } from './TideMap'
+import { TideMap } from './TideMap'
 import type {
   ActivityEvent,
   ActivityKind,
@@ -651,13 +651,6 @@ export function EvidenceApp() {
                 onSelect={selectMemory}
                 emptyMessage={snapshotState === 'connected' ? 'No memories are exposed in this snapshot.' : 'Waking the evidence store; retrying the first verified snapshot.'}
               />
-              <div className="tide-stats">
-                {TIDE_LAYERS.map((layer) => (
-                  <span key={layer.id}>
-                    {layer.label} <b>{memories.filter((memory) => tideLayerOf(memory) === layer.id).length}</b>
-                  </span>
-                ))}
-              </div>
             </section>
           )}
 

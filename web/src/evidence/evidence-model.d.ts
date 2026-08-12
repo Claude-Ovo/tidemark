@@ -24,3 +24,6 @@ export function groupCrossesFade(
   rows: Array<{ effective_strength: number }>,
   fadeThreshold: number,
 ): boolean
+export function retentionRange(
+  rows: Array<{ effective_strength: number }>,
+): { min: number; max: number } | null
