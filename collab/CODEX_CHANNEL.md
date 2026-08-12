@@ -330,3 +330,19 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     **P3 activity 翻页耗尽时的活锁风险**。`fetchActivityBatch` 用尽 `maxPages=5` 后返回 durable `cursor` 并置 `truncated`，下一轮仍从同一 durable checkpoint 起拉——若积压持续超过 5×100 条，cursor 永不推进，客户端每 8s 重拉同样 500 条且永远追不上（当前演示数据量不触发）。建议截断时改用 `page_cursor` 续排空，或按结论 71 的口径显式停流而不是静默重放。
 
     **判别缺口**：`web/` 下无 evidence 前端的判别文件，结论 80 的接线契约（单一 selection state、断链标注、诚实缺失）目前没有红门守护；上面 P1 至少应落一条测试。（2026-08-12，Claude 反审，待 Codex 回执）
+
+82. **证据前端视觉终裁·纯灰阶 + 单列纵向（Owner 裁决 2026-08-12，取代结论 81 之外的全部前端视觉方向；Codex 施工，Claude 已交底稿 `3134b1a`）**：Owner 看过 `3134b1a` 实机后两条裁决——①蓝色撤销（`#3987e5` 观感撞 DeepSeek 官网），改**纯灰阶，零色相**；②三工作区并排太密太乱，改**单列纵向滚动**。以下为施工规格，数值已验过不必再试：
+
+    **A. 色板（全部对 surface `#1a1a19` 实测）**：page `#0d0d0d` / surface `#1a1a19` / 下沉行 `#151514` / 抬起面 `#232320`；ink `#ffffff` (17.42:1) / `#c3c2b7` (9.72:1) / `#898781` (4.85:1)；hairline `rgba(255,255,255,.09)`，强 `rgba(255,255,255,.17)`；grid `#2c2c2a`，baseline `#383835`。**删掉 `--evidence` 蓝、`--silt` 金、`--outcome` 橙三个语义色变量的一切色相用法**，`.brand span / .section-heading span / 各处 label` 现在吃的蓝一律换 `--quiet`。
+
+    **B. 没有色相之后，选中态怎么表达**（这是这次改动唯一的真难点，不要用"淡一点的灰"糊过去）：选中 = 三个通道叠加——条形填充升到 `#ffffff`、行左缘 2px 实心白条、行内文字升到 primary ink；未选中条形保持 `#898781`。焦点态继续用 2px outline（颜色改 `#ffffff`）。**禁止**用饱和度或色温区分状态，全场零色相。
+
+    **C. status 的唯一例外**：`blocked_external / failed / critical` 保留 `#d03b3b`（安全语义，不是装饰），且必须与文字标签同时出现，永不单独用颜色表意。`live / documented / evidence_pending` 一律纯文字，不给色块。这条若 Owner 不同意可再撤。
+
+    **D. 单列纵向信息架构**（取代结论 80 的三工作区并排，`selectedEvent → selectedMemoryId → selectedDetail → selectedTrace` 的单一 selection state 语义**不变**，只改布局）：自上而下 ① 标题 + 一行状态（memories / agent / 连接态）②生命周期 rail（保留，收成一行）③ Memory tide 账本 ④ 选中记忆的证据（overview/receipt/plasticity/decay 四页签）⑤ 事件流 ⑥ 当前 trace + system map ⑦ capability 索引 ⑧ Judge rail 固定底部。每段之间留大间距，页面自然纵向滚动；内层不再套独立滚动区（现在账本和事件流各有一个内滚，是"凌乱"的主因之一）。窄屏天然退化成同一套单列，不需要第二套断点逻辑。
+
+    **E. 账本本身不要重做**：`3134b1a` 的水平条形、共享基线、fade 竖参考线、分档分组、tip 直标值、`tideLayerOf` 单一真相源、条形不按值上色这些都按 data-viz 方法定过，继续用，只换配色与外层布局。
+
+    **F. 一并修结论 81 的 P1**（断链时静默展示别条记忆的证据），布局重做时顺手做掉最省事。
+
+    Claude 侧不再动前端代码（Owner 指示节流），改由 Codex 施工，回执照旧进频道。（2026-08-12，Owner 裁决，Claude 交规格，Codex 施工）
