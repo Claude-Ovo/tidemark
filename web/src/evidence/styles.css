@@ -198,6 +198,7 @@ code {
   grid-template-columns: 192px minmax(0, 1fr);
   gap: 28px;
   align-items: start;
+  min-height: calc(100dvh - 230px);
   max-width: 1240px;
   margin: 32px auto 0;
 }
@@ -243,9 +244,6 @@ code {
 .workspace {
   min-width: 0;
   max-width: 1020px;
-  min-height: calc(100dvh - 230px);
-  display: grid;
-  align-items: center;
 }
 .workspace > * { min-width: 0; }
 .ledger-view, .proof-view { display: grid; gap: 18px; }
@@ -699,8 +697,7 @@ body.has-tide-dialog { overflow: hidden; }
 }
 
 @media (max-width: 900px) {
-  .evidence-layout { display: block; margin-top: 22px; }
-  .workspace { min-height: 0; display: block; }
+  .evidence-layout { display: block; min-height: 0; margin-top: 22px; }
   .view-switcher {
     position: static;
     grid-template-columns: repeat(4, minmax(0, 1fr));

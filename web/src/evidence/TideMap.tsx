@@ -49,7 +49,7 @@ function DistributionStrip({ rows }: { rows: MemoryWithEpisode[] }) {
         <svg className="tide-card__distribution" viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" aria-hidden="true">
           <path d={`M0 ${height / 2}H${(range.max * 100).toFixed(3)}`} strokeWidth="1.25" />
         </svg>
-        <small>all at {uniformPercent}%</small>
+        <small>no visible spread</small>
       </span>
     )
   }

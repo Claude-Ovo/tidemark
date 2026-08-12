@@ -92,6 +92,6 @@ console.log('PASS E9 Record navigation exposes a bounded selected-memory referen
 
 assert.equal(uniformRetentionPercent([{ effective_strength: .99997 }, { effective_strength: .99998 }]), 100)
 assert.equal(uniformRetentionPercent([{ effective_strength: .994 }, { effective_strength: .996 }]), null)
-console.log('PASS E10 equal-looking Tide values collapse only at the displayed precision')
+console.log('PASS E10 visually uniform Tide values collapse only at the displayed precision')
 
 console.log('ALL EVIDENCE MODEL TESTS PASSED')
