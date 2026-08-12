@@ -107,13 +107,24 @@ pairs to one experience, the unconstrained join would cross-pair every event wit
 pair (proven by red gate A7). Both end at an idempotent, lease-fenced run with a frozen source fingerprint —
 no orphaned "the model just said so" rows.
 
-## Wiring the Managed MCP Server (documented procedure — operator evidence pending)
+## Wiring the Managed MCP Server (live as of 2026-08-12 — see docs/EVIDENCE-MANAGED-MCP-0812.md)
 
 Procedure: the CockroachDB Cloud console configures the Managed MCP endpoint with the
 `tidemark_auditor` SQL credentials (console step, operator-performed). The MCP tools are
 the official fixed 12 (read/query); with this account the APPLICATION data they can reach
 is exactly the relations above (platform catalogs stay privilege-filtered as noted).
 Business traffic never touches this path — it stays on Tidemark's own Memory MCP
-(conclusion 18). **Status**: the SQL account face is implemented and red-gate tested
-(A1-A7); the console wiring + live MCP tool query have not yet been evidenced by the
-operator, and we do not claim live MCP verification before that lands (conclusion 57).
+(conclusion 18).
+
+**Status (2026-08-12)**: the Managed MCP endpoint is wired to cluster `brief-herring` and
+evidenced live — an MCP client authorized through the Cloud console OAuth flow ran the
+official read-only tools and read all four audit views out of `tidemark_prod`
+(`docs/EVIDENCE-MANAGED-MCP-0812.md`), closing the operator-capture gap of conclusion 57.
+
+Two claims stay separate on purpose. That capture connected as the **Cloud principal**
+(`current_user` = `managed-mcp`), which is what the console OAuth flow grants. The
+**`tidemark_auditor` least-privilege face** described above — four views, eight
+content-free ledgers, no base-table or content reach — is proven by its own red gates
+(A1–A7, `src/test-auditor.mjs`), not by that capture. Pointing the Managed MCP endpoint at
+the auditor credentials instead of the Cloud principal remains the documented procedure
+above; we do not claim it as evidenced.
