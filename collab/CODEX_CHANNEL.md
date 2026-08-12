@@ -363,3 +363,29 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     **④ `fade` 参考线在 `held` 组是纯装饰**。该组所有条都远超阈值，那条竖线不传达任何东西，只在 `receding` 组才有意义。建议只在组内存在跨线记录时画，或整体弱化到只在 `receding` 组画。
 
     另注（非交付问题）：本地 dev 库混着大量测试探针数据（`debug probe txt` / `isolation probe iso-*` / `overfetch probe *` / `SENTINEL-CONTENT-*` / `concurrent-storm` / `faded filler NN`），铺开后很像垃圾数据堆。**演示和截图一律走线上 prod 的干净切片**，不要用 dev 库出图。（2026-08-12，Claude 实机复验）
+
+84. **侧栏分区 + 质感层（Owner 裁决 2026-08-12 傍晚，取代结论 82-D 的"八段长滚动"）**：Owner 看过单列版仍判"太复杂"，裁定加左侧栏分区，并认可给纯灰阶补一层极轻质感。以下为规格。
+
+    **A. 侧栏是视图切换器，不是锚点导航（这条定错了整个改动就白做）**：点侧栏项**只显示对应那一段**，其余段不渲染在视口里；不要做成 `scrollIntoView` 的目录。理由：结论 83-① 的"点选无反馈"和结论 82 的"太长太乱"是同一个病根——所有东西同时在场。一次只给一段，两个问题一起消失。
+
+    **B. 分区命名用我们自己已有的语义，不照搬参考项目的层名**。页面上现在就印着 `OBSERVE THE SYSTEM / EXPLAIN ONE RECORD / VERIFY THE CLAIM`（结论 80 定的三动词），侧栏取其名词形，区内保留动词副标题互相解释：
+
+    | 侧栏项 | 副标题 | 装什么 |
+    |---|---|---|
+    | **Tide** | Observe the system | Memory tide 账本 + 三档统计 |
+    | **Ledger** | Follow the events | 事件流 + lifecycle 阶段过滤 |
+    | **Record** | Explain one record | 选中记忆的 overview/receipt/plasticity/decay 四页签 + 断链提示 |
+    | **Proof** | Verify the claim | current trace + system map + capability 索引 |
+
+    Judge **不进侧栏**——它是动作不是视图，继续常驻底部 rail（`?demo=judge` 只读闸维持）。侧栏每项右侧显示该段的实时计数（memories / events / — / capability live 数），计数为零时显示 `—` 不显示 0，避免"零"被读成"系统没数据"。
+
+    **C. 选中一条记忆 → 自动切到 Record 视图**。这就是结论 83-① 要的反馈，比滚动更明确：视图整个换掉，不可能没注意到。反向不成立——在 Record 视图里切页签不改变侧栏位置。`selectedEvent → selectedMemoryId → selectedDetail → selectedTrace` 单一 selection state 语义**仍然不变**，侧栏只是它的呈现容器；侧栏当前项另存一个独立 state，不要塞进 selection 链里。
+
+    **D. 侧栏本身要克制**：宽 180-200px，纯文字项，无图标无色块；当前项用左缘 2px 白边 + 文字升 primary ink（与行选中同一套无色相语言，别再发明第二套）；窄屏（< 900px）退化成顶部一行水平 tab，不做抽屉。
+
+    **E. 质感层（解决"太平"，不是"加颜色"）**：纯黑纯灰的绝对平面正是"像某官网"的根源，参考项目的高级感来自纹理层而非颜色数量（它整页三个色，靠噪点+渐变撑起来）。给 page plane 加两层，**只加在 page plane，不加在 panel surface 和任何数据区**：
+    - 噪点：`feTurbulence baseFrequency="0.9" numOctaves="4"` 的 SVG data URI，`opacity` 控制在 **0.02-0.03**，`pointer-events:none`，`position:fixed` 铺满视口，`z-index` 在内容之下。
+    - 渐变：`radial-gradient(120% 80% at 50% 0%, rgba(255,255,255,.035), transparent 60%)`，一道就够，不要多光源。
+    - **硬纪律**：条形、数值、正文、hairline 之上不得有噪点——噪点落在 1px hairline 和小号等宽数字上会直接损伤可读性。改完必须实机对比"有噪点/无噪点"两张图确认数据区零变化，`prefers-reduced-motion` 不影响此项（它是静态纹理），但 `forced-colors` 下整层关闭。
+
+    **F. 结论 83 的 ②③④ 仍然要修**（长列表折叠、首屏 503 后不要退回 60s 周期、fade 线在 held 组是装饰）。②在侧栏方案下压力变小但不取消。（2026-08-12，Owner 裁决，Claude 交规格，Codex 施工）
