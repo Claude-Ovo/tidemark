@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { groupCrossesFade } from './evidence-model.mjs'
 import type { MemoryWithEpisode } from './types'
 
@@ -35,12 +35,14 @@ export function TideMap({
   selectedId,
   onSelect,
   groupLimit = 10,
+  emptyMessage = 'No memories are exposed in this snapshot.',
 }: {
   memories: MemoryWithEpisode[]
   fadeThreshold: number
   selectedId: string | null
   onSelect: (memoryId: string) => void
   groupLimit?: number
+  emptyMessage?: string
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<TideLayer>>(() => new Set())
   const groups = useMemo(() => {
@@ -69,7 +71,7 @@ export function TideMap({
         <span />
       </div>
       <div className="tide-ledger__body">
-        {!memories.length && <p className="empty-state">No memories are exposed in this snapshot.</p>}
+        {!memories.length && <p className="empty-state">{emptyMessage}</p>}
         {groups.filter((group) => group.rows.length).map((group) => {
           const expanded = expandedGroups.has(group.id)
           const visibleRows = expanded ? group.rows : group.rows.slice(0, groupLimit)

@@ -6,7 +6,7 @@
 > v1.2.4（2026-07-31，P0-06 生命周期调度，Codex 两轮方案审驱动）：状态机边界统一 `<=`（消除阈值等值热循环）；consolidation progress 独立于 lifetime count（`consolidation_baseline`，migration 020/021，"复活后重新挣"可执行化）；`next_transition_at` canonical scheduler 收口（结论 39 债务清偿，migration 022 回填 + PREFLIGHTS[22]）；nightly_runs 增 `control_config`（023，takeover 只读冻结控制面）；transition job 契约=evaluation_at=scheduled_for 进 fingerprint、lease 用墙钟、fencing generation token、no-work 不落 run、整批 stale 零写入。
 > v1.2.3（2026-07-31，P0-05 实现修正同步，Codex 二审/三审驱动）：outcomes 终态唯一改 per `(tenant, agent, attempt)`（migrations 018/019）；幂等归属 outcomes 本表（payload_hmac/response_json 两列，013/016/017）；`max_attributions=32` 冻结；attempt ledger 锚降为一致性检测。仅同步已实现并经交叉审查的行为，无新增 feature。
 
-> **Tidemark — memory that ebbs, and proves what the tide left.**（2026-07-29 Ovo定名）
+> **Tidemark — memory that ebbs, and proves what the tide left.**（2026-07-29 Ovo 定名）
 
 > 状态：**主体 Codex 已签字（2026-07-29）；v1.2.2.1 = Freeze Addendum（§12）终版，待 Codex Addendum ack 后架构冻结。**治理规则：**本文是 implementation contract，CODEX_CHANNEL.md 已定结论区是 decision log**；任何变更两者同一提交同步。
 > `[pending spike]` 小节以 SPIKE-MCP.md 为准。`[A/B]` 标注的取舍进评测假设。

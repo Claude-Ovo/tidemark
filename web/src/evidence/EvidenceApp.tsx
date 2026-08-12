@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
-import { eventSummary, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
+import { displayCount, eventSummary, initialRetryDelay, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
 import { TideMap, TIDE_LAYERS, tideLayerOf } from './TideMap'
 import type {
   ActivityEvent,
@@ -17,6 +17,7 @@ type StageFilter = 'all' | ActivityKind | 'plasticity'
 type ExplainTab = 'overview' | 'receipt' | 'plasticity' | 'decay'
 type VerifyTab = 'trace' | 'system'
 type JudgeState = 'idle' | 'running' | 'complete' | 'failed'
+type WorkspaceView = 'tide' | 'ledger' | 'record' | 'proof'
 
 const STAGES: Array<{ id: StageFilter; label: string; verb: string }> = [
   { id: 'remember', label: 'Remember', verb: 'persist' },
@@ -371,6 +372,36 @@ function CapabilityIndex({ capability, state, onSelect }: {
   )
 }
 
+function ViewSwitcher({ active, memories, events, liveCapabilities, onChange }: {
+  active: WorkspaceView
+  memories: number
+  events: number
+  liveCapabilities: number
+  onChange: (view: WorkspaceView) => void
+}) {
+  const views: Array<{ id: WorkspaceView; label: string; note: string; count: string }> = [
+    { id: 'tide', label: 'Tide', note: 'Observe the system', count: displayCount(memories) },
+    { id: 'ledger', label: 'Ledger', note: 'Follow the events', count: displayCount(events) },
+    { id: 'record', label: 'Record', note: 'Explain one record', count: '—' },
+    { id: 'proof', label: 'Proof', note: 'Verify the claim', count: displayCount(liveCapabilities) },
+  ]
+  return (
+    <nav className="view-switcher" aria-label="Evidence views">
+      {views.map((view) => (
+        <button
+          key={view.id}
+          type="button"
+          aria-current={active === view.id ? 'page' : undefined}
+          onClick={() => onChange(view.id)}
+        >
+          <span><strong>{view.label}</strong><small>{view.note}</small></span>
+          <b>{view.count}</b>
+        </button>
+      ))}
+    </nav>
+  )
+}
+
 export function EvidenceApp() {
   const [snapshot, setSnapshot] = useState<EvidenceSnapshot | null>(null)
   const [snapshotState, setSnapshotState] = useState<LoadState>('loading')
@@ -385,6 +416,7 @@ export function EvidenceApp() {
   const [eventReference, setEventReference] = useState<{ ids: string[]; reason: 'outside_snapshot' | 'no_reference' } | null>(null)
   const [detail, setDetail] = useState<MemoryDetail | null>(null)
   const [detailState, setDetailState] = useState<LoadState>('idle')
+  const [activeView, setActiveView] = useState<WorkspaceView>('tide')
   const [stageFilter, setStageFilter] = useState<StageFilter>('all')
   const [explainTab, setExplainTab] = useState<ExplainTab>('overview')
   const [verifyTab, setVerifyTab] = useState<VerifyTab>('trace')
@@ -405,6 +437,8 @@ export function EvidenceApp() {
 
   useEffect(() => {
     const controller = new AbortController()
+    let timer = 0
+    let failedAttempts = 0
     const load = async () => {
       if (!hasSnapshotRef.current) setSnapshotState('loading')
       try {
@@ -413,20 +447,28 @@ export function EvidenceApp() {
         setSnapshot(next)
         setSnapshotState('connected')
         setSnapshotError(null)
+        failedAttempts = 0
+        if (!controller.signal.aborted) timer = window.setTimeout(() => void load(), 60_000)
       } catch (error) {
         if (controller.signal.aborted) return
+        failedAttempts += 1
         setSnapshotState(hasSnapshotRef.current ? 'degraded' : 'failed')
         setSnapshotError(error instanceof Error ? error.message : String(error))
+        timer = window.setTimeout(
+          () => void load(),
+          hasSnapshotRef.current ? 60_000 : initialRetryDelay(failedAttempts),
+        )
       }
     }
     void load()
-    const interval = window.setInterval(() => void load(), 60_000)
-    return () => { controller.abort(); window.clearInterval(interval) }
+    return () => { controller.abort(); window.clearTimeout(timer) }
   }, []) // snapshot refresh is a whole server truth replacement; no client decay
 
   useEffect(() => {
     const controller = new AbortController()
     let timer = 0
+    let hasLoaded = false
+    let failedAttempts = 0
     const poll = async (initial: boolean) => {
       if (initial) setActivityState('loading')
       try {
@@ -437,10 +479,20 @@ export function EvidenceApp() {
         setActivity((current) => mergeEvents(initial ? [] : current, batch.events))
         setActivityTruncated(batch.truncated)
         setActivityState('connected')
+        hasLoaded = true
+        failedAttempts = 0
       } catch {
-        if (!controller.signal.aborted) setActivityState((current) => current === 'loading' ? 'failed' : 'degraded')
+        if (!controller.signal.aborted) {
+          failedAttempts += 1
+          setActivityState((current) => current === 'loading' ? 'failed' : 'degraded')
+        }
       } finally {
-        if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(false), 8_000)
+        if (!controller.signal.aborted) {
+          timer = window.setTimeout(
+            () => void poll(false),
+            hasLoaded ? 8_000 : initialRetryDelay(failedAttempts),
+          )
+        }
       }
     }
     void poll(true)
@@ -451,18 +503,30 @@ export function EvidenceApp() {
 
   useEffect(() => {
     const controller = new AbortController()
+    let timer = 0
+    let hasLoaded = false
+    let failedAttempts = 0
     const load = async () => {
       try {
         const next = await fetchCapabilities(controller.signal)
         setCapability(next)
         setCapabilityState(next.status === 'connected' ? 'connected' : 'degraded')
+        hasLoaded = true
+        failedAttempts = 0
+        if (!controller.signal.aborted) timer = window.setTimeout(() => void load(), 60_000)
       } catch {
-        if (!controller.signal.aborted) setCapabilityState((current) => current === 'loading' ? 'failed' : 'degraded')
+        if (!controller.signal.aborted) {
+          failedAttempts += 1
+          setCapabilityState((current) => current === 'loading' ? 'failed' : 'degraded')
+          timer = window.setTimeout(
+            () => void load(),
+            hasLoaded ? 60_000 : initialRetryDelay(failedAttempts),
+          )
+        }
       }
     }
     void load()
-    const interval = window.setInterval(() => void load(), 60_000)
-    return () => { controller.abort(); window.clearInterval(interval) }
+    return () => { controller.abort(); window.clearTimeout(timer) }
   }, [])
 
   useEffect(() => {
@@ -495,6 +559,7 @@ export function EvidenceApp() {
     setSelectedEvent(null)
     setEventReference(null)
     setExplainTab('overview')
+    setActiveView('record')
   }
 
   const selectEvent = (event: ActivityEvent) => {
@@ -514,11 +579,13 @@ export function EvidenceApp() {
       setEventReference({ ids: resolution.referencedMemoryIds, reason })
     }
     setVerifyTab('trace')
+    setActiveView('record')
   }
 
   const chooseCapability = (target: string) => {
     setActiveCapability(target)
     setVerifyTab('system')
+    setActiveView('proof')
   }
 
   const advanceJudge = async () => {
@@ -546,8 +613,14 @@ export function EvidenceApp() {
   const connected = snapshotState === 'connected' && activityState === 'connected' && capabilityState === 'connected'
   const activeJudgeStep = judgeProof?.steps[judgeStep] ?? null
   const judgeReady = new URLSearchParams(location.search).get('demo') === 'judge'
+  const liveCapabilities = [
+    ...(capability?.lifecycle ?? []),
+    ...(capability?.cockroachdb_tools ?? []),
+    ...(capability?.aws_services ?? []),
+  ].filter((item) => item.status === 'live').length
   return (
     <div className="evidence-shell">
+      <div className="page-texture" aria-hidden="true" />
       <header className="topbar">
         <div className="brand"><span>TIDEMARK</span><strong>Evidence console</strong></div>
         <p className="thesis">Recall stirs the surface. Outcomes leave the mark.</p>
@@ -558,39 +631,58 @@ export function EvidenceApp() {
         </div>
       </header>
 
-      <LifecycleRail active={stageFilter} events={activity} onChange={setStageFilter} />
-
       {snapshotError && <div className="error-banner" role="alert">
-        {snapshot ? 'Snapshot refresh failed; displaying the last verified snapshot' : 'Snapshot unavailable'}: {snapshotError}. The page will retry without inventing data.
+        {snapshot ? 'Snapshot refresh failed; displaying the last verified snapshot' : 'Snapshot unavailable; waking the evidence store'}: {snapshotError}. Retrying without inventing data.
       </div>}
 
-      <main className="workspace">
-        <section className="observe panel" aria-labelledby="observe-title">
-          <div className="section-heading">
-            <div><span>Observe the system</span><h1 id="observe-title">Memory tide</h1></div>
-            <small>{snapshot?.capped ? 'latest slice' : 'complete snapshot'}</small>
-          </div>
-          <TideMap memories={memories} fadeThreshold={snapshot?.fade_threshold ?? 0.15} selectedId={selectedMemoryId} onSelect={selectMemory} />
-          <div className="tide-stats">
-            {TIDE_LAYERS.map((layer) => (
-              <span key={layer.id}>
-                {layer.label} <b>{memories.filter((memory) => tideLayerOf(memory) === layer.id).length}</b>
-              </span>
-            ))}
-          </div>
-        </section>
+      <div className="evidence-layout">
+        <ViewSwitcher active={activeView} memories={memories.length} events={activity.length} liveCapabilities={liveCapabilities} onChange={setActiveView} />
+        <main className="workspace" data-view={activeView}>
+          {activeView === 'tide' && (
+            <section className="observe panel" aria-labelledby="observe-title">
+              <div className="section-heading">
+                <div><span>Observe the system</span><h1 id="observe-title">Memory tide</h1></div>
+                <small>{snapshot?.capped ? 'latest slice' : snapshot ? 'complete snapshot' : 'retrying source'}</small>
+              </div>
+              <TideMap
+                memories={memories}
+                fadeThreshold={snapshot?.fade_threshold ?? 0.15}
+                selectedId={selectedMemoryId}
+                onSelect={selectMemory}
+                emptyMessage={snapshotState === 'connected' ? 'No memories are exposed in this snapshot.' : 'Waking the evidence store; retrying the first verified snapshot.'}
+              />
+              <div className="tide-stats">
+                {TIDE_LAYERS.map((layer) => (
+                  <span key={layer.id}>
+                    {layer.label} <b>{memories.filter((memory) => tideLayerOf(memory) === layer.id).length}</b>
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
 
-        <Inspector memory={selectedMemory} detail={selectedDetail} state={detailState} tab={explainTab} eventReference={eventReference} onTab={setExplainTab} />
+          {activeView === 'ledger' && (
+            <section className="ledger-view">
+              <LifecycleRail active={stageFilter} events={activity} onChange={setStageFilter} />
+              <section className="activity-panel panel" aria-label="Persisted event history">
+                <EventStream events={activity} selected={selectedEvent} filter={stageFilter} state={activityState} onSelect={selectEvent} />
+                {activityTruncated && <p className="data-note">Activity history is draining in bounded five-page batches; the frozen page cursor resumes on the next poll.</p>}
+              </section>
+            </section>
+          )}
 
-        <section className="activity-panel panel" aria-label="Persisted event history">
-          <EventStream events={activity} selected={selectedEvent} filter={stageFilter} state={activityState} onSelect={selectEvent} />
-          {activityTruncated && <p className="data-note">Activity history is draining in bounded five-page batches; the frozen page cursor resumes on the next poll.</p>}
-        </section>
+          {activeView === 'record' && (
+            <Inspector memory={selectedMemory} detail={selectedDetail} state={detailState} tab={explainTab} eventReference={eventReference} onTab={setExplainTab} />
+          )}
 
-        <VerifyPane tab={verifyTab} onTab={setVerifyTab} event={selectedEvent} detail={selectedDetail} memory={selectedMemory} activeCapability={activeCapability} capability={capability} />
-      </main>
-
-      <CapabilityIndex capability={capability} state={capabilityState} onSelect={chooseCapability} />
+          {activeView === 'proof' && (
+            <section className="proof-view">
+              <VerifyPane tab={verifyTab} onTab={setVerifyTab} event={selectedEvent} detail={selectedDetail} memory={selectedMemory} activeCapability={activeCapability} capability={capability} />
+              <CapabilityIndex capability={capability} state={capabilityState} onSelect={chooseCapability} />
+            </section>
+          )}
+        </main>
+      </div>
 
       <footer className="judge-rail" data-state={judgeState} data-active={judgeProof || judgeReady || undefined}>
         <div>

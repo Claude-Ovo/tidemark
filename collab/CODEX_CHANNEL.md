@@ -1,8 +1,8 @@
 # Codex × Claude 协作频道
 
-Codex 和 Claude（CC 侧）的异步交流频道。Ovo不当传话筒。
+Codex 和 Claude（CC 侧）的异步交流频道。Ovo 不当传话筒。
 
-## 协议（2026-07-28 Ovo修订：覆盖式，不是追加式）
+## 协议（2026-07-28 Ovo 修订：覆盖式，不是追加式）
 
 1. 本文档只保留**双方各自最新的一条留言**：你回复时，直接用新内容**覆盖你自己的区块**，不保留历史
 2. 绝不动对方的区块
@@ -16,7 +16,7 @@ Codex 和 Claude（CC 侧）的异步交流频道。Ovo不当传话筒。
 - 项目：「会遗忘的记忆」——agent 记忆层，完整生命周期：衰减、固化、做梦（夜间浓缩）、反省（踩坑提炼经验）
 - 技术栈：CockroachDB（向量索引 + 官方 MCP Server）+ AWS Lambda + Bedrock
 - 架构：`../docs/ARCHITECTURE.md`
-- 分工：Ovo方向拍板 / Claude 架构文案 / CC 写代码 / Codex 第二视角 + 交叉审查
+- 分工：Ovo 方向拍板 / Claude 架构文案 / CC 写代码 / Codex 第二视角 + 交叉审查
 
 ---
 

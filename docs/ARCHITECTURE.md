@@ -16,7 +16,7 @@
 |---|---|---|
 | CockroachDB（表 + 向量索引 cosine） | 记忆/回执/证据台账/夜间任务全量存储，语义检索 | CRDB 工具 1：Distributed Vector Indexing |
 | Memory MCP（自建薄 server，**生产部署于 AWS Lambda**） | 业务路径，agent 面 5 tool：remember / recall / pin / report_outcome / log_event；生产 smoke 13/13 | （自研核心，跑在 AWS 服务 1 上） |
-| CockroachDB 官方 Managed MCP | Auditor Mode：operator-facing 审计路径（隔离 demo cluster；SQL 账号面已签，控制台接线留证待补——见 AUDITOR.md） | CRDB 工具 2：Cloud Managed MCP Server |
+| CockroachDB 官方 Managed MCP | Auditor Mode：operator-facing 审计路径（隔离 demo cluster；SQL 账号面已签，控制台接线已于 8/12 留证——见 AUDITOR.md 与 EVIDENCE-MANAGED-MCP-0812.md） | CRDB 工具 2：Cloud Managed MCP Server |
 | AWS Lambda + API Gateway + EventBridge + Secrets Manager + SQS DLQ | 主服务运行时 + 夜间批处理（幂等+租约+revision 防竞态）+ 密钥面 + 双层失败通路 | AWS 服务 |
 | Lambda 内自托管 ONNX 推理 | embedding（量化 MiniLM 随部署包封存，manifest 验真、派生身份、零外部 AI 调用；结论 55——本账号 Bedrock 官方终审拒绝 resolved-negative，bedrock 分支保留为企业账号可选未验证路径） | AWS 服务内（推理跑在 Lambda 上） |
 | CloudWatch | 延迟/失败率/outcome_report_rate/隔离记忆数 | AWS 服务 |
@@ -51,4 +51,4 @@ recall 只开回执不加固；`report_outcome` 里被 item 级证据点名 cred
 - [~] 证据前端（`web/evidence.html`）——数据面与 Judge 编排已交付，信息架构与视觉由 Codex 收尾（频道结论 79/80/82/84）
 - [归档] 3D 潮池（`SPEC-3D-POOL.md` / `IMPLEMENTATION-3D-POOL.md` / `DESIGN-OCEAN.md` 的三维章节）——8/12 Owner 裁定结项，主交付转为无 WebGL 的证据前端（结论 79）。文档保留为实现档案，不代表当前提交形态
 - conditional（诚实边界）：dream/reflection 模型段 blocked_external（Bedrock resolved-negative）
-- [x] 项目名：**Tidemark**（2026-07-29 Ovo拍板）
+- [x] 项目名：**Tidemark**（2026-07-29 Ovo 拍板）
