@@ -1,4 +1,4 @@
-import type { ActivityEvent, ActivityPage, CapabilityResponse, EvidenceSnapshot, MemoryDetail } from './types'
+import type { ActivityEvent, ActivityPage, CapabilityResponse, EvidenceSnapshot, JudgeProof, MemoryDetail } from './types'
 
 const fetchJson = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const timeout = AbortSignal.timeout(20_000)
@@ -28,6 +28,15 @@ export const fetchMemoryDetail = (memoryId: string, signal?: AbortSignal) =>
 
 export const fetchCapabilities = (signal?: AbortSignal) =>
   fetchJson<CapabilityResponse>('/viz/capability', signal)
+
+export const runJudgeProof = async (signal?: AbortSignal): Promise<JudgeProof> => {
+  const timeout = AbortSignal.timeout(120_000)
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+  const response = await fetch('/viz/judge-run', { method: 'POST', signal: combined })
+  const body = await response.json() as JudgeProof | { ok: false; error?: string }
+  if (!response.ok || body.ok === false) throw new Error('error' in body && body.error ? body.error : `HTTP ${response.status}`)
+  return body as JudgeProof
+}
 
 const activityUrl = (after?: string | null) => {
   const params = new URLSearchParams({ limit: '100' })

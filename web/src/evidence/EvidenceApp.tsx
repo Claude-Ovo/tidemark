@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot } from './api'
+import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
 import { TideMap } from './TideMap'
 import type {
   ActivityEvent,
   ActivityKind,
   CapabilityResponse,
   EvidenceSnapshot,
+  JudgeProof,
   LoadState,
   MemoryDetail,
   MemoryWithEpisode,
@@ -14,6 +15,7 @@ import type {
 type StageFilter = 'all' | ActivityKind | 'plasticity'
 type ExplainTab = 'overview' | 'receipt' | 'plasticity' | 'decay'
 type VerifyTab = 'trace' | 'system'
+type JudgeState = 'idle' | 'running' | 'complete' | 'failed'
 
 const STAGES: Array<{ id: StageFilter; label: string; verb: string }> = [
   { id: 'remember', label: 'Remember', verb: 'persist' },
@@ -387,9 +389,13 @@ export function EvidenceApp() {
   const [explainTab, setExplainTab] = useState<ExplainTab>('overview')
   const [verifyTab, setVerifyTab] = useState<VerifyTab>('trace')
   const [activeCapability, setActiveCapability] = useState<string | null>(null)
-  const [judgeStep, setJudgeStep] = useState(() => new URLSearchParams(location.search).get('demo') === 'judge' ? 0 : -1)
+  const [judgeState, setJudgeState] = useState<JudgeState>('idle')
+  const [judgeProof, setJudgeProof] = useState<JudgeProof | null>(null)
+  const [judgeStep, setJudgeStep] = useState(0)
+  const [judgeError, setJudgeError] = useState<string | null>(null)
   const cursorRef = useRef<string | null>(null)
   const hasSnapshotRef = useRef(false)
+  const judgeAbortRef = useRef<AbortController | null>(null)
 
   const memories = useMemo(() => flattenSnapshot(snapshot), [snapshot])
   const memoryIndex = useMemo(() => new Map(memories.map((memory) => [memory.memory_id, memory])), [memories])
@@ -437,6 +443,8 @@ export function EvidenceApp() {
     void poll(true)
     return () => { controller.abort(); window.clearTimeout(timer) }
   }, [])
+
+  useEffect(() => () => judgeAbortRef.current?.abort(), [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -494,24 +502,31 @@ export function EvidenceApp() {
     setVerifyTab('system')
   }
 
-  const advanceJudge = () => {
-    const next = (judgeStep + 1) % 4
-    setJudgeStep(next)
-    if (next === 0) { setStageFilter('all'); setExplainTab('overview'); setVerifyTab('trace') }
-    if (next === 1) {
-      const recall = activity.find((event) => event.kind === 'recall' && eventMemoryIds(event).some((id) => memoryIndex.has(id)))
-      if (recall) selectEvent(recall)
-      setStageFilter('recall'); setExplainTab('receipt')
+  const advanceJudge = async () => {
+    if (judgeProof) {
+      setJudgeStep((current) => (current + 1) % judgeProof.steps.length)
+      return
     }
-    if (next === 2) {
-      const outcome = activity.find(eventHasAppliedChange)
-      if (outcome) selectEvent(outcome)
-      setStageFilter('plasticity'); setExplainTab('plasticity')
+    judgeAbortRef.current?.abort()
+    const controller = new AbortController()
+    judgeAbortRef.current = controller
+    setJudgeState('running')
+    setJudgeError(null)
+    try {
+      const proof = await runJudgeProof(controller.signal)
+      setJudgeProof(proof)
+      setJudgeStep(0)
+      setJudgeState('complete')
+    } catch (error) {
+      if (controller.signal.aborted) return
+      setJudgeError(error instanceof Error ? error.message : String(error))
+      setJudgeState('failed')
     }
-    if (next === 3) { setVerifyTab('system'); setActiveCapability('distributed_vector_indexing') }
   }
 
   const connected = snapshotState === 'connected' && activityState === 'connected' && capabilityState === 'connected'
+  const activeJudgeStep = judgeProof?.steps[judgeStep] ?? null
+  const judgeReady = new URLSearchParams(location.search).get('demo') === 'judge'
   return (
     <div className="evidence-shell">
       <header className="topbar">
@@ -553,10 +568,22 @@ export function EvidenceApp() {
 
       <CapabilityIndex capability={capability} state={capabilityState} onSelect={chooseCapability} />
 
-      <footer className="judge-rail" data-active={judgeStep >= 0 || undefined}>
-        <div><span>Judge mode</span><strong>{judgeStep >= 0 ? `Read-only walkthrough · step ${judgeStep + 1}/4` : 'Guided evidence path'}</strong></div>
-        <p>Current shell navigates persisted evidence only. The write-path run remains unavailable until its real API contract lands.</p>
-        <button onClick={advanceJudge}>{judgeStep < 0 ? 'Open walkthrough' : 'Next evidence'}</button>
+      <footer className="judge-rail" data-state={judgeState} data-active={judgeProof || judgeReady || undefined}>
+        <div>
+          <span>Judge mode · seeded data · real path</span>
+          <strong>{activeJudgeStep ? `Step ${activeJudgeStep.step}/10 · ${activeJudgeStep.title}` : judgeState === 'running' ? 'Running ten-step proof…' : 'Run a persisted lifecycle proof'}</strong>
+        </div>
+        <p>
+          {judgeProof
+            ? `Recall read-only ${judgeProof.summary.recall_changed_nothing ? 'PASS' : 'FAIL'} · targeted plasticity ${judgeProof.summary.outcome_credited_only_used_memory ? 'PASS' : 'FAIL'} · fresh read ${judgeProof.summary.persisted_after_fresh_read ? 'PASS' : 'FAIL'} · ${judgeProof.summary.replay ? 'idempotent replay' : 'fresh run'}`
+            : judgeError
+              ? `Proof failed honestly: ${judgeError}. No success state was inferred.`
+              : 'POST /viz/judge-run uses real tools, vector recall, CockroachDB receipts and terminal outcome attribution.'}
+          {judgeProof && <code>{judgeProof.run_key}</code>}
+        </p>
+        <button disabled={judgeState === 'running'} onClick={() => void advanceJudge()}>
+          {judgeState === 'running' ? 'Running…' : judgeProof ? 'Next proof' : judgeState === 'failed' ? 'Retry real proof' : 'Run real proof'}
+        </button>
       </footer>
       <p className="snapshot-note">Snapshot {snapshot ? dateLabel(snapshot.snapshot_at) : 'unavailable'} · viewer scope · client-side decay disabled</p>
     </div>

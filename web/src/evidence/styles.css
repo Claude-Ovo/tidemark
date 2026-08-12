@@ -400,8 +400,11 @@ code {
 .judge-rail[data-active] { border-color: rgba(185, 165, 106, .44); }
 .judge-rail > div strong { display: block; margin-top: 3px; font: 400 14px/1.2 Georgia, serif; }
 .judge-rail p { margin: 0; color: var(--quiet); font-size: 10px; line-height: 1.4; }
+.judge-rail p code { display: block; margin-top: 4px; color: var(--silt); }
 .judge-rail button { appearance: none; border: 1px solid var(--silt); background: transparent; color: var(--silt); padding: 9px 12px; cursor: pointer; font: 600 10px/1 ui-monospace, monospace; text-transform: uppercase; }
 .judge-rail button:hover { background: rgba(185, 165, 106, .09); }
+.judge-rail button:disabled { cursor: wait; opacity: .55; }
+.judge-rail[data-state="failed"] { border-color: rgba(199, 125, 107, .55); }
 
 .snapshot-note { margin: 9px 0 0; color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; text-align: right; }
 

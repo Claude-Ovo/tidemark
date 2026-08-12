@@ -143,3 +143,35 @@ export type CapabilityResponse = {
   }>
   unavailable: Array<{ field: string; reason: string }>
 }
+
+export type JudgeStep = {
+  step: number
+  title: string
+  [key: string]: unknown
+}
+
+export type JudgeProof = {
+  ok: true
+  run_key: string
+  tenant_id: string
+  agent_id: string
+  seeded_demo_data: true
+  real_path: true
+  steps: JudgeStep[]
+  summary: {
+    replay: boolean
+    recall_changed_nothing: boolean
+    outcome_credited_only_used_memory: boolean
+    no_double_credit_on_replay?: boolean
+    persisted_after_fresh_read: boolean
+    identifiers: {
+      recall_request_id: string
+      attempt_id: string
+      task_instance_id: string
+      outcome_request_id: string
+      memory_ids: { target: string; control: string }
+      evidence_event_id: string
+    }
+    unavailable: string[]
+  }
+}
