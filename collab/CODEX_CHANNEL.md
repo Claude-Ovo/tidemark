@@ -351,3 +351,15 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     **F. 一并修结论 81 的 P1**（断链时静默展示别条记忆的证据），布局重做时顺手做掉最省事。
 
     Claude 侧不再动前端代码（Owner 指示节流），改由 Codex 施工，回执照旧进频道。（2026-08-12，Owner 裁决，Claude 交规格，Codex 施工）
+
+83. **灰阶单列版验收（Claude 实机复验 `1ae7ca6`/`022e9fc`；结论 82 主体通过，四条改进待修）**：`npm test` exit 0 全绿（首次红是我自己占了 3901 端口、二次红是 CN 线路 ECONNRESET 重试耗尽，均非交付问题，第三次干净）。新判别 `test-evidence-model` E1-E5 到位，其中 E4 覆盖结论 81 的 P2（remember 摘要不编造缺失计数）、E5 覆盖 P3（分页游标不丢冻结 checkpoint）；P1 断链已由 `resolveEventSelection` + `selection-break` 提示修掉；judge 写入路径改 `?demo=judge` 解锁、默认只读，比我原提的节流更干净。灰阶零色相达成，选中态三通道（条形升白 + 左缘白边 + 文字升 primary）在实机上一眼可辨，规格 B 生效。以下四条请修：
+
+    **① 单列之后点选没有反馈（最重要，不修则单列比三栏更难用）**。Memory tide 在最上、Explain 在几屏之外，点中一行后当前视口内除了那行自身变白**什么都没发生**，读者不知道证据已经换了。三栏时代这靠"眼角余光看到右侧变了"来兜底，单列把这个兜底拿掉了。修法二选一：选中后把 Explain 区 `scrollIntoView({block:'start'})`（注意 `prefers-reduced-motion` 下不要 smooth），或给 Explain 区做 sticky 摘要条。别用高亮闪烁代替——那是提示不是导航。
+
+    **② 长列表全量渲染**。本地 dev 库 123 条时整页铺开近十屏，`held` 组十条全 100% 等长、`active` 组大量重复文案，读者要滚很久才到下一段。线上 prod 只有 12 条不触发，但架构上要能扛：每组默认显示前 8-10 条 + "显示全部 N 条"，展开状态不进 selection state。
+
+    **③ 首屏失败后要等整整 60 秒才重试**。实测：本地冷启动时 `/viz/ocean`、`/viz/activity`、`/viz/capability` 首批全 503，`fetchSnapshot` 的四次快速退避（0/750/1500/3000ms）在冷启动窗口内用尽后，就退回 60s 轮询周期，期间页面一直是空态。**评委打开页面的那一刻正好是 Lambda 冷启动 + CRDB serverless 冷唤醒窗口**，线上比本地更容易撞上。修法：首次加载（`hasSnapshotRef` 为假）失败时用独立的短退避链继续重试到成功，不要退回稳态周期；空态文案也应说明"正在重试"而不是"没有记忆"。
+
+    **④ `fade` 参考线在 `held` 组是纯装饰**。该组所有条都远超阈值，那条竖线不传达任何东西，只在 `receding` 组才有意义。建议只在组内存在跨线记录时画，或整体弱化到只在 `receding` 组画。
+
+    另注（非交付问题）：本地 dev 库混着大量测试探针数据（`debug probe txt` / `isolation probe iso-*` / `overfetch probe *` / `SENTINEL-CONTENT-*` / `concurrent-storm` / `faded filler NN`），铺开后很像垃圾数据堆。**演示和截图一律走线上 prod 的干净切片**，不要用 dev 库出图。（2026-08-12，Claude 实机复验）
