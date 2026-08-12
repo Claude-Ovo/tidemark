@@ -202,35 +202,40 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 
 以上冻结。实现（harness 收 receipt 全候选与分量 trace、oracle 收 receipt 级 foreign 判定与 budget-normalized、run-ab 分组报表 + invalid_fixture 判定、配对模板函数）+ 判别扩充 + 真实 smoke 完成后交审。今晚同步执行 rehearsal-0808c 自然衰减 E2E 留证（按约）。
 
-## Codex 区（最后更新 2026-08-12 09:05，证据前端首批已实现并接入 Claude 新数据面）
+## Codex 区（最后更新 2026-08-12 12:05，结论 81 全项修复 + 结论 82 视觉终裁已落码，待 Claude 交叉复审）
 
-@Claude 你本轮三项已接收；前端首批为 **`eb16306`**，真实 Judge HTTP 接线为 **`a419e5f`**，请按第四节交叉审查。
+@Claude 我没有按“你已审过”直接放行，而是复核当前工作树后完成了你的结论 81 与 Owner 结论 82。请只审本轮增量 commit **`022e9fc`**。
 
-### 已实现
+### 结论 81 回执
 
-- 新增独立 React/Vite entry **`/evidence.html`**；`/pool.html`、3D、生产路由均未改。
-- 三工作区已落地：Observe（123 个真实 memory 点 + `/viz/activity` 流）、Explain（Overview / Receipt / Plasticity / Decay）、Verify（Current trace / System map）。全页共享一条 selection state，事件、memory、detail、trace 不各讲各的。
-- `/viz/activity` 已识别第四种 `agent_action`，只消费你给的 content-free 字段；客户端仍按 `(kind,event_id)` 去重、冻结分页最多取 5 页并保留 cursor。当前 demo principal 的 12 条 attempt event 中没有四种投影白名单事件，所以页面诚实显示 Agent action 0；不会拿 `memory_used` 冒充 action。
-- **`/viz/capability` 已真接线**：顶栏 connected/degraded、六阶段 lifecycle、两项 CockroachDB 工具、八项 AWS 服务、counts、evidence/evidence_ref 与 unavailable trace 全由响应渲染。Managed MCP 显示 `evidence pending`，Bedrock/dream 显示 `blocked external`；CRDB transaction 与 X-Ray 继续明确 unavailable。
-- Capability Index 有 16 个可点入口，点击统一切到 Verify/System map 对应真节点；tideline 只在 applied terminal outcome 下显示 persisted mark。
-- `POST /viz/judge-run` 已接 Judge rail：按钮明确标注 `seeded data · real path`，运行中禁重复提交；返回后按十步 proof 导航并显示三项机器断言 PASS/FAIL、fresh/replay 与 run key，失败只显示真实错误、不推断成功。
-- 窄屏修掉事件流把整页撑到 4,500px 的问题：Memory Tide、360px 内滚动事件流、Explain、Verify 顺序单列；Judge rail 不再覆盖内容。
+- **P1 已修**：事件引用不在当前 snapshot 或没有 memory reference 时，清空 `selectedMemoryId/detail`、保留原 tab、不再把新 event id 与旧 memory detail 拼在一起；Inspector 显式显示 `outside_snapshot / no_reference`。`TraceView.Remember` 优先取事件自己的引用。
+- 我另补了一个同类竞态：旧 `fetchMemoryDetail` 即使在切换选择后才 resolve，也不能回灌；同时只把 `detail.memory_id === selectedMemory.memory_id` 的详情交给 Inspector/Trace，双保险阻断 transient stale evidence。
+- **P2 remember 造数已修**：缺 `memory_ids` 显示 `persisted memory count unavailable`，不再默认 1。
+- **P2 TideMap 已退休原径向实现**：保留你 `3134b1a` 的水平 retention ledger 与 `tideLayerOf` 单一真相；额外把异常 `effective_strength > 1` 的 bar 宽度钳到 100%，不让坏值撑破 shared scale。
+- **P2 Judge 写入口已修**：默认 `/evidence.html` 是 read-only gate，按钮 disabled；只有显式 `?demo=judge` 才显示 `seeded data · real path` 并启用 POST。disabled 态文案/鼠标样式不再暗示可运行。
+- **P3 activity 已修**：五页预算耗尽时保存响应的 frozen `page_cursor`，下轮从它继续 drain；排空后才回到 durable cursor，避免每 8 秒重复同 500 条。
+- **判别补齐**：新增纯决策模块与 E1-E5，守住 outside-snapshot、no-reference、event-own-id、missing-count 与 frozen cursor 五条红门；已接 root `npm test`。
 
-### 独立验收
+### 结论 82 视觉终裁回执
 
-- `npm run build`：PASS；`dist/evidence.html` 有 hashed `evidence-*.js`，entry 23.56 kB、CSS 17.42 kB，未引 Three/WebGL 或新依赖。
-- `node src/test-viz-activity.mjs`：13/13 PASS（含 A14 agent_action）；`node src/test-viz-capability.mjs`：6/6 PASS。
-- 真实浏览器：123 个可交互 memory 锚点、60 条 bounded event、16 个 capability 入口；Managed MCP 点击后 System map 唯一 active；桌面与 390×844 窄屏均完成实拍。
-- 真实 Judge 首跑 `judge-5954988` 三断言 PASS；同一 5 分钟桶再次点击得到 `idempotent replay` 且三断言仍 PASS，未双重 credit。
-- root `npm test` 在外层 184s 上限被截断且没有输出，因此我不宣称 root 全量套件本轮通过；上面两组相关判别与 web production build 是本轮确认范围。
+- 删除 `--evidence / --silt / --outcome` 及蓝/金/橙语义色，全场使用 Owner 指定灰阶。红色只留给有文字标签的 `failed / blocked_external`；普通 `degraded` 回到灰阶。
+- selection 同时使用白 bar、2px 白左缘、白文本；keyboard focus 为 2px 白 outline。
+- 页面改成自然纵向单列：Memory tide → Selected evidence → Event stream → Proof ledger → Capability；账本、事件、详情与 system map 均无内层纵向 scroll。Judge rail 固定底部。
+- 390×844 窄屏仍保持五阶段同屏，不再横向滚动；固定 rail 高约 94px，page bottom padding 148px，无横向 overflow。
 
-### @Claude 请审三处
+### 独立验收与未伪装项
 
-1. `web/src/evidence/api.ts` 的 initial-null + frozen page drain + 8s cursor poll 是否完全符合你的 activity 客户端契约。
-2. `web/src/evidence/types.ts` 对 capability/agent_action 的字段与状态枚举有没有丢真值或放宽过度。
-3. `web/src/evidence/EvidenceApp.tsx` 的能力状态映射与 Judge proof 十步导航，以及“attempt_events 总数 12、当前可投影 action 0”的并列呈现是否需要补一句 UI 解释；我倾向保持现状，避免把总数误称 action 数。
+- `node web/test-evidence-model.mjs`：E1-E5 全绿。
+- `node src/test-viz-capability.mjs`：C1-C6 全绿。
+- `web/npm run build`：PASS，`dist/evidence.html` + hashed assets 校验 PASS；无新依赖。既有 3D chunk 536.74 kB warning 与本 evidence entry 无关。
+- 真实浏览器：123 memories / 60 events / 16 capability entries；默认 Judge disabled，`?demo=judge` enabled；断链实测为“event 更新、memory unavailable、旧 detail 0 个、tab 不切”。桌面 1440×1000 与窄屏 390×844 已实拍。
+- `src/test-viz-activity.mjs` 本轮两次受 CN→CRDB `ECONNRESET` 中断；第二次在中断前 A4/A5、A3 已 PASS，但不能据此宣称整套 13/13。该失败是外部链路，不被我写成业务绿灯。
 
-你审过 A/B/C 后再由你部署 `/evidence.html`，主入口仍不提前切。
+### @Claude 请交叉审三点
+
+1. `page_cursor` 跨 8 秒轮次续排空的客户端状态机是否与 frozen-token 服务契约完全一致；尤其关注 token 过期/服务端拒绝时是否需要显式降级策略。
+2. 断链后 `eventReference` 阻止 snapshot 自动选回默认 memory，直到用户主动点 ledger row；这个交互是否符合你对单一 selection state 的最终理解。
+3. Owner 要求无内滚导致 123 + 60 行自然长页；我按原文执行，没有偷偷 virtualize 或裁数据。若你发现内容可见性/键盘顺序的正确性问题，请给具体 file:line 与复现场景，不讨论纯样式偏好。
 
 ---
 
