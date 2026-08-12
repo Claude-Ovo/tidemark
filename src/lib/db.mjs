@@ -34,6 +34,12 @@ export const getPool = () => {
 // ECONNRESET/08xxx/57P01 等是链路死亡——必须销毁驱逐
 const isConnectionBroken = (e) => isRetryableDatabaseError(e) && e.code !== '40001'
 
+// 25001 "there is already a transaction in progress"：借到的连接上残留着服务端事务。
+// 成因（8/12 实锤，CN 风暴时段连续 ECONNRESET 后）：链路在 BEGIN 往返中途断掉时，
+// 服务端可能已开启事务而客户端只看到 socket 错误；死连接上补发的 ROLLBACK 也到不了。
+// 这不是业务错误，在同一条连接上重试只会一直撞同一堵墙——销毁换一条即可。
+const isDirtyConnection = (e) => e.code === '25001'
+
 // 短 SERIALIZABLE 事务 + 40001 整体重试（上限 5 + jitter），结论 23
 // pool 可注入以便单测 destroy/reuse 语义
 export const runTxWithPool = async (pool, fn, label) => {
@@ -48,17 +54,22 @@ export const runTxWithPool = async (pool, fn, label) => {
       return result
     } catch (e) {
       if (client) {
-        let rollbackOk = false
-        try { await client.query('ROLLBACK'); rollbackOk = true } catch {}
-        // 只在链路损坏或 ROLLBACK 失败时销毁；业务错误（23505/40001/应用异常）健康归还
-        if (!rollbackOk || isConnectionBroken(e)) client.release(e)
-        else client.release()
+        if (isConnectionBroken(e) || isDirtyConnection(e)) {
+          // 死链路 / 脏连接：ROLLBACK 发不出去或治不好它，直接驱逐，别把它归还给池
+          client.release(e)
+        } else {
+          let rollbackOk = false
+          try { await client.query('ROLLBACK'); rollbackOk = true } catch {}
+          // 业务错误（23505/40001/应用异常）ROLLBACK 后健康归还；ROLLBACK 失败则销毁
+          client.release(rollbackOk ? undefined : e)
+        }
       }
-      const retryable = e.code === '40001' || isRetryableDatabaseError(e)
+      const retryable = e.code === '40001' || isRetryableDatabaseError(e) || isDirtyConnection(e)
       if (!retryable || attempt >= 5) throw e
       // 退避量级必须覆盖 CRDB serverless 冷唤醒窗口（实测连续 4 次 ECONNRESET 后第 5 次才成功，
       // 累计需 ~11s）。序列化冲突用短退避即可，链路故障用长退避。
-      const broken = e.code !== '40001'
+      // 脏连接换一条就好，用短退避；只有真链路故障才值得等冷唤醒窗口
+      const broken = e.code !== '40001' && !isDirtyConnection(e)
       const base = broken ? 750 : 250
       const delay = Math.min(broken ? 8000 : 4000, base * 2 ** (attempt - 1)) + Math.floor(Math.random() * 200)
       console.error(JSON.stringify({ evt: 'tx_retry', label, attempt, code: e.code }))

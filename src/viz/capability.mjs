@@ -68,10 +68,10 @@ export const vizCapability = async ({ principal }) => {
     {
       id: 'managed_mcp_audit',
       name: 'CockroachDB Cloud Managed MCP Server',
-      status: 'evidence_pending',
-      role: 'Operator-facing read-only audit path: a dedicated tidemark_auditor SQL account exposing four sanitized views and eight content-free ledgers.',
-      evidence: 'SQL account face implemented and red-gate tested (A1-A7). Console wiring and a live MCP tool query still need operator capture; we do not claim live MCP verification before that.',
-      evidence_ref: 'docs/AUDITOR.md, infra/setup-auditor.mjs, src/test-auditor.mjs',
+      status: 'live',
+      role: 'Operator-facing read-only audit path: the official Managed MCP tools over this cluster, plus a dedicated tidemark_auditor SQL account exposing four sanitized views and eight content-free ledgers.',
+      evidence: 'Operator captured 2026-08-12T01:44:38Z: an MCP client authorized through the Cloud console OAuth flow ran the official read-only tools against cluster brief-herring and read tidemark_prod, returning all four audit views (audit_memories=12 matching base memories=12, audit_recalls=36, audit_nightly_runs=12, audit_memory_rebuild_queue=0). That session connected as the Cloud principal (managed-mcp), not as tidemark_auditor - the least-privilege auditor face stays proven by its own red gates (A1-A7), and we keep the two claims separate.',
+      evidence_ref: 'docs/EVIDENCE-MANAGED-MCP-0812.md, docs/AUDITOR.md, infra/setup-auditor.mjs, src/test-auditor.mjs',
     },
   ]
 

@@ -58,7 +58,7 @@ await t('C3 计数与库直查一致（不是硬编码）', async () => {
 await t('C4 未完成项必须带理由与证据指针', async () => {
   const incomplete = [...cap.cockroachdb_tools, ...cap.aws_services]
     .filter(e => e.status === 'evidence_pending' || e.status === 'blocked_external')
-  assert.ok(incomplete.length >= 2, 'this build genuinely has pending items; hiding them would be the failure')
+  assert.ok(incomplete.length >= 1, 'this build genuinely has pending items; hiding them would be the failure')
   for (const entry of incomplete) {
     assert.ok(entry.evidence && entry.evidence.length > 20, `${entry.id} must state why, not just a status word`)
     assert.ok(entry.evidence_ref, `${entry.id} must point at repo evidence`)
@@ -66,8 +66,14 @@ await t('C4 未完成项必须带理由与证据指针', async () => {
   const bedrock = cap.aws_services.find(s => s.id === 'bedrock')
   assert.equal(bedrock.status, 'blocked_external')
   assert.match(bedrock.evidence, /denied/i, 'Bedrock must be stated as denied, not "coming soon"')
+  // Managed MCP flipped to live only after the 2026-08-12 operator capture. Live is
+  // allowed to say live, but it must carry the capture and must not silently upgrade
+  // the auditor-credential claim along with it.
   const mcp = cap.cockroachdb_tools.find(s => s.id === 'managed_mcp_audit')
-  assert.equal(mcp.status, 'evidence_pending', 'Managed MCP may not claim live before operator capture')
+  assert.equal(mcp.status, 'live', 'Managed MCP is evidenced by operator capture')
+  assert.match(mcp.evidence, /2026-08-12T01:44:38Z/, 'live Managed MCP must cite the operator capture')
+  assert.match(mcp.evidence_ref, /EVIDENCE-MANAGED-MCP-0812\.md/, 'capture must be pointed at from the repo')
+  assert.match(mcp.evidence, /not as tidemark_auditor/, 'must not conflate the Cloud principal with the auditor role')
 })
 
 await t('C5 unavailable 清单显式存在（不猜字段）', async () => {
