@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
-import { TideMap } from './TideMap'
+import { TideMap, TIDE_LAYERS, tideLayerOf } from './TideMap'
 import type {
   ActivityEvent,
   ActivityKind,
@@ -553,9 +553,11 @@ export function EvidenceApp() {
           </div>
           <TideMap memories={memories} fadeThreshold={snapshot?.fade_threshold ?? 0.15} selectedId={selectedMemoryId} onSelect={selectMemory} />
           <div className="tide-stats">
-            <span><i className="dot dot--held" />held {memories.filter((memory) => memory.pinned || memory.effective_strength >= 0.7).length}</span>
-            <span><i className="dot dot--active" />active {memories.filter((memory) => !memory.pinned && memory.effective_strength < 0.7 && memory.effective_strength > 0.35).length}</span>
-            <span><i className="dot dot--fading" />receding {memories.filter((memory) => !memory.pinned && memory.effective_strength <= 0.35).length}</span>
+            {TIDE_LAYERS.map((layer) => (
+              <span key={layer.id}>
+                {layer.label} <b>{memories.filter((memory) => tideLayerOf(memory) === layer.id).length}</b>
+              </span>
+            ))}
           </div>
           <EventStream events={activity} selected={selectedEvent} filter={stageFilter} state={activityState} onSelect={selectEvent} />
           {activityTruncated && <p className="data-note">Activity history exceeded the five-page display budget; the cursor remains resumable.</p>}

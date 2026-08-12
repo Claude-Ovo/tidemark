@@ -1,21 +1,40 @@
+/* Palette: neutral ink on near-black, one blue accent (Owner directive
+   2026-08-12). Every value is a documented step, and the roles that carry data
+   were run through the data-viz validator against this surface rather than
+   eyeballed:
+     accent  #3987e5  L in band, C >= 0.1, 4.79:1 on surface  [ALL CHECKS PASS]
+     bar     #898781  4.85:1 on surface; separated from the accent by
+                      CVD dE 15.9 (protan) and normal-vision dE 17.0
+   The bars are deliberately neutral: bar length already encodes retention, so
+   spending a hue on it would re-encode what the reader can already measure.
+   Blue is reserved for one job only - what is currently selected.
+   This is a committed dark surface, not an auto-flip of a light theme. */
 :root {
   color-scheme: dark;
-  font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
-  color: #e8ece7;
-  background: #071016;
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans", Arial, sans-serif;
+  color: #ffffff;
+  background: #0d0d0d;
   font-synthesis: none;
-  --abyss: #071016;
-  --slate: #10242b;
-  --slate-soft: #0b1b21;
-  --slate-raised: #142b32;
-  --ivory: #e8ece7;
-  --muted: #8fa2a4;
-  --quiet: #667b7e;
-  --evidence: #8fc9d6;
-  --silt: #b9a56a;
-  --outcome: #c77d6b;
-  --line: rgba(143, 201, 214, .15);
-  --line-strong: rgba(143, 201, 214, .28);
+  --abyss: #0d0d0d;          /* page plane */
+  --slate: #1a1a19;          /* chart / panel surface */
+  --slate-soft: #151514;     /* sunken rows */
+  --slate-raised: #232320;   /* raised chrome */
+  --ivory: #ffffff;          /* primary ink   17.42:1 */
+  --muted: #c3c2b7;          /* secondary ink  9.72:1 */
+  --quiet: #898781;          /* muted ink / bar fill 4.85:1 */
+  --evidence: #3987e5;       /* the one accent  4.79:1 */
+  --silt: #ffffff;           /* pinned marker - brightness, not a second hue */
+  --outcome: #898781;        /* de-emphasised note ink */
+  --grid: #2c2c2a;           /* hairline gridline */
+  --baseline: #383835;       /* axis / baseline */
+  --line: rgba(255, 255, 255, .09);
+  --line-strong: rgba(255, 255, 255, .17);
+  --wash-accent: rgba(57, 135, 229, .10);
+  --wash-raise: rgba(255, 255, 255, .045);
+  --wash-sunken: rgba(0, 0, 0, .30);
+  --status-critical: #d03b3b;
+  --status-serious: #ec835a;
+  --status-good: #0ca30c;
 }
 
 * { box-sizing: border-box; }
@@ -95,7 +114,7 @@ code {
   white-space: nowrap;
 }
 .status-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--quiet); }
-.status-pill[data-state="connected"] i { background: var(--evidence); box-shadow: 0 0 0 3px rgba(143, 201, 214, .09); }
+.status-pill[data-state="connected"] i { background: var(--evidence); box-shadow: 0 0 0 3px var(--wash-accent); }
 .status-pill[data-state="degraded"] i, .status-pill[data-state="loading"] i { background: var(--silt); }
 .status-pill[data-state="failed"] i { background: var(--outcome); }
 
@@ -152,7 +171,7 @@ code {
   left: 10px;
   transform: rotate(45deg);
 }
-.lifecycle__track button[data-active] { color: var(--ivory); background: rgba(143, 201, 214, .035); }
+.lifecycle__track button[data-active] { color: var(--ivory); background: var(--wash-raise); }
 .lifecycle__track button[data-active]::after { border-color: var(--evidence); background: var(--evidence); }
 .lifecycle__index { position: relative; z-index: 1; font: 500 9px/1 ui-monospace, monospace; color: var(--quiet); background: var(--abyss); }
 .lifecycle__track strong, .lifecycle__track small { display: block; }
@@ -162,9 +181,9 @@ code {
 .error-banner {
   margin-top: 12px;
   border-left: 2px solid var(--outcome);
-  background: rgba(199, 125, 107, .08);
+  background: rgba(208, 59, 59, .10);
   padding: 9px 12px;
-  color: #d7aaa1;
+  color: #f0b3b3;
   font-size: 12px;
 }
 
@@ -181,7 +200,7 @@ code {
 
 .panel {
   min-width: 0;
-  background: rgba(11, 27, 33, .83);
+  background: rgba(26, 26, 25, .94);
   border: 1px solid var(--line);
   box-shadow: 0 20px 80px rgba(0, 0, 0, .14);
 }
@@ -202,28 +221,107 @@ code {
 .section-heading small { color: var(--quiet); font: 500 9px/1.3 ui-monospace, monospace; text-transform: uppercase; }
 
 .observe { display: flex; flex-direction: column; min-height: 0; }
-.tide-map { height: 256px; min-height: 220px; position: relative; overflow: hidden; border-bottom: 1px solid var(--line); }
-.tide-map canvas, .tide-map__hits { position: absolute; inset: 0; }
-.tide-map__hits { pointer-events: none; }
-.tide-hit {
-  appearance: none;
+/* Tide ledger - horizontal bars off a shared baseline, sorted by retention.
+   Bar specs per the data-viz method: thin mark, 4px rounded data-end and square
+   at the baseline, 2px of surface between neighbours, value direct-labelled at
+   the tip, hairline solid reference line for the fade threshold (never dashed).
+   Colour encodes nothing here except selection. */
+.tide-ledger { display: flex; flex-direction: column; min-height: 0; flex: 1; border-bottom: 1px solid var(--line); }
+.tide-ledger__scale {
+  display: grid;
+  grid-template-columns: 34% 1fr 42px;
+  gap: 10px;
+  padding: 7px 15px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.tide-ledger__axis { position: relative; height: 10px; }
+.tide-ledger__axis b {
   position: absolute;
-  width: 34px;
-  height: 34px;
-  padding: 0;
+  top: 0;
+  white-space: nowrap;
+  color: var(--quiet);
+  font: 500 9px/1 ui-monospace, monospace;
+  letter-spacing: .06em;
+}
+.tide-ledger__axis b.is-fade { transform: translateX(-50%); color: var(--muted); }
+.tide-ledger__scale-label { color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .12em; }
+.tide-ledger__body { overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1; }
+
+.tide-group { padding-bottom: 6px; }
+.tide-group__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 9px 15px 5px;
+  background: var(--slate);
+  color: var(--muted);
+  font: 600 9px/1.2 ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+.tide-group__head small { color: var(--quiet); font-size: 9px; letter-spacing: .04em; text-transform: none; }
+.tide-group__head b { color: var(--ivory); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.tide-row {
+  appearance: none;
   border: 0;
-  border-radius: 50%;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34% 1fr 42px;
+  gap: 10px;
+  align-items: center;
+  /* 2px of surface between neighbouring bars, not a stroke around them */
+  padding: 2px 15px;
+  min-height: 26px;
   background: transparent;
   cursor: pointer;
-  pointer-events: auto;
+  text-align: left;
 }
-.tide-hit:hover { background: rgba(143, 201, 214, .06); }
-.tide-hit[data-selected] { background: rgba(185, 165, 106, .08); }
-.tide-map__legend { position: absolute; inset: 10px 12px auto; display: flex; justify-content: space-between; color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; text-transform: uppercase; }
-.tide-map__overflow { position: absolute; inset: auto 10px 8px; margin: 0; color: var(--outcome); font-size: 10px; }
+.tide-row__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tide-row__pin { width: 5px; height: 5px; flex: none; background: var(--silt); transform: rotate(45deg); }
+.tide-row__track { position: relative; height: 10px; background: var(--wash-sunken); border-left: 1px solid var(--baseline); }
+.tide-row__bar {
+  display: block;
+  height: 100%;
+  background: var(--quiet);
+  /* square at the baseline, rounded at the data end */
+  border-radius: 0 4px 4px 0;
+}
+/* The threshold line rides ABOVE the bar: a reference line a filled mark can
+   cover is not a reference line. Light enough to read on both the neutral bar
+   and the empty track. */
+.tide-row__fade { position: absolute; top: -2px; bottom: -2px; width: 1px; z-index: 1; background: rgba(255, 255, 255, .38); }
+.tide-row__bar { position: relative; }
+.tide-row__value { color: var(--quiet); font: 500 10px/1 ui-monospace, monospace; font-variant-numeric: tabular-nums; text-align: right; }
+
+.tide-row:hover { background: var(--wash-raise); }
+.tide-row:hover .tide-row__bar { background: var(--muted); }
+.tide-row[data-selected] { background: var(--wash-accent); }
+.tide-row[data-selected] .tide-row__bar { background: var(--evidence); }
+.tide-row[data-selected] .tide-row__name { color: var(--ivory); }
+.tide-row[data-selected] .tide-row__value { color: var(--ivory); }
+/* Every bar wears the same neutral ink regardless of band: shading the receding
+   band darker would re-encode what the bar length already says, and that step
+   sat at 1.48:1 on this surface - below the 3:1 mark floor. The band is carried
+   by the group heading instead. */
 
 .tide-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
-.tide-stats span { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: var(--slate-soft); color: var(--muted); font: 500 9px/1.2 ui-monospace, monospace; }
+.tide-stats span { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px; background: var(--slate-soft); color: var(--quiet); font: 500 9px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
+.tide-stats b { color: var(--ivory); font-size: 12px; font-variant-numeric: tabular-nums; }
 .dot { width: 5px; height: 5px; display: inline-block; border-radius: 50%; }
 .dot--held { background: var(--silt); }
 .dot--active { background: var(--evidence); }
@@ -237,7 +335,7 @@ code {
   appearance: none;
   width: 100%;
   border: 0;
-  border-bottom: 1px solid rgba(143, 201, 214, .075);
+  border-bottom: 1px solid var(--line);
   background: transparent;
   text-align: left;
   padding: 10px 13px 9px 16px;
@@ -250,7 +348,7 @@ code {
 .event-row[data-kind="remember"]::before { background: var(--evidence); }
 .event-row[data-kind="outcome"]::before { background: var(--silt); }
 .event-row[data-kind="agent_action"]::before { background: var(--outcome); }
-.event-row:hover, .event-row[data-selected] { background: rgba(143, 201, 214, .045); }
+.event-row:hover, .event-row[data-selected] { background: var(--wash-raise); }
 .event-row[data-selected]::before { opacity: 1; }
 .event-row__kind { color: var(--evidence); font: 600 9px/1 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .1em; }
 .event-row strong { color: var(--ivory); font-size: 11px; font-weight: 550; }
@@ -300,7 +398,7 @@ code {
 .receipt dt { color: var(--quiet); font-size: 9px; text-transform: uppercase; }
 .receipt dd { margin: 5px 0 0; color: var(--evidence); font: 500 12px/1 ui-monospace, monospace; }
 
-.change-row { border-left: 2px solid var(--quiet); border-top: 1px solid var(--line); padding: 11px 12px; margin-bottom: 7px; background: rgba(7, 16, 22, .36); }
+.change-row { border-left: 2px solid var(--quiet); border-top: 1px solid var(--line); padding: 11px 12px; margin-bottom: 7px; background: var(--wash-sunken); }
 .change-row[data-applied] { border-left-color: var(--silt); }
 .change-row > div:first-child { display: flex; justify-content: space-between; gap: 12px; }
 .change-row span { color: var(--evidence); font: 600 9px/1 ui-monospace, monospace; text-transform: uppercase; }
@@ -321,7 +419,7 @@ code {
 .empty-state--large { min-height: 220px; display: grid; place-items: center; text-align: center; margin: 0; border: 1px dashed var(--line); }
 
 .tideline { height: 9px; flex: 0 0 auto; background: var(--silt); opacity: .62; clip-path: polygon(0 48%, 7% 35%, 14% 58%, 22% 43%, 31% 63%, 40% 42%, 48% 56%, 57% 33%, 66% 55%, 75% 41%, 84% 62%, 92% 38%, 100% 49%, 100% 62%, 92% 51%, 84% 73%, 75% 54%, 66% 67%, 57% 46%, 48% 69%, 40% 54%, 31% 75%, 22% 56%, 14% 71%, 7% 48%, 0 61%); }
-.persisted-mark { min-height: 76px; padding: 10px 17px 13px; background: rgba(185, 165, 106, .035); }
+.persisted-mark { min-height: 76px; padding: 10px 17px 13px; background: var(--wash-raise); }
 .persisted-mark > div { margin-top: 8px; display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
 .persisted-mark strong { font: 400 15px/1.2 Georgia, serif; color: var(--silt); }
 .persisted-mark code { color: var(--quiet); overflow-wrap: anywhere; text-align: right; }
@@ -329,7 +427,7 @@ code {
 
 .verify { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .trace-list { list-style: none; margin: 0; padding: 13px 13px 8px; display: grid; gap: 2px; }
-.trace-list li { display: grid; grid-template-columns: 27px 1fr auto; gap: 8px; align-items: center; min-height: 56px; border-left: 1px solid var(--line); padding: 8px 6px 8px 11px; background: rgba(7, 16, 22, .26); }
+.trace-list li { display: grid; grid-template-columns: 27px 1fr auto; gap: 8px; align-items: center; min-height: 56px; border-left: 1px solid var(--line); padding: 8px 6px 8px 11px; background: var(--wash-sunken); }
 .trace-list li[data-complete] { border-left-color: var(--evidence); }
 .trace-list li > span { color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; }
 .trace-list strong, .trace-list small { display: block; }
@@ -338,8 +436,8 @@ code {
 .trace-list code { color: var(--quiet); font-size: 9px; }
 
 .system-list { overflow: auto; padding: 10px 12px; display: grid; gap: 5px; }
-.system-list article { padding: 10px; border-left: 1px solid var(--line-strong); background: rgba(7, 16, 22, .26); }
-.system-list article[data-active] { border-left-color: var(--silt); background: rgba(185, 165, 106, .05); }
+.system-list article { padding: 10px; border-left: 1px solid var(--line-strong); background: var(--wash-sunken); }
+.system-list article[data-active] { border-left-color: var(--silt); background: var(--wash-accent); }
 .system-list header { display: grid; gap: 3px; }
 .system-list strong { font-size: 11px; }
 .system-list header span { color: var(--evidence); font: 600 8px/1 ui-monospace, monospace; text-transform: uppercase; }
@@ -361,7 +459,7 @@ code {
   align-items: center;
   gap: 12px;
   padding: 9px 12px;
-  background: rgba(11, 27, 33, .62);
+  background: rgba(26, 26, 25, .82);
 }
 .capabilities > div { display: flex; flex-wrap: wrap; gap: 5px; }
 .capabilities > span small { display: block; margin-top: 4px; color: var(--quiet); font: 500 8px/1 ui-monospace, monospace; text-transform: uppercase; }
@@ -379,7 +477,7 @@ code {
 .capabilities button[data-status="blocked_external"] i,
 .capabilities button[data-status="evidence_pending"] i { color: var(--silt); }
 .capabilities__empty { color: var(--quiet); font-size: 10px; }
-.capabilities button:hover { color: var(--ivory); border-color: var(--line-strong); background: rgba(143, 201, 214, .04); }
+.capabilities button:hover { color: var(--ivory); border-color: var(--line-strong); background: var(--wash-raise); }
 
 .judge-rail {
   position: fixed;
@@ -393,18 +491,18 @@ code {
   align-items: center;
   gap: 18px;
   border: 1px solid var(--line-strong);
-  background: rgba(7, 16, 22, .96);
+  background: rgba(13, 13, 13, .97);
   padding: 9px 12px;
   box-shadow: 0 14px 40px rgba(0, 0, 0, .35);
 }
-.judge-rail[data-active] { border-color: rgba(185, 165, 106, .44); }
+.judge-rail[data-active] { border-color: var(--line-strong); }
 .judge-rail > div strong { display: block; margin-top: 3px; font: 400 14px/1.2 Georgia, serif; }
 .judge-rail p { margin: 0; color: var(--quiet); font-size: 10px; line-height: 1.4; }
 .judge-rail p code { display: block; margin-top: 4px; color: var(--silt); }
 .judge-rail button { appearance: none; border: 1px solid var(--silt); background: transparent; color: var(--silt); padding: 9px 12px; cursor: pointer; font: 600 10px/1 ui-monospace, monospace; text-transform: uppercase; }
-.judge-rail button:hover { background: rgba(185, 165, 106, .09); }
+.judge-rail button:hover { background: var(--wash-accent); }
 .judge-rail button:disabled { cursor: wait; opacity: .55; }
-.judge-rail[data-state="failed"] { border-color: rgba(199, 125, 107, .55); }
+.judge-rail[data-state="failed"] { border-color: var(--status-critical); }
 
 .snapshot-note { margin: 9px 0 0; color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; text-align: right; }
 
