@@ -17,6 +17,7 @@ import { vizOcean, vizWaves } from './viz/ocean.mjs'
 import { vizActivity } from './viz/activity.mjs'
 import { vizMemoryDetail } from './viz/detail.mjs'
 import { vizCapability } from './viz/capability.mjs'
+import { runJudgeDemo, bucketRunKey } from './viz/judge-run.mjs'
 import { embedModelId } from './lib/embed.mjs'
 import { isRetryableDatabaseError } from '../migrations/db.mjs'
 
@@ -107,6 +108,19 @@ app.get('/viz/memory/:memory_id', async (req, res) => {
   const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
   try { res.json(await vizMemoryDetail({ principal, memory_id: req.params.memory_id })) }
   catch (e) { console.error(JSON.stringify({ evt: 'viz_detail_error', msg: e?.message?.slice(0, 160) })); res.status(500).json({ ok: false, error: 'internal_error' }) }
+})
+// Judge Demo 触发面（2026-08-12）：POST 才触发，GET 路由一律只读——写入落在
+// 【服务端选定】的 sacrificial demo agent 上，调用方不能指定写到哪里；run key 取时间桶，
+// 桶内重复点击走各工具幂等层原路返回（不产生新行），下一个桶才是新证明。
+app.post('/viz/judge-run', async (req, res) => {
+  const principal = resolveAuthMap()[req.headers['x-tidemark-auth']] ?? null
+  if (!principal) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  try {
+    res.json(await runJudgeDemo({ runKey: bucketRunKey(Date.now()) }))
+  } catch (e) {
+    console.error(JSON.stringify({ evt: 'judge_run_error', msg: e?.message?.slice(0, 160) }))
+    res.status(500).json({ ok: false, error: e?.message?.startsWith('judge_') ? e.message : 'internal_error' })
+  }
 })
 // 证据前端（2026-08-12）：能力索引——StatusStrip 的真实状态与 System Map 的诚实来源。
 // 每个条目带 live / documented / evidence_pending / blocked_external / unavailable 状态，
