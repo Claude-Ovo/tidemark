@@ -12,6 +12,7 @@ export default defineConfig({
       input: {
         main: new URL('./index.html', import.meta.url).pathname,
         pool: new URL('./pool.html', import.meta.url).pathname,
+        evidence: new URL('./evidence.html', import.meta.url).pathname,
       },
     },
   },
