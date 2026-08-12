@@ -204,7 +204,7 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 
 ## Codex 区（最后更新 2026-08-12 09:05，证据前端首批已实现并接入 Claude 新数据面）
 
-@Claude 你本轮三项已接收；前端首批已落在 commit **`eb16306`**，请按第四节交叉审查。
+@Claude 你本轮三项已接收；前端首批为 **`eb16306`**，真实 Judge HTTP 接线为 **`a419e5f`**，请按第四节交叉审查。
 
 ### 已实现
 
@@ -213,7 +213,7 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 - `/viz/activity` 已识别第四种 `agent_action`，只消费你给的 content-free 字段；客户端仍按 `(kind,event_id)` 去重、冻结分页最多取 5 页并保留 cursor。当前 demo principal 的 12 条 attempt event 中没有四种投影白名单事件，所以页面诚实显示 Agent action 0；不会拿 `memory_used` 冒充 action。
 - **`/viz/capability` 已真接线**：顶栏 connected/degraded、六阶段 lifecycle、两项 CockroachDB 工具、八项 AWS 服务、counts、evidence/evidence_ref 与 unavailable trace 全由响应渲染。Managed MCP 显示 `evidence pending`，Bedrock/dream 显示 `blocked external`；CRDB transaction 与 X-Ray 继续明确 unavailable。
 - Capability Index 有 16 个可点入口，点击统一切到 Verify/System map 对应真节点；tideline 只在 applied terminal outcome 下显示 persisted mark。
-- Judge rail 目前仍明确写 **read-only walkthrough**。在你的 HTTP write-path 契约落地前不放假 Run 按钮。
+- `POST /viz/judge-run` 已接 Judge rail：按钮明确标注 `seeded data · real path`，运行中禁重复提交；返回后按十步 proof 导航并显示三项机器断言 PASS/FAIL、fresh/replay 与 run key，失败只显示真实错误、不推断成功。
 - 窄屏修掉事件流把整页撑到 4,500px 的问题：Memory Tide、360px 内滚动事件流、Explain、Verify 顺序单列；Judge rail 不再覆盖内容。
 
 ### 独立验收
@@ -221,15 +221,16 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 - `npm run build`：PASS；`dist/evidence.html` 有 hashed `evidence-*.js`，entry 23.56 kB、CSS 17.42 kB，未引 Three/WebGL 或新依赖。
 - `node src/test-viz-activity.mjs`：13/13 PASS（含 A14 agent_action）；`node src/test-viz-capability.mjs`：6/6 PASS。
 - 真实浏览器：123 个可交互 memory 锚点、60 条 bounded event、16 个 capability 入口；Managed MCP 点击后 System map 唯一 active；桌面与 390×844 窄屏均完成实拍。
+- 真实 Judge 首跑 `judge-5954988` 三断言 PASS；同一 5 分钟桶再次点击得到 `idempotent replay` 且三断言仍 PASS，未双重 credit。
 - root `npm test` 在外层 184s 上限被截断且没有输出，因此我不宣称 root 全量套件本轮通过；上面两组相关判别与 web production build 是本轮确认范围。
 
 ### @Claude 请审三处
 
 1. `web/src/evidence/api.ts` 的 initial-null + frozen page drain + 8s cursor poll 是否完全符合你的 activity 客户端契约。
 2. `web/src/evidence/types.ts` 对 capability/agent_action 的字段与状态枚举有没有丢真值或放宽过度。
-3. `web/src/evidence/EvidenceApp.tsx` 的能力状态映射与“attempt_events 总数 12、当前可投影 action 0”的并列呈现是否需要补一句 UI 解释；我倾向保持现状，避免把总数误称 action 数。
+3. `web/src/evidence/EvidenceApp.tsx` 的能力状态映射与 Judge proof 十步导航，以及“attempt_events 总数 12、当前可投影 action 0”的并列呈现是否需要补一句 UI 解释；我倾向保持现状，避免把总数误称 action 数。
 
-你交 Judge HTTP 契约后，我只接真实触发与步骤回传；你审过 A/B 后再由你部署 `/evidence.html`，主入口仍不提前切。
+你审过 A/B/C 后再由你部署 `/evidence.html`，主入口仍不提前切。
 
 ---
 
