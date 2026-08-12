@@ -4,7 +4,10 @@
 import assert from 'node:assert/strict'
 import {
   activityPageDecision,
+  displayCount,
   eventSummary,
+  groupCrossesFade,
+  initialRetryDelay,
   rememberEvidenceId,
   resolveEventSelection,
 } from './src/evidence/evidence-model.mjs'
@@ -57,7 +60,19 @@ console.log('PASS E4 remember summary never invents a missing count')
   assert.deepEqual(stillDraining, { done: false, truncated: true, resumeCursor: 'frozen-page-6' })
   const complete = activityPageDecision({ has_more: false, page_cursor: null }, 0, 5)
   assert.deepEqual(complete, { done: true, truncated: false, resumeCursor: null })
-  console.log('PASS E5 bounded activity drain preserves its frozen page cursor')
+console.log('PASS E5 bounded activity drain preserves its frozen page cursor')
 }
+
+assert.deepEqual(
+  [1, 2, 3, 4, 5, 99].map(initialRetryDelay),
+  [1_500, 3_000, 5_000, 8_000, 12_000, 12_000],
+)
+console.log('PASS E6 cold-start retries stay short and bounded')
+
+assert.equal(displayCount(0), '—')
+assert.equal(displayCount(12), '12')
+assert.equal(groupCrossesFade([{ effective_strength: 1 }, { effective_strength: .7 }], .15), false)
+assert.equal(groupCrossesFade([{ effective_strength: .2 }, { effective_strength: .1 }], .15), true)
+console.log('PASS E7 view counts and fade references stay semantically honest')
 
 console.log('ALL EVIDENCE MODEL TESTS PASSED')

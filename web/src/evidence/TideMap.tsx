@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { groupCrossesFade } from './evidence-model.mjs'
 import type { MemoryWithEpisode } from './types'
 
 // Form choice (2026-08-12, Owner directive to drop the ring): retention is a
@@ -33,12 +34,15 @@ export function TideMap({
   fadeThreshold,
   selectedId,
   onSelect,
+  groupLimit = 10,
 }: {
   memories: MemoryWithEpisode[]
   fadeThreshold: number
   selectedId: string | null
   onSelect: (memoryId: string) => void
+  groupLimit?: number
 }) {
+  const [expandedGroups, setExpandedGroups] = useState<Set<TideLayer>>(() => new Set())
   const groups = useMemo(() => {
     const sorted = [...memories].sort((a, b) =>
       b.effective_strength - a.effective_strength || a.memory_id.localeCompare(b.memory_id))
@@ -66,14 +70,19 @@ export function TideMap({
       </div>
       <div className="tide-ledger__body">
         {!memories.length && <p className="empty-state">No memories are exposed in this snapshot.</p>}
-        {groups.filter((group) => group.rows.length).map((group) => (
+        {groups.filter((group) => group.rows.length).map((group) => {
+          const expanded = expandedGroups.has(group.id)
+          const visibleRows = expanded ? group.rows : group.rows.slice(0, groupLimit)
+          const hiddenCount = group.rows.length - visibleRows.length
+          const showFadeLine = groupCrossesFade(group.rows, fadeThreshold)
+          return (
           <section key={group.id} className="tide-group" aria-label={`${group.label}, ${group.rows.length} records`}>
             <header className="tide-group__head">
               <span>{group.label}</span>
               <small>{group.note}</small>
               <b>{group.rows.length}</b>
             </header>
-            {group.rows.map((memory) => {
+            {visibleRows.map((memory) => {
               const selected = memory.memory_id === selectedId
               return (
                 <button
@@ -90,15 +99,32 @@ export function TideMap({
                     {memory.content_preview ?? memory.memory_id.slice(0, 8)}
                   </span>
                   <span className="tide-row__track">
-                    <i className="tide-row__fade" style={{ left: fadeLeft }} aria-hidden="true" />
+                    {showFadeLine && <i className="tide-row__fade" style={{ left: fadeLeft }} aria-hidden="true" />}
                     <i className="tide-row__bar" style={{ width: `${Math.min(100, Math.max(1.5, memory.effective_strength * 100))}%` }} />
                   </span>
                   <span className="tide-row__value">{pct(memory.effective_strength)}</span>
                 </button>
               )
             })}
+            {group.rows.length > groupLimit && (
+              <button
+                type="button"
+                className="tide-group__toggle"
+                aria-expanded={expanded}
+                onClick={() => setExpandedGroups((current) => {
+                  const next = new Set(current)
+                  if (next.has(group.id)) next.delete(group.id)
+                  else next.add(group.id)
+                  return next
+                })}
+              >
+                {expanded ? `Show first ${groupLimit}` : `Show all ${group.rows.length}`}
+                {!expanded && <span>{hiddenCount} more</span>}
+              </button>
+            )}
           </section>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

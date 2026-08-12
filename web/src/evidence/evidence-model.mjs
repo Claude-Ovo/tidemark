@@ -55,3 +55,15 @@ export const activityPageDecision = (page, pageIndex, maxPages) => {
     resumeCursor: page.page_cursor,
   }
 }
+
+export const initialRetryDelay = (failedAttempts) => {
+  const delays = [1_500, 3_000, 5_000, 8_000, 12_000]
+  const index = Math.min(delays.length - 1, Math.max(0, Number(failedAttempts) - 1))
+  return delays[index]
+}
+
+export const displayCount = (count) => Number(count) > 0 ? String(count) : '—'
+
+export const groupCrossesFade = (rows, fadeThreshold) =>
+  rows.some((row) => row.effective_strength <= fadeThreshold) &&
+  rows.some((row) => row.effective_strength > fadeThreshold)

@@ -20,7 +20,8 @@
 | AWS Lambda + API Gateway + EventBridge + Secrets Manager + SQS DLQ | 主服务运行时 + 夜间批处理（幂等+租约+revision 防竞态）+ 密钥面 + 双层失败通路 | AWS 服务 |
 | Lambda 内自托管 ONNX 推理 | embedding（量化 MiniLM 随部署包封存，manifest 验真、派生身份、零外部 AI 调用；结论 55——本账号 Bedrock 官方终审拒绝 resolved-negative，bedrock 分支保留为企业账号可选未验证路径） | AWS 服务内（推理跑在 Lambda 上） |
 | CloudWatch | 延迟/失败率/outcome_report_rate/隔离记忆数 | AWS 服务 |
-| **记忆潮池前端**（`web/pool.html`，2D canvas 零依赖） | 单 agent 记忆的实时可视化：粒子=记忆、半径=服务端保留强度、recall 涟漪、outcome 潮痕、`/viz/activity` live 消费环、hover 卡+居中详情 modal、键盘/焦点/reduced-motion 全契约 | 演示面（只读 viz 端点，与业务面隔离） |
+| **证据前端**（`web/evidence.html`，React + DOM/CSS，无 WebGL；**提交主入口**，公网 https://dhgwgra6nycty.cloudfront.net） | 保留强度账本（共享基线水平条 + fade 阈值参考线）、持久事件流（remember/recall/agent action/outcome 四源）、单条记忆证据（receipt 分量、plasticity before→after、服务端采样衰减曲线）、trace 与 capability 索引；单一 `selectedEvent → selectedMemoryId → selectedDetail → selectedTrace`，事件与记忆断链时显式标注而非静默展示别条记忆的证据；十步生命周期证明置于 `?demo=judge` 只读闸后 | 演示面（只读 viz 端点，与业务面隔离） |
+| **记忆潮池前端**（`web/pool.html`，2D canvas 零依赖） | 总览模块，仍可直链：粒子=记忆、半径=服务端保留强度、recall 涟漪、outcome 潮痕、`/viz/activity` live 消费环、hover 卡+居中详情 modal、键盘/焦点/reduced-motion 全契约 | 演示面（同上） |
 | **三臂 A/B 评测**（`src/ab/`，P0-12） | recall + outcome-gated plasticity evaluation slice：确定性脚本 agent、12 场景三组呈现（main/controls/diagnostics）、canonical experiment identity、content-free trace | 评测证据面（零 viz 依赖） |
 
 ## 记忆分层
@@ -46,6 +47,8 @@ recall 只开回执不加固；`report_outcome` 里被 item 级证据点名 cred
 - [x] P0-12 三臂 A/B：harness 基线终签；v4 语料（12 场景分组）实现完毕交审中
 - [x] 自然衰减 E2E 留证（8/10，双 fixture 12/12 PASS）
 - [ ] P0-13/14 文档冻结与 RC（本文即其中一环）
-- [ ] 3D 潮池 Tier 1（`SPEC-3D-POOL.md`，Codex 施工，8/14 硬回落线——未验收即回落 2D）
-- conditional（诚实边界）：dream/reflection 模型段 blocked_external（Bedrock resolved-negative）；Managed MCP 控制台接线 operator 留证待补
+- [x] 公网 demo 上线（CloudFront→API Gateway→Lambda→CRDB，浏览器零凭证）+ Managed MCP 留证（8/12，`docs/EVIDENCE-MANAGED-MCP-0812.md`）
+- [~] 证据前端（`web/evidence.html`）——数据面与 Judge 编排已交付，信息架构与视觉由 Codex 收尾（频道结论 79/80/82/84）
+- [归档] 3D 潮池（`SPEC-3D-POOL.md` / `IMPLEMENTATION-3D-POOL.md` / `DESIGN-OCEAN.md` 的三维章节）——8/12 Owner 裁定结项，主交付转为无 WebGL 的证据前端（结论 79）。文档保留为实现档案，不代表当前提交形态
+- conditional（诚实边界）：dream/reflection 模型段 blocked_external（Bedrock resolved-negative）
 - [x] 项目名：**Tidemark**（2026-07-29 Ovo拍板）

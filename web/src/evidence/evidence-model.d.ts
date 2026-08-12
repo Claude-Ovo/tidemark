@@ -18,3 +18,9 @@ export function activityPageDecision(
   pageIndex: number,
   maxPages: number,
 ): { done: boolean; truncated: boolean; resumeCursor: string | null }
+export function initialRetryDelay(failedAttempts: number): number
+export function displayCount(count: number): string
+export function groupCrossesFade(
+  rows: Array<{ effective_strength: number }>,
+  fadeThreshold: number,
+): boolean
