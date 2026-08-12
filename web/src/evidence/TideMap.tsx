@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { groupCrossesFade, retentionRange } from './evidence-model.mjs'
+import { groupCrossesFade, retentionRange, uniformRetentionPercent } from './evidence-model.mjs'
 import type { MemoryWithEpisode } from './types'
 
 // Form choice (2026-08-12, Owner directive to drop the ring): retention is a
@@ -41,6 +41,18 @@ const rangeLabel = (rows: MemoryWithEpisode[]) => {
 function DistributionStrip({ rows }: { rows: MemoryWithEpisode[] }) {
   if (!rows.length) return <span className="tide-card__empty-line" aria-hidden="true" />
   const height = 42
+  const range = retentionRange(rows)
+  const uniformPercent = uniformRetentionPercent(rows)
+  if (range && uniformPercent != null) {
+    return (
+      <span className="tide-card__uniform">
+        <svg className="tide-card__distribution" viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" aria-hidden="true">
+          <path d={`M0 ${height / 2}H${(range.max * 100).toFixed(3)}`} strokeWidth="1.25" />
+        </svg>
+        <small>all at {uniformPercent}%</small>
+      </span>
+    )
+  }
   const step = height / rows.length
   const strokeWidth = Math.max(.32, Math.min(1.25, 25 / rows.length))
   const path = rows.map((memory, index) => {

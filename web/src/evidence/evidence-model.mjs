@@ -64,6 +64,8 @@ export const initialRetryDelay = (failedAttempts) => {
 
 export const displayCount = (count) => Number(count) > 0 ? String(count) : '—'
 
+export const displayRecordRef = (memoryId) => memoryId ? String(memoryId).slice(0, 4) : '—'
+
 export const groupCrossesFade = (rows, fadeThreshold) =>
   rows.some((row) => row.effective_strength <= fadeThreshold) &&
   rows.some((row) => row.effective_strength > fadeThreshold)
@@ -72,4 +74,12 @@ export const retentionRange = (rows) => {
   if (!rows.length) return null
   const values = rows.map((row) => Math.min(1, Math.max(0, Number(row.effective_strength))))
   return { min: Math.min(...values), max: Math.max(...values) }
+}
+
+export const uniformRetentionPercent = (rows) => {
+  const range = retentionRange(rows)
+  if (!range) return null
+  const min = Math.round(range.min * 100)
+  const max = Math.round(range.max * 100)
+  return min === max ? max : null
 }

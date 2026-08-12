@@ -5,10 +5,12 @@ import assert from 'node:assert/strict'
 import {
   activityPageDecision,
   displayCount,
+  displayRecordRef,
   eventSummary,
   groupCrossesFade,
   initialRetryDelay,
   retentionRange,
+  uniformRetentionPercent,
   rememberEvidenceId,
   resolveEventSelection,
 } from './src/evidence/evidence-model.mjs'
@@ -83,5 +85,13 @@ assert.deepEqual(retentionRange([
   { effective_strength: -.2 },
 ]), { min: 0, max: 1 })
 console.log('PASS E8 Tide summaries use bounded full-group retention ranges')
+
+assert.equal(displayRecordRef(null), '—')
+assert.equal(displayRecordRef('a235be22-ffff'), 'a235')
+console.log('PASS E9 Record navigation exposes a bounded selected-memory reference')
+
+assert.equal(uniformRetentionPercent([{ effective_strength: .99997 }, { effective_strength: .99998 }]), 100)
+assert.equal(uniformRetentionPercent([{ effective_strength: .994 }, { effective_strength: .996 }]), null)
+console.log('PASS E10 equal-looking Tide values collapse only at the displayed precision')
 
 console.log('ALL EVIDENCE MODEL TESTS PASSED')

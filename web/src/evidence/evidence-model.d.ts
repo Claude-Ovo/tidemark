@@ -20,6 +20,7 @@ export function activityPageDecision(
 ): { done: boolean; truncated: boolean; resumeCursor: string | null }
 export function initialRetryDelay(failedAttempts: number): number
 export function displayCount(count: number): string
+export function displayRecordRef(memoryId?: string | null): string
 export function groupCrossesFade(
   rows: Array<{ effective_strength: number }>,
   fadeThreshold: number,
@@ -27,3 +28,6 @@ export function groupCrossesFade(
 export function retentionRange(
   rows: Array<{ effective_strength: number }>,
 ): { min: number; max: number } | null
+export function uniformRetentionPercent(
+  rows: Array<{ effective_strength: number }>,
+): number | null

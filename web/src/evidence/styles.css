@@ -243,6 +243,9 @@ code {
 .workspace {
   min-width: 0;
   max-width: 1020px;
+  min-height: calc(100dvh - 230px);
+  display: grid;
+  align-items: center;
 }
 .workspace > * { min-width: 0; }
 .ledger-view, .proof-view { display: grid; gap: 18px; }
@@ -325,6 +328,17 @@ code {
 .tide-card__distribution { width: 100%; height: 48px; align-self: end; overflow: visible; }
 .tide-card__distribution path { fill: none; stroke: var(--muted); vector-effect: non-scaling-stroke; }
 .tide-card[data-active] .tide-card__distribution path, .tide-card[data-current] .tide-card__distribution path { stroke: var(--ivory); }
+.tide-card__uniform { position: relative; display: block; align-self: end; min-width: 0; }
+.tide-card__uniform .tide-card__distribution { display: block; }
+.tide-card__uniform small {
+  position: absolute;
+  right: 0;
+  top: 2px;
+  color: var(--quiet);
+  font: 500 8px/1 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
 .tide-card__empty-line { display: block; align-self: center; height: 1px; background: var(--line-strong); }
 .tide-card__action { display: block; padding-top: 9px; border-top: 1px solid var(--line); }
 
@@ -686,6 +700,7 @@ body.has-tide-dialog { overflow: hidden; }
 
 @media (max-width: 900px) {
   .evidence-layout { display: block; margin-top: 22px; }
+  .workspace { min-height: 0; display: block; }
   .view-switcher {
     position: static;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -735,6 +750,7 @@ body.has-tide-dialog { overflow: hidden; }
   .tide-card { min-height: 122px; grid-template-columns: auto 1fr; grid-template-rows: auto auto auto; }
   .tide-card__head, .tide-card__meta { grid-column: 1; min-width: 120px; }
   .tide-card__distribution { grid-column: 2; grid-row: 1 / span 2; height: 48px; align-self: center; }
+  .tide-card__uniform { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
   .tide-card__action { grid-column: 1 / -1; }
   .tide-dialog-scrim { padding: 10px; }
   .tide-dialog { width: 100%; max-height: calc(100dvh - 20px); }

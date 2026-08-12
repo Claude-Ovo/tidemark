@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
-import { displayCount, eventSummary, initialRetryDelay, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
+import { displayCount, displayRecordRef, eventSummary, initialRetryDelay, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
 import { TideMap } from './TideMap'
 import type {
   ActivityEvent,
@@ -372,17 +372,18 @@ function CapabilityIndex({ capability, state, onSelect }: {
   )
 }
 
-function ViewSwitcher({ active, memories, events, liveCapabilities, onChange }: {
+function ViewSwitcher({ active, memories, events, selectedMemoryId, liveCapabilities, onChange }: {
   active: WorkspaceView
   memories: number
   events: number
+  selectedMemoryId: string | null
   liveCapabilities: number
   onChange: (view: WorkspaceView) => void
 }) {
   const views: Array<{ id: WorkspaceView; label: string; note: string; count: string }> = [
     { id: 'tide', label: 'Tide', note: 'Observe the system', count: displayCount(memories) },
     { id: 'ledger', label: 'Ledger', note: 'Follow the events', count: displayCount(events) },
-    { id: 'record', label: 'Record', note: 'Explain one record', count: '—' },
+    { id: 'record', label: 'Record', note: 'Explain one record', count: displayRecordRef(selectedMemoryId) },
     { id: 'proof', label: 'Proof', note: 'Verify the claim', count: displayCount(liveCapabilities) },
   ]
   return (
@@ -636,7 +637,7 @@ export function EvidenceApp() {
       </div>}
 
       <div className="evidence-layout">
-        <ViewSwitcher active={activeView} memories={memories.length} events={activity.length} liveCapabilities={liveCapabilities} onChange={setActiveView} />
+        <ViewSwitcher active={activeView} memories={memories.length} events={activity.length} selectedMemoryId={selectedMemory?.memory_id ?? null} liveCapabilities={liveCapabilities} onChange={setActiveView} />
         <main className="workspace" data-view={activeView}>
           {activeView === 'tide' && (
             <section className="observe panel" aria-labelledby="observe-title">
