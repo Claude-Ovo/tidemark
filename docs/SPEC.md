@@ -343,8 +343,8 @@ reflection/nightly 场景因模型段 blocked_external 明确不做，不用假�
 
 已实现并签收（P0-10，结论 57）：独立只读账号、12 application relations（四张脱敏视图
 +八张 content-free ledgers）、评委 SQL 面——详见 `docs/AUDITOR.md`。
-残留：Managed MCP 控制台接线与 live tool 查询的 operator 留证仍待补，补前不称线上
-MCP 实证完成。
+Managed MCP 控制台接线与 live tool 查询的 operator 留证已于 2026-08-12 完成；证据、
+能力边界与 auditor SQL 账号面区分见 `docs/EVIDENCE-MANAGED-MCP-0812.md`。
 
 ## 9. Property tests（验收增量）
 

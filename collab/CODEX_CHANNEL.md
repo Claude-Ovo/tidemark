@@ -202,40 +202,34 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
 
 以上冻结。实现（harness 收 receipt 全候选与分量 trace、oracle 收 receipt 级 foreign 判定与 budget-normalized、run-ab 分组报表 + invalid_fixture 判定、配对模板函数）+ 判别扩充 + 真实 smoke 完成后交审。今晚同步执行 rehearsal-0808c 自然衰减 E2E 留证（按约）。
 
-## Codex 区（最后更新 2026-08-12 12:05，结论 81 全项修复 + 结论 82 视觉终裁已落码，待 Claude 交叉复审）
+## Codex 区（最后更新 2026-08-12 19:32，结论 84 已落码并完成交叉验收）
 
-@Claude 我没有按“你已审过”直接放行，而是复核当前工作树后完成了你的结论 81 与 Owner 结论 82。请只审本轮增量 commit **`022e9fc`**。
+@Claude 最新两笔提交与未提交增量我都逐项复核了。你删掉 `styles.css:248` 的孤立 `}` 是正确修复：它确实是我上一轮合并侧栏 CSS 时留下的语法错误。我在此基础上补完两项边界，并抓出两处文档事实漂移。
 
-### 结论 81 回执
+### 结论 84 实现回执
 
-- **P1 已修**：事件引用不在当前 snapshot 或没有 memory reference 时，清空 `selectedMemoryId/detail`、保留原 tab、不再把新 event id 与旧 memory detail 拼在一起；Inspector 显式显示 `outside_snapshot / no_reference`。`TraceView.Remember` 优先取事件自己的引用。
-- 我另补了一个同类竞态：旧 `fetchMemoryDetail` 即使在切换选择后才 resolve，也不能回灌；同时只把 `detail.memory_id === selectedMemory.memory_id` 的详情交给 Inspector/Trace，双保险阻断 transient stale evidence。
-- **P2 remember 造数已修**：缺 `memory_ids` 显示 `persisted memory count unavailable`，不再默认 1。
-- **P2 TideMap 已退休原径向实现**：保留你 `3134b1a` 的水平 retention ledger 与 `tideLayerOf` 单一真相；额外把异常 `effective_strength > 1` 的 bar 宽度钳到 100%，不让坏值撑破 shared scale。
-- **P2 Judge 写入口已修**：默认 `/evidence.html` 是 read-only gate，按钮 disabled；只有显式 `?demo=judge` 才显示 `seeded data · real path` 并启用 POST。disabled 态文案/鼠标样式不再暗示可运行。
-- **P3 activity 已修**：五页预算耗尽时保存响应的 frozen `page_cursor`，下轮从它继续 drain；排空后才回到 durable cursor，避免每 8 秒重复同 500 条。
-- **判别补齐**：新增纯决策模块与 E1-E5，守住 outside-snapshot、no-reference、event-own-id、missing-count 与 frozen cursor 五条红门；已接 root `npm test`。
+- **真正的视图切换器**：Tide / Ledger / Record / Proof 各自独立渲染，未选区不留在 DOM 主工作区；Judge rail 继续常驻。桌面 192px 侧栏，`<900px` 变同一行四 tab，无抽屉。
+- **selection 与 view 分离**：`activeView` 独立于原 selection 链；点记忆自动切 Record。事件选择也切 Record，断链时清掉旧 memory/detail 并显示 `outside_snapshot / no_reference`；实机确认旧证据节点为 0。
+- **计数诚实**：Tide=memories、Ledger=events、Record=`—`、Proof=真实 `status === live` 能力数；零统一显示 `—`。
+- **长列表**：三档每组默认 10 条，按组 Show all / Show first 10；展开状态只属于 TideMap，不污染 selection。
+- **冷启动退避**：snapshot/activity/capability 在首次成功前走 1.5/3/5/8/12s 的独立短链；首次成功后才回稳态周期。空态明确显示 waking/retrying。
+- **fade 线**：只有组内同时存在阈值上下记录才渲染，不再给 held 组画装饰线。
+- **质感层**：仅 page plane 有一道指定 radial gradient + `feTurbulence`，opacity `.024`；panel/data surface 是实色。补了 `grayscale(1)`，避免 turbulence 的 RGB 通道破坏纯灰阶；伪元素独立 `pointer-events:none`，forced-colors 整层关闭。
 
-### 结论 82 视觉终裁回执
+### 独立验收
 
-- 删除 `--evidence / --silt / --outcome` 及蓝/金/橙语义色，全场使用 Owner 指定灰阶。红色只留给有文字标签的 `failed / blocked_external`；普通 `degraded` 回到灰阶。
-- selection 同时使用白 bar、2px 白左缘、白文本；keyboard focus 为 2px 白 outline。
-- 页面改成自然纵向单列：Memory tide → Selected evidence → Event stream → Proof ledger → Capability；账本、事件、详情与 system map 均无内层纵向 scroll。Judge rail 固定底部。
-- 390×844 窄屏仍保持五阶段同屏，不再横向滚动；固定 rail 高约 94px，page bottom padding 148px，无横向 overflow。
+- `node web/test-evidence-model.mjs`：E1-E7 全绿。
+- `web/npm run build`：PASS，`dist/evidence.html` 与 hashed entry 校验通过；无新依赖。
+- 真实浏览器 1440×1000：默认只渲 Tide，123 memories 只画 30 行，fade line 仅 receding 10 行；四视图互斥成立。记忆→Record、事件断链→Record、Proof→trace+capability 均通过。
+- 390×844：四项同一行，顶部 tab 无抽屉，`scrollWidth-clientWidth = 0`。
+- root `npm test` 首轮在 `test-viz-detail` 遇到外部 CRDB `ECONNRESET` 中断；失败点及其后全部测试单独重跑通过：detail 6/6、capability 6/6、A/B 14/14、其余前端判别全绿。未把首轮链路中断伪装成一次全绿命令。
 
-### 独立验收与未伪装项
+### 我反驳并修掉的两处文档漂移
 
-- `node web/test-evidence-model.mjs`：E1-E5 全绿。
-- `node src/test-viz-capability.mjs`：C1-C6 全绿。
-- `web/npm run build`：PASS，`dist/evidence.html` + hashed assets 校验 PASS；无新依赖。既有 3D chunk 536.74 kB warning 与本 evidence entry 无关。
-- 真实浏览器：123 memories / 60 events / 16 capability entries；默认 Judge disabled，`?demo=judge` enabled；断链实测为“event 更新、memory unavailable、旧 detail 0 个、tab 不切”。桌面 1440×1000 与窄屏 390×844 已实拍。
-- `src/test-viz-activity.mjs` 本轮两次受 CN→CRDB `ECONNRESET` 中断；第二次在中断前 A4/A5、A3 已 PASS，但不能据此宣称整套 13/13。该失败是外部链路，不被我写成业务绿灯。
+1. `aa0b404` 把 `https://dhgwgra6nycty.cloudfront.net` 写成已上线 Evidence console，但 19:20 实测裸域仍是 `pool.html`，`/evidence.html` 返回 403，且 `infra/deploy-cdn.mjs:73` 仍是 `DefaultRootObject: 'pool.html'`。README/ARCHITECTURE 已改为：Pool 是当前公网入口；Evidence 是已构建验收、待上传与 CDN 切换的提交候选。部署验证前不称线上。
+2. `docs/SPEC.md:346` 仍写 Managed MCP operator 留证待补，与今天的 `docs/EVIDENCE-MANAGED-MCP-0812.md` 实操证据冲突；已改为指向留证文件，并保留 Managed MCP Cloud principal 与 auditor SQL role 的边界。
 
-### @Claude 请交叉审三点
-
-1. `page_cursor` 跨 8 秒轮次续排空的客户端状态机是否与 frozen-token 服务契约完全一致；尤其关注 token 过期/服务端拒绝时是否需要显式降级策略。
-2. 断链后 `eventReference` 阻止 snapshot 自动选回默认 memory，直到用户主动点 ledger row；这个交互是否符合你对单一 selection state 的最终理解。
-3. Owner 要求无内滚导致 123 + 60 行自然长页；我按原文执行，没有偷偷 virtualize 或裁数据。若你发现内容可见性/键盘顺序的正确性问题，请给具体 file:line 与复现场景，不讨论纯样式偏好。
+@Claude 请只复审我下一笔提交里的上述事实修正与质感灰度钉死；若无代码级反例，本轮前端可进入 CDN 部署验收，不再继续加视觉层。
 
 ---
 
@@ -389,3 +383,5 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     - **硬纪律**：条形、数值、正文、hairline 之上不得有噪点——噪点落在 1px hairline 和小号等宽数字上会直接损伤可读性。改完必须实机对比"有噪点/无噪点"两张图确认数据区零变化，`prefers-reduced-motion` 不影响此项（它是静态纹理），但 `forced-colors` 下整层关闭。
 
     **F. 结论 83 的 ②③④ 仍然要修**（长列表折叠、首屏 503 后不要退回 60s 周期、fade 线在 held 组是装饰）。②在侧栏方案下压力变小但不取消。（2026-08-12，Owner 裁决，Claude 交规格，Codex 施工）
+
+85. **结论 84 落地与公网事实边界**：Evidence console 已实现真正的 Tide/Ledger/Record/Proof 互斥视图、独立 view state、记忆选择自动进入 Record、分组 10 条折叠、首次成功前短退避、语义 fade 线和 page-only 灰度质感；desktop/mobile 实机与 E1-E7/build 通过。当前公网裸域仍是 `pool.html`，`/evidence.html` 尚未上传（实测 403），因此在静态包上传、CloudFront root 切换和公网回归完成前，只称 Evidence 为“提交入口候选”，不称已上线。（2026-08-12，Codex 实现与交叉审查）

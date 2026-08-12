@@ -9,7 +9,7 @@ import type { MemoryWithEpisode } from './types'
 // horizontal bar ledger sorted by retention makes the tideline literal: the
 // fade threshold is a vertical line, and every record is visibly above or below
 // it. Colour does no encoding work here - length already carries the value, so
-// the bars stay neutral ink and the accent is spent only on selection.
+// the bars stay neutral ink and selection uses value, edge and text contrast.
 
 export type TideLayer = 'held' | 'active' | 'receding'
 

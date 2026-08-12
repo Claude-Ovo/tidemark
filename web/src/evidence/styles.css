@@ -62,8 +62,10 @@ code {
   content: "";
   position: absolute;
   inset: 0;
+  pointer-events: none;
   opacity: .024;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  filter: grayscale(1);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
 }
 
 .topbar {
@@ -231,7 +233,7 @@ code {
   background: transparent;
 }
 .view-switcher button:hover { color: var(--muted); background: var(--wash-raise); }
-.view-switcher button[aria-current="page"] { color: var(--ivory); background: var(--wash-selected); }
+.view-switcher button[aria-current="page"] { color: var(--ivory); background: transparent; }
 .view-switcher button[aria-current="page"]::before { background: var(--ivory); }
 .view-switcher strong, .view-switcher small { display: block; }
 .view-switcher strong { font: 500 15px/1.1 Georgia, "Times New Roman", serif; }
@@ -245,7 +247,6 @@ code {
 .workspace > * { min-width: 0; }
 .ledger-view, .proof-view { display: grid; gap: 18px; }
 .ledger-view .lifecycle { padding: 0 0 12px; }
-}
 
 .panel {
   min-width: 0;
