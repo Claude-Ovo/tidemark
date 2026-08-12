@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
+import { eventSummary, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
 import { TideMap, TIDE_LAYERS, tideLayerOf } from './TideMap'
 import type {
   ActivityEvent,
@@ -41,22 +42,8 @@ const flattenSnapshot = (snapshot: EvidenceSnapshot | null): MemoryWithEpisode[]
   return [...episodic, ...snapshot.loose.map((memory) => ({ ...memory, episode_id: null }))]
 }
 
-const eventMemoryIds = (event: ActivityEvent | null) => {
-  if (!event) return []
-  if (event.kind === 'outcome') return [...new Set((event.items ?? []).map((item) => item.memory_id).filter(Boolean))]
-  return [...new Set((event.memory_ids ?? []).filter(Boolean))]
-}
-
 const eventHasAppliedChange = (event: ActivityEvent) =>
   event.kind === 'outcome' && (event.items ?? []).some((item) => item.applied)
-
-const eventSummary = (event: ActivityEvent) => {
-  if (event.kind === 'remember') return `${event.memory_ids?.length ?? 1} memory persisted`
-  if (event.kind === 'recall') return `${event.items_count ?? 0} receipt items`
-  if (event.kind === 'agent_action') return [event.event_type, event.tool_name].filter(Boolean).join(' · ') || 'attempt evidence'
-  const applied = (event.items ?? []).filter((item) => item.applied).length
-  return `${event.status ?? 'terminal'} · ${applied} applied`
-}
 
 const mergeEvents = (current: ActivityEvent[], incoming: ActivityEvent[]) => {
   const byKey = new Map(current.map((event) => [`${event.kind}|${event.event_id}`, event]))
@@ -164,11 +151,12 @@ function CurveChart({ detail }: { detail: MemoryDetail }) {
   )
 }
 
-function Inspector({ memory, detail, state, tab, onTab }: {
+function Inspector({ memory, detail, state, tab, eventReference, onTab }: {
   memory: MemoryWithEpisode | null
   detail: MemoryDetail | null
   state: LoadState
   tab: ExplainTab
+  eventReference: { ids: string[]; reason: 'outside_snapshot' | 'no_reference' } | null
   onTab: (tab: ExplainTab) => void
 }) {
   const source = detail?.memory ?? memory
@@ -183,6 +171,16 @@ function Inspector({ memory, detail, state, tab, onTab }: {
         </div>
         <StatusPill state={state} label={state === 'connected' ? 'detail verified' : state} />
       </div>
+      {eventReference && (
+        <div className="selection-break" role="status">
+          <strong>Event selected; memory evidence is not linked.</strong>
+          <span>
+            {eventReference.reason === 'outside_snapshot'
+              ? `Referenced memory is outside this snapshot: ${eventReference.ids.map(shortId).join(', ')}`
+              : 'This event exposes no memory reference. The previous memory selection was cleared.'}
+          </span>
+        </div>
+      )}
       <div className="tab-list" role="tablist" aria-label="Memory evidence views">
         {(['overview', 'receipt', 'plasticity', 'decay'] as ExplainTab[]).map((item) => (
           <button key={item} role="tab" aria-selected={tab === item} onClick={() => onTab(item)}>{item}</button>
@@ -266,8 +264,9 @@ function TraceView({ event, detail, memory }: {
   memory: MemoryWithEpisode | null
 }) {
   const latest = detail?.latest_outcome
+  const rememberId = rememberEvidenceId(event, memory?.memory_id ?? null)
   const rows = [
-    { label: 'Remember', state: memory ? 'persisted' : 'select a record', evidence: memory?.memory_id },
+    { label: 'Remember', state: rememberId ? 'event reference' : 'unavailable in selection', evidence: rememberId },
     { label: 'Recall receipt', state: detail?.attributions.some((item) => item.receipt_scores) ? 'linked' : 'unavailable in selection', evidence: detail?.attributions.find((item) => item.receipt_scores)?.outcome_request_id },
     { label: 'Agent action', state: event?.kind === 'agent_action' ? 'persisted' : 'select an agent-action row', evidence: event?.kind === 'agent_action' ? event.event_id : null },
     { label: 'Outcome', state: latest ? latest.status : 'not reported', evidence: latest?.outcome_request_id },
@@ -383,6 +382,7 @@ export function EvidenceApp() {
   const [activityTruncated, setActivityTruncated] = useState(false)
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<ActivityEvent | null>(null)
+  const [eventReference, setEventReference] = useState<{ ids: string[]; reason: 'outside_snapshot' | 'no_reference' } | null>(null)
   const [detail, setDetail] = useState<MemoryDetail | null>(null)
   const [detailState, setDetailState] = useState<LoadState>('idle')
   const [stageFilter, setStageFilter] = useState<StageFilter>('all')
@@ -394,12 +394,14 @@ export function EvidenceApp() {
   const [judgeStep, setJudgeStep] = useState(0)
   const [judgeError, setJudgeError] = useState<string | null>(null)
   const cursorRef = useRef<string | null>(null)
+  const pageCursorRef = useRef<string | null>(null)
   const hasSnapshotRef = useRef(false)
   const judgeAbortRef = useRef<AbortController | null>(null)
 
   const memories = useMemo(() => flattenSnapshot(snapshot), [snapshot])
   const memoryIndex = useMemo(() => new Map(memories.map((memory) => [memory.memory_id, memory])), [memories])
   const selectedMemory = selectedMemoryId ? memoryIndex.get(selectedMemoryId) ?? null : null
+  const selectedDetail = selectedMemory && detail?.memory.memory_id === selectedMemory.memory_id ? detail : null
 
   useEffect(() => {
     const controller = new AbortController()
@@ -428,9 +430,10 @@ export function EvidenceApp() {
     const poll = async (initial: boolean) => {
       if (initial) setActivityState('loading')
       try {
-        const batch = await fetchActivityBatch(initial ? null : cursorRef.current, controller.signal)
+        const batch = await fetchActivityBatch(initial ? null : pageCursorRef.current ?? cursorRef.current, controller.signal)
         if (controller.signal.aborted) return
         cursorRef.current = batch.cursor
+        pageCursorRef.current = batch.resumeCursor
         setActivity((current) => mergeEvents(initial ? [] : current, batch.events))
         setActivityTruncated(batch.truncated)
         setActivityState('connected')
@@ -464,11 +467,12 @@ export function EvidenceApp() {
 
   useEffect(() => {
     if (!memories.length) return
+    if (eventReference) return
     if (selectedMemoryId && memoryIndex.has(selectedMemoryId)) return
     const best = [...memories].sort((a, b) =>
       (b.credited + b.blamed) - (a.credited + a.blamed) || b.effective_strength - a.effective_strength)[0]
     setSelectedMemoryId(best.memory_id)
-  }, [memories, memoryIndex, selectedMemoryId])
+  }, [memories, memoryIndex, selectedMemoryId, eventReference])
 
   useEffect(() => {
     if (!selectedMemoryId) { setDetail(null); setDetailState('idle'); return }
@@ -476,7 +480,12 @@ export function EvidenceApp() {
     setDetail(null)
     setDetailState('loading')
     void fetchMemoryDetail(selectedMemoryId, controller.signal)
-      .then((next) => { setDetail(next); setDetailState('connected') })
+      .then((next) => {
+        if (!controller.signal.aborted) {
+          setDetail(next)
+          setDetailState('connected')
+        }
+      })
       .catch(() => { if (!controller.signal.aborted) setDetailState('failed') })
     return () => controller.abort()
   }, [selectedMemoryId])
@@ -484,16 +493,26 @@ export function EvidenceApp() {
   const selectMemory = (memoryId: string) => {
     setSelectedMemoryId(memoryId)
     setSelectedEvent(null)
+    setEventReference(null)
     setExplainTab('overview')
   }
 
   const selectEvent = (event: ActivityEvent) => {
     setSelectedEvent(event)
-    const target = eventMemoryIds(event).find((memoryId) => memoryIndex.has(memoryId))
-    if (target) setSelectedMemoryId(target)
-    if (event.kind === 'recall') setExplainTab('receipt')
-    else if (event.kind === 'outcome') setExplainTab('plasticity')
-    else setExplainTab('overview')
+    const resolution = resolveEventSelection(event, new Set(memoryIndex.keys()), explainTab)
+    if (resolution.targetMemoryId) {
+      setSelectedMemoryId(resolution.targetMemoryId)
+      setEventReference(null)
+      setExplainTab(resolution.explainTab)
+    } else {
+      setSelectedMemoryId(null)
+      setDetail(null)
+      setDetailState('idle')
+      const reason: 'outside_snapshot' | 'no_reference' = resolution.reason === 'outside_snapshot'
+        ? 'outside_snapshot'
+        : 'no_reference'
+      setEventReference({ ids: resolution.referencedMemoryIds, reason })
+    }
     setVerifyTab('trace')
   }
 
@@ -546,7 +565,7 @@ export function EvidenceApp() {
       </div>}
 
       <main className="workspace">
-        <aside className="observe panel" aria-labelledby="observe-title">
+        <section className="observe panel" aria-labelledby="observe-title">
           <div className="section-heading">
             <div><span>Observe the system</span><h1 id="observe-title">Memory tide</h1></div>
             <small>{snapshot?.capped ? 'latest slice' : 'complete snapshot'}</small>
@@ -559,32 +578,37 @@ export function EvidenceApp() {
               </span>
             ))}
           </div>
+        </section>
+
+        <Inspector memory={selectedMemory} detail={selectedDetail} state={detailState} tab={explainTab} eventReference={eventReference} onTab={setExplainTab} />
+
+        <section className="activity-panel panel" aria-label="Persisted event history">
           <EventStream events={activity} selected={selectedEvent} filter={stageFilter} state={activityState} onSelect={selectEvent} />
-          {activityTruncated && <p className="data-note">Activity history exceeded the five-page display budget; the cursor remains resumable.</p>}
-        </aside>
+          {activityTruncated && <p className="data-note">Activity history is draining in bounded five-page batches; the frozen page cursor resumes on the next poll.</p>}
+        </section>
 
-        <Inspector memory={selectedMemory} detail={detail} state={detailState} tab={explainTab} onTab={setExplainTab} />
-
-        <VerifyPane tab={verifyTab} onTab={setVerifyTab} event={selectedEvent} detail={detail} memory={selectedMemory} activeCapability={activeCapability} capability={capability} />
+        <VerifyPane tab={verifyTab} onTab={setVerifyTab} event={selectedEvent} detail={selectedDetail} memory={selectedMemory} activeCapability={activeCapability} capability={capability} />
       </main>
 
       <CapabilityIndex capability={capability} state={capabilityState} onSelect={chooseCapability} />
 
       <footer className="judge-rail" data-state={judgeState} data-active={judgeProof || judgeReady || undefined}>
         <div>
-          <span>Judge mode · seeded data · real path</span>
-          <strong>{activeJudgeStep ? `Step ${activeJudgeStep.step}/10 · ${activeJudgeStep.title}` : judgeState === 'running' ? 'Running ten-step proof…' : 'Run a persisted lifecycle proof'}</strong>
+          <span>{judgeReady ? 'Judge mode · seeded data · real path' : 'Judge mode · read-only gate'}</span>
+          <strong>{activeJudgeStep ? `Step ${activeJudgeStep.step}/10 · ${activeJudgeStep.title}` : judgeState === 'running' ? 'Running ten-step proof…' : judgeReady ? 'Run a persisted lifecycle proof' : 'Write-path proof locked'}</strong>
         </div>
         <p>
           {judgeProof
             ? `Recall read-only ${judgeProof.summary.recall_changed_nothing ? 'PASS' : 'FAIL'} · targeted plasticity ${judgeProof.summary.outcome_credited_only_used_memory ? 'PASS' : 'FAIL'} · fresh read ${judgeProof.summary.persisted_after_fresh_read ? 'PASS' : 'FAIL'} · ${judgeProof.summary.replay ? 'idempotent replay' : 'fresh run'}`
             : judgeError
               ? `Proof failed honestly: ${judgeError}. No success state was inferred.`
-              : 'POST /viz/judge-run uses real tools, vector recall, CockroachDB receipts and terminal outcome attribution.'}
+              : judgeReady
+                ? 'POST /viz/judge-run uses real tools, vector recall, CockroachDB receipts and terminal outcome attribution.'
+                : 'Open this page with ?demo=judge to enable the seeded write-path proof. The evidence console stays read-only by default.'}
           {judgeProof && <code>{judgeProof.run_key}</code>}
         </p>
-        <button disabled={judgeState === 'running'} onClick={() => void advanceJudge()}>
-          {judgeState === 'running' ? 'Running…' : judgeProof ? 'Next proof' : judgeState === 'failed' ? 'Retry real proof' : 'Run real proof'}
+        <button disabled={!judgeReady || judgeState === 'running'} onClick={() => void advanceJudge()}>
+          {judgeState === 'running' ? 'Running…' : judgeProof ? 'Next proof' : judgeState === 'failed' ? 'Retry real proof' : judgeReady ? 'Run real proof' : 'Add ?demo=judge'}
         </button>
       </footer>
       <p className="snapshot-note">Snapshot {snapshot ? dateLabel(snapshot.snapshot_at) : 'unavailable'} · viewer scope · client-side decay disabled</p>

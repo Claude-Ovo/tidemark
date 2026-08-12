@@ -91,7 +91,7 @@ export function TideMap({
                   </span>
                   <span className="tide-row__track">
                     <i className="tide-row__fade" style={{ left: fadeLeft }} aria-hidden="true" />
-                    <i className="tide-row__bar" style={{ width: `${Math.max(1.5, memory.effective_strength * 100)}%` }} />
+                    <i className="tide-row__bar" style={{ width: `${Math.min(100, Math.max(1.5, memory.effective_strength * 100))}%` }} />
                   </span>
                   <span className="tide-row__value">{pct(memory.effective_strength)}</span>
                 </button>

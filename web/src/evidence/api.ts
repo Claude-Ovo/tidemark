@@ -1,4 +1,5 @@
 import type { ActivityEvent, ActivityPage, CapabilityResponse, EvidenceSnapshot, JudgeProof, MemoryDetail } from './types'
+import { activityPageDecision } from './evidence-model.mjs'
 
 const fetchJson = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const timeout = AbortSignal.timeout(20_000)
@@ -44,7 +45,12 @@ const activityUrl = (after?: string | null) => {
   return `/viz/activity?${params}`
 }
 
-export type ActivityBatch = { events: ActivityEvent[]; cursor: string; truncated: boolean }
+export type ActivityBatch = {
+  events: ActivityEvent[]
+  cursor: string
+  resumeCursor: string | null
+  truncated: boolean
+}
 
 export const fetchActivityBatch = async (
   after?: string | null,
@@ -54,14 +60,14 @@ export const fetchActivityBatch = async (
   const events: ActivityEvent[] = []
   let next: string | null = after ?? null
   let cursor = after ?? ''
-  let truncated = false
   for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
     const page = await fetchJson<ActivityPage>(activityUrl(next), signal)
     events.push(...page.events)
     cursor = page.cursor
-    if (!page.has_more || !page.page_cursor) return { events, cursor, truncated: false }
-    next = page.page_cursor
-    truncated = true
+    const decision = activityPageDecision(page, pageIndex, maxPages)
+    if (decision.done) return { events, cursor, resumeCursor: null, truncated: false }
+    if (decision.truncated) return { events, cursor, resumeCursor: decision.resumeCursor, truncated: true }
+    next = decision.resumeCursor
   }
-  return { events, cursor, truncated }
+  return { events, cursor, resumeCursor: next, truncated: true }
 }
