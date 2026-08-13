@@ -1,47 +1,40 @@
 import { useEffect, useRef } from 'react'
 
-// Halftone tide backdrop, v2 (Owner brief 2026-08-14, desktop ovo.txt): one
-// visually dominant, asymmetric wave packet travelling left-to-right - a long
-// gentle back slope, a narrow forward-leaning crest, a steep front face, then
-// a shallow trough and two or three damped wake ripples. The surfer stays
-// deleted. PURELY DECORATIVE: encodes no data, reads no endpoint, sits behind
-// every panel with pointer-events none.
+// Halftone tide backdrop, v3 (Owner brief 2026-08-14 #2): the solitary wave
+// packet is GONE - it read as a terrain block sliding across the screen. This
+// version is a simplified 2D Gerstner/Stokes surface: every particle is
+// anchored to its rest coordinate (x0, y0) and only orbits that anchor in a
+// small ellipse; what travels left-to-right is the PHASE, never an outline.
+// Two superposed waves (one long and low, one shorter and weaker) plus a small
+// second harmonic that sharpens crests slightly - no envelopes, no breaking,
+// no spray in this version. The surfer stays deleted.
 //
-// Rendering language (per the reference frames, 1:1): flat two-tone halftone.
-// No alpha gradient - the surface boundary is a crisp dotted edge, the body is
-// a woven checker of two fixed dot sizes, and shading is done by SWAPPING INK
-// (base grey vs deep grey under the lip and along the steep front face), never
-// by fading opacity. Light theme uses the reference's warm dark greys; dark
-// theme uses light greys where "shadow" means dimmer, i.e. closer to the
-// background - the same physical reading in both themes.
+// Rendering language unchanged from v2 (reference 1:1): flat two-tone
+// halftone, crisp one-row edge, two-size woven checker body at constant
+// alpha, shading by swapping ink on the leeward face - never by fading.
+// PURELY DECORATIVE: encodes no data, reads no endpoint, pointer-events none.
 //
-// Discipline: prefers-reduced-motion renders one static mature wave;
-// forced-colors renders nothing; 30fps cap; pauses when the tab hides.
+// Discipline: prefers-reduced-motion renders one static frame; forced-colors
+// renders nothing; 30fps cap; pauses when the tab hides.
 
-// Every tunable in one place (acceptance item 9 of the brief).
+// Every tunable in one place. Conservative ranges straight from the brief.
 const WAVE_CFG = {
-  amplitude: 0.26,        // mature crest rise, fraction of viewport height
   stillLine: 0.83,        // resting waterline, fraction of viewport height
-  cycleDuration: 12000,   // one full left-to-right crossing, ms
-  cycleJitter: 0.08,      // per-cycle duration variance (breaks the loop feel)
-  backSlopeWidth: 0.30,   // back (left) slope width, fraction of viewport width
-  frontSlopeWidth: 0.085, // front (right) face width - roughly backSlope / 3.5
-  crestSharpness: 2.6,    // pow() on the lip component; higher = narrower tip
-  crestLean: 0.55,        // forward offset of the lip, fraction of front width
-  wakeAmplitude: 0.28,    // first wake ripple height relative to main amplitude
-  wakeDecay: 2.4,         // exponential decay of successive wake ripples
-  wakeLength: 0.16,       // wavelength of the wake train, fraction of width
-  breakStrength: 0.9,     // spray emission probability scale in the mature phase
-  sprayCount: 10,         // max concurrent spray particles
-  orbital: 10,            // max horizontal surface displacement, px
-  depthFalloff: 3.2,      // exp() falloff of motion with depth (deep water stands still)
-  smallScreenAmp: 0.16,   // amplitude fraction below 720px viewports
+  mainAmplitude: 0.045,   // main swell, fraction of viewport height (3.5-5.5%)
+  mainWavelength: 0.55,   // main wavelength, fraction of viewport width (45-65%)
+  crestCrossSeconds: 8.5, // one crest crosses the viewport in 7-10s
+  harmonic: 0.22,         // 2nd-harmonic share of main amplitude (sharper crest, wider trough)
+  secondAmplitude: 0.3,   // secondary wave, share of main amplitude (25-35%)
+  secondWavelength: 0.52, // secondary wavelength, share of main wavelength (45-60%)
+  secondSpeed: 0.82,      // secondary phase speed, share of main speed
+  horizontalShare: 0.28,  // horizontal orbit radius as share of vertical (20-35%)
+  depthFalloff: 3.5,      // exp() decay of orbit with depth - lower half stays still
+  leewardSlope: 0.012,    // surface slope beyond which the face counts as shaded
 }
 
 const CELL = 8
 const FRAME_MS = 1000 / 30
 
-type SprayDrop = { x: number; y: number; vx: number; vy: number; born: number; life: number }
 type SkyCluster = { x: number; y: number; steps: number; drift: number }
 
 const SKY: SkyCluster[] = [
@@ -49,11 +42,6 @@ const SKY: SkyCluster[] = [
   { x: 0.72, y: 0.09, steps: 4, drift: -9 },
   { x: 0.87, y: 0.24, steps: 3, drift: 7 },
 ]
-
-const smoothstep = (a: number, b: number, v: number) => {
-  const t = Math.min(1, Math.max(0, (v - a) / (b - a)))
-  return t * t * (3 - 2 * t)
-}
 
 export function WaveField() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -71,9 +59,6 @@ export function WaveField() {
     let width = 0
     let height = 0
     let dpr = 1
-    let cycleSeed = 0.5
-    let lastPhase = 0
-    const spray: SprayDrop[] = []
 
     const resize = () => {
       dpr = Math.min(window.devicePixelRatio || 1, 1.5)
@@ -94,150 +79,75 @@ export function WaveField() {
       }
     }
 
-    // ---- wave model -------------------------------------------------------
-    // The crossing is one cycle; phase in [0,1). Maturity envelope: forms,
-    // peaks mid-screen, collapses, decays - the shape itself changes, not just
-    // the position (brief: 形成/增高/前倾/坍塌/消退).
-    const crossing = (now: number) => {
-      const cycle = WAVE_CFG.cycleDuration * (1 + (cycleSeed - 0.5) * 2 * WAVE_CFG.cycleJitter)
-      const phase = (now % cycle) / cycle
-      // crest spawns fully offscreen left and leaves offscreen right
-      const cx = (-0.3 + phase * 1.6) * width
-      const maturity = smoothstep(0.12, 0.42, phase) * (1 - smoothstep(0.68, 0.92, phase))
-      return { phase, cx, maturity }
-    }
+    // ---- Gerstner displacement field --------------------------------------
+    // Anchors never move; this returns the offset a particle at (x0, depth)
+    // orbits with at time t, plus the local leeward flag for ink shading.
+    // theta = k*x0 - omega*t: the phase travels rightward, the particle loops.
+    const field = (x0: number, influence: number, t: number) => {
+      const A1 = height * WAVE_CFG.mainAmplitude
+      const L1 = width * WAVE_CFG.mainWavelength
+      const k1 = (Math.PI * 2) / L1
+      const omega1 = (k1 * (width + L1)) / (WAVE_CFG.crestCrossSeconds * 1000) * (width / (width + L1))
+      const theta1 = k1 * x0 - omega1 * t
 
-    const surfaceAt = (x: number, cx: number, maturity: number, now: number) => {
-      const small = width < 720
-      const ampMax = height * (small ? WAVE_CFG.smallScreenAmp : WAVE_CFG.amplitude)
-      const amp = ampMax * (0.3 + 0.7 * maturity)
-      const backW = width * WAVE_CFG.backSlopeWidth * (1 - 0.25 * maturity) // narrows as it matures
-      const frontW = width * WAVE_CFG.frontSlopeWidth
-      const dx = x - cx
+      const A2 = A1 * WAVE_CFG.secondAmplitude
+      const L2 = L1 * WAVE_CFG.secondWavelength
+      const k2 = (Math.PI * 2) / L2
+      const omega2 = omega1 * WAVE_CFG.secondSpeed * (L1 / L2)
+      const theta2 = k2 * x0 - omega2 * t + 1.3
 
-      // asymmetric packet: wide gaussian back, steep front
-      const body = dx <= 0
-        ? Math.exp(-((dx / backW) ** 2))
-        : Math.exp(-((dx / frontW) ** 2))
+      // vertical: main + sharpening harmonic + secondary; capped well under 7%vh
+      const dy =
+        (Math.sin(theta1) + WAVE_CFG.harmonic * Math.sin(2 * theta1 + 0.6)) * A1 +
+        Math.sin(theta2) * A2
 
-      // forward-leaning lip - a narrower component shifted toward travel
-      const lean = frontW * WAVE_CFG.crestLean * maturity
-      const lip = 0.38 * maturity *
-        Math.exp(-(((dx - lean) / (frontW * 0.8)) ** 2)) ** WAVE_CFG.crestSharpness
+      // horizontal: small cos() orbit so surface particles trace ellipses
+      const dx =
+        (Math.cos(theta1) * A1 + Math.cos(theta2) * A2) * WAVE_CFG.horizontalShare
 
-      // damped wake train trailing behind the back slope: shallow trough first,
-      // then 2-3 shrinking ripples (sin starts negative), dying exponentially
-      let wake = 0
-      const wakeStart = -backW * 0.9
-      if (dx < wakeStart) {
-        const wd = (wakeStart - dx) / (width * WAVE_CFG.wakeLength)
-        wake = -Math.sin(wd * Math.PI * 2) * Math.exp(-wd * WAVE_CFG.wakeDecay) *
-          amp * WAVE_CFG.wakeAmplitude * maturity
-      }
+      // leeward (right-falling) face of the main crest -> deep ink near surface
+      const slope = Math.cos(theta1) * A1 * k1 + Math.cos(theta2) * A2 * k2
+      const leeward = slope < -WAVE_CFG.leewardSlope * height
 
-      // faint ambient swell so flat water still breathes, never competes
-      const ambient = Math.sin(x * 0.008 + now * 0.00022) * height * 0.006
-
-      const still = height * WAVE_CFG.stillLine
-      return {
-        y: still - amp * (body + lip) - wake + ambient,
-        elevation: body + lip,
-        frontness: dx > -frontW * 0.4 && dx < frontW * 2.2 ? 1 - Math.abs(dx - frontW * 0.5) / (frontW * 1.8) : 0,
-      }
+      return { dx: dx * influence, dy: -dy * influence, leeward }
     }
 
     // ---- painting ---------------------------------------------------------
-    const draw = (now: number) => {
+    // The anchor grid starts one max-amplitude above the still line (so crests
+    // have room) and runs to the bottom. Row 0 of each column is the surface.
+    const paint = (t: number) => {
       context.clearRect(0, 0, width, height)
       const ink = inks()
-      const { cx, maturity, phase } = crossing(now)
+      const still = height * WAVE_CFG.stillLine
+      const maxAmp = height * WAVE_CFG.mainAmplitude * (1 + WAVE_CFG.harmonic + WAVE_CFG.secondAmplitude)
+      const top = Math.floor((still) / CELL) * CELL
+      const bottomSpan = height - still + maxAmp
 
-      // cycle rollover: reseed the jitter offscreen so no visible jump
-      if (phase < lastPhase) cycleSeed = ((cycleSeed * 9301 + 49297) % 233280) / 233280
-      lastPhase = phase
-
-      // sea - crisp edge, flat two-size checker body, ink-swap shading
       for (let gx = 0; gx <= width; gx += CELL) {
-        const s = surfaceAt(gx, cx, maturity, now)
-        // orbital shear: near-surface dots lean toward travel with the wave,
-        // deep dots stand still - the whole column never slides as one block
-        const shear = WAVE_CFG.orbital * s.elevation * maturity
-        const top = Math.floor(s.y / CELL) * CELL
-        for (let gy = top; gy <= height + CELL; gy += CELL) {
-          const depthNorm = Math.min(1, (gy - s.y) / (height - s.y || 1))
-          if (depthNorm < 0) continue
-          const fall = Math.exp(-depthNorm * WAVE_CFG.depthFalloff)
-          const px = gx + shear * fall
-          const row = Math.round((gy - top) / CELL)
-          // crisp boundary: one small edge row, then the flat woven body -
-          // two fixed sizes on a checker, NO alpha ramp, NO size gradient
+        let row = 0
+        for (let gy = top; gy <= height + CELL; gy += CELL, row++) {
+          // depth from the rest surface; orbit dies out fast - the lower half
+          // of the body never deforms (brief: 水体底部基本稳定)
+          const depthNorm = Math.min(1, (gy - still + maxAmp) / (bottomSpan || 1))
+          const influence = Math.exp(-Math.max(0, depthNorm) * WAVE_CFG.depthFalloff)
+          const f = field(gx, influence, t)
+          // crisp edge row, then the flat two-size checker - no alpha ramp
           const checker = ((gx / CELL + row) & 1) === 0
           const size = row === 0 ? 1.7 : checker ? 2.2 : 2.9
-          // shading swaps ink: deep tone under the lip / along the steep face
-          const shaded = s.frontness > 0.15 && depthNorm < 0.4 && maturity > 0.3
-          context.fillStyle = shaded ? ink.deep : ink.base
+          context.fillStyle = f.leeward && row < 4 ? ink.deep : ink.base
           context.globalAlpha = 0.92
-          context.fillRect(px, gy, size, size)
+          context.fillRect(gx + f.dx, gy + f.dy, size, size)
         }
-      }
-
-      // spray: few, short-lived, shed rightward off the lip only (brief: 坍塌)
-      if (!reduced.matches && maturity > 0.55 && spray.length < WAVE_CFG.sprayCount) {
-        if (Math.random() < WAVE_CFG.breakStrength * 0.35) {
-          const tip = surfaceAt(cx + width * WAVE_CFG.frontSlopeWidth * 0.4, cx, maturity, now)
-          spray.push({
-            x: cx + width * WAVE_CFG.frontSlopeWidth * (0.3 + Math.random() * 0.5),
-            y: tip.y - 4,
-            vx: 0.9 + Math.random() * 0.8,
-            vy: -0.3 + Math.random() * 0.4,
-            born: now,
-            life: 450 + Math.random() * 350,
-          })
-        }
-      }
-      context.fillStyle = ink.base
-      context.globalAlpha = 0.85
-      for (let i = spray.length - 1; i >= 0; i--) {
-        const drop = spray[i]
-        const age = now - drop.born
-        if (age > drop.life) { spray.splice(i, 1); continue }
-        drop.x += drop.vx
-        drop.y += drop.vy
-        drop.vy += 0.06 // falls back into the water
-        context.fillRect(drop.x, drop.y, 1.8, 1.8)
       }
 
       // sky stair-clusters from the reference, drifting slowly
       context.globalAlpha = 0.55
+      context.fillStyle = ink.base
       for (const cluster of SKY) {
-        const ox = cluster.x * width + Math.sin(now * 0.00013 + cluster.x * 9) * cluster.drift
-        const oy = cluster.y * height + Math.cos(now * 0.0001 + cluster.y * 7) * 4
+        const ox = cluster.x * width + Math.sin(t * 0.00013 + cluster.x * 9) * cluster.drift
+        const oy = cluster.y * height + Math.cos(t * 0.0001 + cluster.y * 7) * 4
         for (let sIdx = 0; sIdx < cluster.steps; sIdx++) {
           for (let d = 0; d <= sIdx; d++) context.fillRect(ox + sIdx * 5, oy - d * 4, 1.6, 1.6)
-        }
-      }
-      context.globalAlpha = 1
-    }
-
-    // reduced motion: one static frame, frozen at the mature midpoint
-    const drawStatic = () => {
-      context.clearRect(0, 0, width, height)
-      const saveNow = WAVE_CFG.cycleDuration * 0.5
-      const cx = 0.5 * width
-      const ink = inks()
-      for (let gx = 0; gx <= width; gx += CELL) {
-        const s = surfaceAt(gx, cx, 1, saveNow)
-        const top = Math.floor(s.y / CELL) * CELL
-        for (let gy = top; gy <= height + CELL; gy += CELL) {
-          const depthNorm = Math.min(1, (gy - s.y) / (height - s.y || 1))
-          if (depthNorm < 0) continue
-          const row = Math.round((gy - top) / CELL)
-          const checker = ((gx / CELL + row) & 1) === 0
-          const size = row === 0 ? 1.7 : checker ? 2.2 : 2.9
-          const shaded = s.frontness > 0.15 && depthNorm < 0.4
-          context.fillStyle = shaded ? ink.deep : ink.base
-          context.globalAlpha = 0.92
-          context.fillRect(gx, gy, size, size)
         }
       }
       context.globalAlpha = 1
@@ -247,20 +157,20 @@ export function WaveField() {
       raf = requestAnimationFrame(loop)
       if (now - last < FRAME_MS) return
       last = now
-      draw(now)
+      paint(now)
     }
 
     resize()
-    if (reduced.matches) drawStatic()
+    if (reduced.matches) paint(2600) // one static frame mid-phase
     else raf = requestAnimationFrame(loop)
 
-    const onResize = () => { resize(); if (reduced.matches) drawStatic() }
+    const onResize = () => { resize(); if (reduced.matches) paint(2600) }
     const onVisibility = () => {
       if (reduced.matches) return
       cancelAnimationFrame(raf)
       if (!document.hidden) { last = 0; raf = requestAnimationFrame(loop) }
     }
-    const observer = new MutationObserver(() => { if (reduced.matches) drawStatic() })
+    const observer = new MutationObserver(() => { if (reduced.matches) paint(2600) })
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
     window.addEventListener('resize', onResize)
     document.addEventListener('visibilitychange', onVisibility)
