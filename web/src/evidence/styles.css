@@ -22,7 +22,8 @@
   --wash-raise: rgba(255, 255, 255, .045);
   --wash-sunken: rgba(0, 0, 0, .30);
   --status-critical: #d03b3b;
-  --wave-ink: #ffffff;       /* halftone sea: white particles on the dark theme */
+  --wave-ink: #c9c6be;       /* halftone sea: light grey particles on the dark theme */
+  --wave-ink-deep: #74716b;  /* shaded face - dimmer, i.e. toward the background */
   --panel-glass: rgba(26, 26, 25, .82);
   --panel-glass-strong: rgba(13, 13, 13, .9);
 }
@@ -49,7 +50,8 @@
   --wash-selected: rgba(11, 11, 11, .07);
   --wash-raise: rgba(11, 11, 11, .045);
   --wash-sunken: rgba(11, 11, 11, .05);
-  --wave-ink: #1a1a19;       /* black particles on the light theme */
+  --wave-ink: #4a4741;       /* the reference's warm dark grey particles */
+  --wave-ink-deep: #232119;  /* shaded face - deeper ink on the paper */
   --panel-glass: rgba(247, 243, 234, .82);
   --panel-glass-strong: rgba(242, 237, 228, .92);
 }
