@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchActivityBatch, fetchCapabilities, fetchMemoryDetail, fetchSnapshot, runJudgeProof } from './api'
 import { displayCount, displayRecordRef, eventSummary, initialRetryDelay, rememberEvidenceId, resolveEventSelection } from './evidence-model.mjs'
 import { TideMap } from './TideMap'
+import { WaveField } from './WaveField'
 import type {
   ActivityEvent,
   ActivityKind,
@@ -18,6 +19,16 @@ type ExplainTab = 'overview' | 'receipt' | 'plasticity' | 'decay'
 type VerifyTab = 'trace' | 'system'
 type JudgeState = 'idle' | 'running' | 'complete' | 'failed'
 type WorkspaceView = 'tide' | 'ledger' | 'record' | 'proof'
+type Theme = 'dark' | 'light'
+
+// Theme preference: explicit choice persists; default stays the committed dark
+// look. The stamp lives on <html data-theme> so CSS variables and the wave
+// backdrop (--wave-ink) flip from one place.
+const THEME_KEY = 'tidemark-theme'
+const initialTheme = (): Theme => {
+  try { if (localStorage.getItem(THEME_KEY) === 'light') return 'light' } catch { /* private mode */ }
+  return 'dark'
+}
 
 const STAGES: Array<{ id: StageFilter; label: string; verb: string }> = [
   { id: 'remember', label: 'Remember', verb: 'persist' },
@@ -418,6 +429,12 @@ export function EvidenceApp() {
   const [detail, setDetail] = useState<MemoryDetail | null>(null)
   const [detailState, setDetailState] = useState<LoadState>('idle')
   const [activeView, setActiveView] = useState<WorkspaceView>('tide')
+  const [theme, setTheme] = useState<Theme>(initialTheme)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem(THEME_KEY, theme) } catch { /* private mode */ }
+  }, [theme])
   const [stageFilter, setStageFilter] = useState<StageFilter>('all')
   const [explainTab, setExplainTab] = useState<ExplainTab>('overview')
   const [verifyTab, setVerifyTab] = useState<VerifyTab>('trace')
@@ -621,6 +638,7 @@ export function EvidenceApp() {
   ].filter((item) => item.status === 'live').length
   return (
     <div className="evidence-shell">
+      <WaveField />
       <div className="page-texture" aria-hidden="true" />
       <header className="topbar">
         <div className="brand"><span>TIDEMARK</span><strong>Evidence console</strong></div>
@@ -628,7 +646,17 @@ export function EvidenceApp() {
         <div className="topbar__status">
           <StatusPill state={connected ? 'connected' : snapshotState === 'failed' ? 'failed' : 'degraded'} label={connected ? 'viz connected' : 'data degraded'} />
           <span><b>{snapshot?.total_memories ?? '—'}</b> memories</span>
-          <span><b>{snapshot?.agent_id ?? 'unavailable'}</b> agent</span>
+          <span className="topbar__agent">
+            <b>{snapshot?.agent_id ?? 'unavailable'}</b> agent
+            <button
+              className="theme-toggle"
+              aria-pressed={theme === 'light'}
+              title={theme === 'dark' ? 'Switch to the light sea' : 'Switch to the dark sea'}
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            >
+              {theme === 'dark' ? 'LIGHT' : 'DARK'}
+            </button>
+          </span>
         </div>
       </header>
 

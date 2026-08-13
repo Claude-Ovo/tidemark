@@ -22,6 +22,39 @@
   --wash-raise: rgba(255, 255, 255, .045);
   --wash-sunken: rgba(0, 0, 0, .30);
   --status-critical: #d03b3b;
+  --wave-ink: #ffffff;       /* halftone sea: white particles on the dark theme */
+  --panel-glass: rgba(26, 26, 25, .82);
+  --panel-glass-strong: rgba(13, 13, 13, .9);
+}
+
+/* Light theme (Owner 2026-08-14): the reference's warm paper with black
+   particles. Same greyscale discipline - luminance carries state, never hue.
+   Contrast on the paper surface #f4efe6: ink #0b0b0b 16.9:1, secondary
+   #52514e 7.0:1, quiet #6e6c66 4.6:1. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: #0b0b0b;
+  background: #f2ede4;
+  --abyss: #f2ede4;
+  --slate: #f7f3ea;
+  --slate-soft: #ece7dc;
+  --slate-raised: #fbf8f1;
+  --ivory: #0b0b0b;
+  --muted: #52514e;
+  --quiet: #6e6c66;
+  --grid: #d9d3c6;
+  --baseline: #c6c0b2;
+  --line: rgba(11, 11, 11, .12);
+  --line-strong: rgba(11, 11, 11, .22);
+  --wash-selected: rgba(11, 11, 11, .07);
+  --wash-raise: rgba(11, 11, 11, .045);
+  --wash-sunken: rgba(11, 11, 11, .05);
+  --wave-ink: #1a1a19;       /* black particles on the light theme */
+  --panel-glass: rgba(247, 243, 234, .82);
+  --panel-glass-strong: rgba(242, 237, 228, .92);
+}
+:root[data-theme="light"] .page-texture {
+  background: radial-gradient(120% 80% at 50% 0%, rgba(11, 11, 11, .03), transparent 60%);
 }
 
 * { box-sizing: border-box; }
@@ -51,6 +84,13 @@ code {
   isolation: isolate;
 }
 
+.wave-field {
+  position: fixed;
+  z-index: -3;
+  inset: 0;
+  pointer-events: none;
+}
+
 .page-texture {
   position: fixed;
   z-index: -2;
@@ -67,6 +107,21 @@ code {
   filter: grayscale(1);
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
 }
+
+.topbar__agent { position: relative; }
+.theme-toggle {
+  appearance: none;
+  display: block;
+  margin-top: 3px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--quiet);
+  font: 600 9px/1.4 ui-monospace, "Cascadia Code", monospace;
+  letter-spacing: .14em;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--ivory); border-color: var(--ivory); }
 
 .topbar {
   min-height: 62px;
@@ -251,9 +306,16 @@ code {
 
 .panel {
   min-width: 0;
-  background: var(--slate);
+  /* translucent over the wave backdrop; blur keeps the halftone from ever
+     interfering with figures or hairlines inside the panel */
+  background: var(--panel-glass);
   border: 1px solid var(--line);
   box-shadow: 0 20px 80px rgba(0, 0, 0, .14);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .panel { background: var(--slate); }
 }
 
 .section-heading {
@@ -675,7 +737,9 @@ body.has-tide-dialog { overflow: hidden; }
   align-items: center;
   gap: 18px;
   border: 1px solid var(--line-strong);
-  background: rgba(13, 13, 13, .97);
+  background: var(--panel-glass-strong);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   padding: 9px 12px;
   box-shadow: 0 14px 40px rgba(0, 0, 0, .35);
 }
@@ -689,7 +753,19 @@ body.has-tide-dialog { overflow: hidden; }
 .judge-rail button:disabled:hover { background: transparent; }
 .judge-rail[data-state="failed"] { border-color: var(--status-critical); }
 
-.snapshot-note { margin: 9px 0 0; color: var(--quiet); font: 500 9px/1 ui-monospace, monospace; text-align: right; }
+/* Figures never sit raw on the halftone sea - the note carries its own glass. */
+.snapshot-note {
+  margin: 9px 0 0;
+  margin-left: auto;
+  width: fit-content;
+  padding: 3px 8px;
+  background: var(--panel-glass);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--quiet);
+  font: 500 9px/1 ui-monospace, monospace;
+  text-align: right;
+}
 
 @media (max-width: 1180px) {
   .topbar { grid-template-columns: 1fr 1.5fr; }
@@ -760,7 +836,7 @@ body.has-tide-dialog { overflow: hidden; }
 }
 
 @media (forced-colors: active) {
-  .page-texture { display: none; }
+  .page-texture, .wave-field { display: none; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
