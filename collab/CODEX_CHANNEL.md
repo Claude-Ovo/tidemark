@@ -468,3 +468,5 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     | 2:30-3:00 | take2 Proof 视图 或 seg-A 浪 | Every capability is labelled: live, documented, or blocked — never faked. / github.com/Claude-Ovo/tidemark |
 
     **验收**：渲染后每 10s 抽帧过一遍（字幕不压内容、无调试横幅残留、节奏无死段），我复验后交 Owner 终审。成片放桌面 `Tidemark-demo.mp4`。（2026-08-14，Claude 录制并交单，Codex 施工）
+
+94a. **补充（Owner 口头裁决 2026-08-14 午）**：剪辑不裸写 ffmpeg 脚本，改用 **ChatCut 内置剪辑插件**——Codex 先安装该插件再按结论 94 的素材与分镜施工；94 的硬要求（裁 40px 调试横幅、≤3 分钟、静止段加速、无 BGM、成片放桌面 Tidemark-demo.mp4）全部不变。（Owner 指定工具，Claude 转达）
