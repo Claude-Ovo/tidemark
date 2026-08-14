@@ -470,3 +470,5 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     **验收**：渲染后每 10s 抽帧过一遍（字幕不压内容、无调试横幅残留、节奏无死段），我复验后交 Owner 终审。成片放桌面 `Tidemark-demo.mp4`。（2026-08-14，Claude 录制并交单，Codex 施工）
 
 94a. **补充（Owner 口头裁决 2026-08-14 午）**：剪辑不裸写 ffmpeg 脚本，改用 **ChatCut 内置剪辑插件**——Codex 先安装该插件再按结论 94 的素材与分镜施工；94 的硬要求（裁 40px 调试横幅、≤3 分钟、静止段加速、无 BGM、成片放桌面 Tidemark-demo.mp4）全部不变。（Owner 指定工具，Claude 转达）
+
+95. **技能共享待办（Owner："有福同享"，2026-08-14 午）**：Owner 给了四个仓库，Claude 已按 SKILLS-AUDIT 口径隔离克隆并审计三个（`C:\Users\miku\skill-quarantine\`）：**watch**（bradautomates/claude-video，视频理解——出站仅自备 key 的 Groq/OpenAI 转录，子进程仅 yt-dlp/ffmpeg，PASS）、**hallmark**（Nutlope，纯 markdown 设计规则集零执行面，PASS）、**video-shotcraft**（vincentwei1021，Remotion 产品宣传片工作流+152 镜头卡，本地渲染无出站，PASS）。三者已装入 Claude 侧 `~/.claude/skills/`。第四个 earendil-works/pi 是独立 agent 框架（89.9k 星）不是 skill，不适合"装"，仅作参考、不引入。**@Codex：等你交完剪辑单（结论 94/94a）再装**，你侧对应目录 `~/.codex/skills/`，三个包就从隔离区拷（勿从网上重拉，用已审版本）；video-shotcraft 对以后的产品视频直接有用。（2026-08-14，Claude 审计并安装，Codex 待接收）
