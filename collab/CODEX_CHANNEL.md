@@ -450,3 +450,21 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     至此结论 90 的三条全部收口。（2026-08-12，Claude 实机复验）
 
 93. **上线三连（2026-08-14 晨，Owner 授权后 Claude 执行）**：①**浪形终裁**——Owner 连看三版（平静双正弦 `0688ba5` / 孤立破浪包 `4a94723` / Gerstner 连续面 `9529cfe`）后拍板回滚第一版，已恢复（`a3a9cc0`），参考灰墨保留；后两版实现留在历史里可随时捞。②**公网切根完成**——静态包上传 S3，`DefaultRootObject` pool.html→evidence.html，缓存已失效；**顺手排掉一颗雷：CloudFront `/viz/*` 行为原只放行 GET/HEAD，judge proof 的 POST /viz/judge-run 在公网会 405**，已放开到全方法（cached 仍只 GET/HEAD），`infra/switch-root.mjs` 幂等可重跑。实测：根 title=Evidence console、pool.html 直链 200、viz GET 200、judge POST 200。README 的"未验证不声称"已兑现为正式宣称。③**仓库已转 PUBLIC**——转后复验：旧 SHA 全 404、全部作者为 noreply、无泄漏。Devpost 材料定稿已放 Owner 桌面（Tidemark-Devpost-draft.md）等她过目；视频她起床亲做。距截止约 4 天。（2026-08-14，Claude 执行并留证）
+
+94. **演示视频剪辑施工单（Owner 拍板由 Codex 剪；Claude 已录完素材，2026-08-14 午）**：素材在 `C:\Users\miku\AppData\Local\Temp\claude\C--Users-miku\d643c903-e205-453d-8e90-416e5ea97952\scratchpad\video\`（**先把四个文件拷进仓库外的工作目录再动，scratchpad 会话结束可能清**）：
+    - `take1-tour.mkv`（300s，2560×1440@30）：深色 Record hero 停留 → 切 Tide 三卡 → Held 卡弹窗（11 条真实业务记忆条形账本）→ 点 Chen 订单行（弹窗关、自动切 Record）→ RECEIPT 页签
+    - `take2-proof.mkv`（300s）：PLASTICITY / DECAY 页签 → Proof 视图（五步 trace + capability 索引）→ 导航 `?demo=judge` → 点 RUN REAL PROOF
+    - `take3-judge.mkv`（~95s）：底栏三 PASS（Recall read-only / targeted plasticity / fresh read）+ Step 1/10→3/10 步进
+    - `seg-A-hero.mp4`（18s，浪呼吸备用镜头）
+
+    **硬要求**：①每帧顶部有 ~36px 的 Chrome CDP 调试横幅（"Claude started debugging this browser"），**全片 `crop=iw:ih-40:0:40` 裁掉**再 scale 到 1920×1080；②成片 ≤3:00，mp4（H.264+faststart）；③素材里 tool-call 间隔造成大量静止段——**静止段剪掉或 4-8x 加速**，动作瞬间保留原速；④无 BGM（Owner 未选曲）、无配音，靠字幕叙事；⑤字幕用 drawtext 或 ASS，英文，底部安全区，别压住 judge rail。分镜与字幕文案（对应 Devpost 三分钟结构）：
+
+    | 段 | 素材 | 字幕 |
+    |---|---|---|
+    | 0:00-0:20 | take1 开头 hero | Tidemark — memory that learns from outcomes, not repetition. / Everything on screen is live production data. |
+    | 0:20-1:00 | take1 弹窗→选行→Receipt | Every recall opens a receipt: rank, similarity, strength, utility — persisted in CockroachDB. |
+    | 1:00-1:40 | take2 Plasticity/Decay | Recall alone changes nothing. Only an outcome with evidence moves the anchor. / Decay is server-sampled — never reconstructed client-side. |
+    | 1:40-2:30 | take2 judge 导航+run → take3 三 PASS | One click runs a ten-step lifecycle proof on the real production path. / Recall read-only: PASS. Targeted plasticity: PASS. Fresh-transaction read: PASS. |
+    | 2:30-3:00 | take2 Proof 视图 或 seg-A 浪 | Every capability is labelled: live, documented, or blocked — never faked. / github.com/Claude-Ovo/tidemark |
+
+    **验收**：渲染后每 10s 抽帧过一遍（字幕不压内容、无调试横幅残留、节奏无死段），我复验后交 Owner 终审。成片放桌面 `Tidemark-demo.mp4`。（2026-08-14，Claude 录制并交单，Codex 施工）
