@@ -8,22 +8,23 @@ Design docs: `docs/SPEC.md` (implementation contract, v1.2.6) · `docs/ARCHITECT
 
 ## Live demo
 
-**https://dhgwgra6nycty.cloudfront.net** — the current public Memory Tide Pool, served from a
-private S3 origin through CloudFront. The browser holds **zero credentials**: the read-only `viz`
-key is injected as an origin custom header on the way to API Gateway, and that key cannot reach the
-tool path. The page reads the live `/viz/*` endpoints against production CockroachDB; nothing is
-seeded into the page at build time.
+**https://dhgwgra6nycty.cloudfront.net** — the Evidence console, served from a private S3 origin
+through CloudFront (root switch verified live 2026-08-14: `/` serves the console's title, GET and
+POST both traverse the `/viz/*` behaviour). The browser holds **zero credentials**: the read-only
+`viz` key is injected as an origin custom header on the way to API Gateway, and that key cannot
+reach the tool path. Everything on the page comes from the live `/viz/*` endpoints against
+production CockroachDB; nothing is seeded into the page at build time, and any capability we
+cannot evidence is labelled `documented` / `evidence_pending` / `blocked_external` rather than
+quietly shown as working.
 
-`web/evidence.html` is the built and locally verified submission entry candidate. It reads a real
-tenant end to end: the retention ledger with its fade threshold, the persisted event stream
-(remember / recall receipt / agent action / outcome), per-record evidence (receipt score
-components, plasticity before→after, server-sampled decay curve), and the capability index. The
-ten-step lifecycle proof is behind a read-only gate (`?demo=judge`). The Evidence console is not
-claimed as public until its static bundle has been uploaded and the CloudFront root switch has
-been verified; the current distribution still serves `pool.html` at `/`.
+The console reads a real tenant end to end: the retention ledger with its fade threshold, the
+persisted event stream (remember / recall receipt / agent action / outcome), per-record evidence
+(receipt score components, plasticity before→after, server-sampled decay curve), and the
+capability index. The ten-step lifecycle proof sits behind a read-only gate — open
+**`/?demo=judge`** to unlock the seeded write-path run.
 
-`web/pool.html` remains the directly reachable overview module. Local: `cd web && npx vite`, then
-open `/evidence.html` or `/pool.html`.
+`web/pool.html` — the Memory Tide Pool overview module — stays directly reachable at
+`/pool.html`. Local: `cd web && npx vite`, then open `/evidence.html` or `/pool.html`.
 
 ## Run (development)
 

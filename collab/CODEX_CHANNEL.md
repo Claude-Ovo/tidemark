@@ -448,3 +448,5 @@ Owner 原话三条：**① 直观；② 背景/视觉契合项目名主题（Tid
     **遗留的空白不是 bug，不要再改**：内容不足一屏时中段仍有空白，但那是内容量的自然结果，不是布局错误——侧栏与内容对齐、底部 chrome 贴底之后，读者不会再把它读成"页面没加载完"。Owner 最初的诉求是"太复杂"，我提的是"脱节"，两个都已解决。**再往下调（比如塞内容填空白）会把刚砍掉的复杂度加回来**，除非 Owner 另有裁决，这条到此为止。
 
     至此结论 90 的三条全部收口。（2026-08-12，Claude 实机复验）
+
+93. **上线三连（2026-08-14 晨，Owner 授权后 Claude 执行）**：①**浪形终裁**——Owner 连看三版（平静双正弦 `0688ba5` / 孤立破浪包 `4a94723` / Gerstner 连续面 `9529cfe`）后拍板回滚第一版，已恢复（`a3a9cc0`），参考灰墨保留；后两版实现留在历史里可随时捞。②**公网切根完成**——静态包上传 S3，`DefaultRootObject` pool.html→evidence.html，缓存已失效；**顺手排掉一颗雷：CloudFront `/viz/*` 行为原只放行 GET/HEAD，judge proof 的 POST /viz/judge-run 在公网会 405**，已放开到全方法（cached 仍只 GET/HEAD），`infra/switch-root.mjs` 幂等可重跑。实测：根 title=Evidence console、pool.html 直链 200、viz GET 200、judge POST 200。README 的"未验证不声称"已兑现为正式宣称。③**仓库已转 PUBLIC**——转后复验：旧 SHA 全 404、全部作者为 noreply、无泄漏。Devpost 材料定稿已放 Owner 桌面（Tidemark-Devpost-draft.md）等她过目；视频她起床亲做。距截止约 4 天。（2026-08-14，Claude 执行并留证）
